@@ -1,0 +1,123 @@
+"""
+A dead-simple disk cache backed by SQLite.
+
+Why this exists: every external API either costs money per call
+(The Odds API) or will rate-limit you if you hammer it (MLB Stats API).
+Caching responses for a few minutes means you can refresh the dashboard
+as often as you like without burning credits.
+
+Usage:
+    from app.cache import cached
+
+    data = await cached("odds:mlb:today", ttl=600, loader=fetch_odds)
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from app.config import get_settings
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cache (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
+"""
+
+
+def _connect() -> sqlite3.Connection:
+    settings = get_settings()
+    conn = sqlite3.connect(settings.db_path, timeout=10)
+    conn.executescript(_SCHEMA)
+    return conn
+
+
+def get(key: str) -> Any | None:
+    """Return the cached value, or None if missing/expired."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value, expires_at FROM cache WHERE key = ?", (key,)
+        ).fetchone()
+    if row is None:
+        return None
+    value, expires_at = row
+    if expires_at < time.time():
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def put(key: str, value: Any, ttl: int) -> None:
+    """Store a value for `ttl` seconds."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO cache (key, value, expires_at) VALUES (?, ?, ?)",
+            (key, json.dumps(value, default=str), time.time() + ttl),
+        )
+
+
+def purge_expired() -> int:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM cache WHERE expires_at < ?", (time.time(),))
+        return cur.rowcount
+
+
+def clear(prefix: str | None = None) -> int:
+    """Wipe the cache, or just the keys starting with `prefix`."""
+    with _connect() as conn:
+        if prefix:
+            cur = conn.execute("DELETE FROM cache WHERE key LIKE ?", (f"{prefix}%",))
+        else:
+            cur = conn.execute("DELETE FROM cache")
+        return cur.rowcount
+
+
+async def cached(
+    key: str,
+    ttl: int,
+    loader: Callable[[], Awaitable[Any]],
+    *,
+    force: bool = False,
+) -> Any:
+    """
+    Return `key` from cache if fresh, otherwise call `loader()` and store it.
+
+    If the loader raises but we have a *stale* copy on disk, we serve the
+    stale copy rather than failing the whole dashboard. Better to show
+    slightly old numbers than a broken page mid-slate.
+    """
+    if not force:
+        hit = get(key)
+        if hit is not None:
+            return hit
+
+    try:
+        value = await loader()
+    except Exception:
+        stale = _get_ignoring_expiry(key)
+        if stale is not None:
+            return stale
+        raise
+
+    put(key, value, ttl)
+    return value
+
+
+def _get_ignoring_expiry(key: str) -> Any | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM cache WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row[0])
+    except json.JSONDecodeError:
+        return None

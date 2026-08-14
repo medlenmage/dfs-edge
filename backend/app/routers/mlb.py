@@ -1,0 +1,136 @@
+"""HTTP routes for MLB."""
+
+from __future__ import annotations
+
+from datetime import date as date_cls
+from typing import Any
+
+from fastapi import APIRouter, Body, HTTPException, Query
+
+from app.services import analysis, mlb_slate
+
+router = APIRouter(prefix="/api/mlb", tags=["mlb"])
+
+
+@router.get("/slate")
+async def get_slate(
+    date: str | None = Query(None, description="YYYY-MM-DD, defaults to today"),
+    refresh: bool = Query(False, description="Bypass the cache"),
+    hitters: bool = Query(True, description="Include per-hitter matchup scores"),
+) -> dict[str, Any]:
+    """
+    The full daily slate: games, environment, pitchers, and hitter edges.
+
+    This is the one endpoint the dashboard needs.
+    """
+    day = date or date_cls.today().isoformat()
+    try:
+        return await mlb_slate.build_slate(
+            day, force_refresh=refresh, include_hitters=hitters
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/games")
+async def get_games(
+    date: str | None = Query(None),
+    refresh: bool = Query(False),
+) -> dict[str, Any]:
+    """Lightweight version: games and environment, no hitter scoring. Fast."""
+    day = date or date_cls.today().isoformat()
+    return await mlb_slate.build_slate(day, force_refresh=refresh, include_hitters=False)
+
+
+@router.get("/hitters")
+async def get_top_hitters(
+    date: str | None = Query(None),
+    limit: int = Query(40, ge=1, le=300),
+    min_score: float = Query(0, ge=0, le=100),
+) -> dict[str, Any]:
+    """Every hitter on the slate, flattened and ranked by edge score."""
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+
+    rows = []
+    for game in slate.get("games") or []:
+        for side in ("home", "away"):
+            team = game[side]
+            opp = game["away" if side == "home" else "home"]
+            for h in team.get("hitters") or []:
+                if h["edge"]["score"] < min_score:
+                    continue
+                rows.append(
+                    {
+                        **h,
+                        "team": team.get("abbrev"),
+                        "opponent": opp.get("abbrev"),
+                        "is_home": side == "home",
+                        "venue": game["venue"]["name"],
+                        "game_time_utc": game.get("game_time_utc"),
+                        "implied_runs": team.get("implied_runs"),
+                        "opposing_pitcher": (opp.get("probable_pitcher") or {}).get("name"),
+                    }
+                )
+
+    rows.sort(key=lambda r: r["edge"]["score"], reverse=True)
+    return {"date": slate.get("date"), "count": len(rows), "hitters": rows[:limit]}
+
+
+@router.get("/stacks")
+async def get_stacks(date: str | None = Query(None)) -> dict[str, Any]:
+    """Teams ranked by how attractive they are to stack."""
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+
+    stacks = []
+    for game in slate.get("games") or []:
+        for side in ("home", "away"):
+            team = game[side]
+            opp = game["away" if side == "home" else "home"]
+            if team.get("stack_score") is None:
+                continue
+            stacks.append(
+                {
+                    "team": team.get("name"),
+                    "abbrev": team.get("abbrev"),
+                    "opponent": opp.get("abbrev"),
+                    "is_home": side == "home",
+                    "stack_score": team.get("stack_score"),
+                    "implied_runs": team.get("implied_runs"),
+                    "lineup_confirmed": team.get("lineup_confirmed"),
+                    "venue": game["venue"]["name"],
+                    "park_hr_factor": game["venue"]["park_factors"]["hr"],
+                    "opposing_pitcher": (opp.get("probable_pitcher") or {}).get("name"),
+                    "opposing_pitcher_throws": (opp.get("probable_pitcher") or {}).get("throws"),
+                    "top_bats": [
+                        {"name": h["name"], "score": h["edge"]["score"]}
+                        for h in (team.get("hitters") or [])[:5]
+                    ],
+                }
+            )
+
+    stacks.sort(key=lambda s: s["stack_score"], reverse=True)
+    return {"date": slate.get("date"), "stacks": stacks}
+
+
+@router.get("/analysis")
+async def get_analysis(
+    date: str | None = Query(None),
+    refresh: bool = Query(False),
+) -> dict[str, Any]:
+    """Claude's written read on the slate."""
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+    return await analysis.analyse_slate(slate, force=refresh)
+
+
+@router.post("/ask")
+async def ask(
+    question: str = Body(..., embed=True),
+    date: str | None = Body(None, embed=True),
+) -> dict[str, Any]:
+    """Ask Claude a follow-up about today's slate."""
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+    return await analysis.ask_about_slate(slate, question)
