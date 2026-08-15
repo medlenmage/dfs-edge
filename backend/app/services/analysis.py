@@ -213,6 +213,7 @@ async def _call_claude(compact: dict[str, Any], question: str | None) -> dict[st
     message = await client.messages.create(
         model=settings.anthropic_model,
         max_tokens=4000,
+        thinking={"type": "disabled"},
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -249,6 +250,7 @@ async def ask_about_slate(slate: dict[str, Any], question: str) -> dict[str, Any
         message = await client.messages.create(
             model=settings.anthropic_model,
             max_tokens=2000,
+            thinking={"type": "disabled"},
             system=SYSTEM_PROMPT,
             messages=[
                 {

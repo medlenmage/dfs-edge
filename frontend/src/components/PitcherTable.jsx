@@ -5,6 +5,7 @@ const DRIVER_LABELS = {
   opp_lineup: 'the lineup he’s facing',
   strikeout_potential: 'strikeout upside',
   team_runs_against: 'the Vegas total against him',
+  contact_quality_allowed: 'contact quality allowed',
   own_quality: 'his season ERA',
   park: 'the ballpark',
   weather: 'weather',

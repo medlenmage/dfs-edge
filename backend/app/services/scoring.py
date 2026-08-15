@@ -25,13 +25,14 @@ from typing import Any
 # Weights -- these must sum to 1.0
 # --------------------------------------------------------------------------
 WEIGHTS = {
-    "platoon": 0.26,      # how the hitter performs vs this pitcher's hand
-    "pitcher": 0.24,      # how vulnerable this pitcher is to this hand
-    "team_total": 0.20,   # Vegas implied runs for his team
-    "park": 0.12,         # ballpark HR factor for his handedness
-    "weather": 0.08,      # temperature + wind
-    "form": 0.06,         # last 15 games vs season baseline
-    "home_road": 0.04,    # his own home/road split
+    "platoon": 0.21,          # how the hitter performs vs this pitcher's hand
+    "pitcher": 0.19,          # how vulnerable this pitcher is to this hand
+    "team_total": 0.20,       # Vegas implied runs for his team
+    "contact_quality": 0.15,  # Statcast barrel/hard-hit/xwOBA vs league average
+    "park": 0.12,             # ballpark HR factor for his handedness
+    "weather": 0.08,          # temperature + wind
+    "form": 0.03,             # last 15 games vs season baseline
+    "home_road": 0.02,        # his own home/road split
 }
 
 # Baselines used when a component is missing entirely.
@@ -222,6 +223,50 @@ def home_road_component(
     }
 
 
+def contact_quality_component(
+    profile: dict[str, Any] | None,
+    league_avg_barrel: float | None,
+    league_avg_hard_hit: float | None,
+    league_avg_xwoba: float | None,
+) -> dict[str, Any]:
+    """
+    Statcast's read on contact quality: barrel rate, hard-hit rate and
+    expected wOBA, each vs the league average among qualified hitters.
+
+    OPS tells you what happened. These tell you how well the ball was
+    actually struck, independent of whether it found a fielder -- and
+    they stabilise in far fewer plate appearances than OPS does. No
+    sample-size shrink here; Savant's own leaderboard already filters to
+    a minimum PA (see `clients/savant.py`).
+    """
+    if not profile:
+        return {"value": NEUTRAL, "detail": "no Statcast data"}
+
+    ratios = []
+    if profile.get("barrel_pct") is not None and league_avg_barrel:
+        ratios.append(profile["barrel_pct"] / league_avg_barrel)
+    if profile.get("hard_hit_pct") is not None and league_avg_hard_hit:
+        ratios.append(profile["hard_hit_pct"] / league_avg_hard_hit)
+    if profile.get("xwoba") is not None and league_avg_xwoba:
+        ratios.append(profile["xwoba"] / league_avg_xwoba)
+
+    if not ratios:
+        return {"value": NEUTRAL, "detail": "no Statcast data"}
+
+    value = round(max(0.6, min(1.4, sum(ratios) / len(ratios))), 3)
+    return {
+        "value": value,
+        "barrel_pct": profile.get("barrel_pct"),
+        "hard_hit_pct": profile.get("hard_hit_pct"),
+        "xwoba": profile.get("xwoba"),
+        "detail": (
+            f"{profile.get('barrel_pct')}% barrels, "
+            f"{profile.get('hard_hit_pct')}% hard-hit, "
+            f"{profile.get('xwoba')} xwOBA"
+        ),
+    }
+
+
 # --------------------------------------------------------------------------
 # Pitcher components -- same 1.00-centred multiplier convention as above,
 # reusing the hitter components wherever the underlying signal is
@@ -230,12 +275,13 @@ def home_road_component(
 # him.
 # --------------------------------------------------------------------------
 PITCHER_WEIGHTS = {
-    "opp_lineup": 0.24,           # strength of the lineup he's facing, vs him specifically
-    "strikeout_potential": 0.20,  # his K stuff + how whiff-prone the lineup is
-    "team_runs_against": 0.20,    # Vegas implied total for the team he's facing
-    "own_quality": 0.14,          # his season ERA vs league average
-    "park": 0.12,                 # ballpark run/HR suppression
-    "weather": 0.10,               # temperature + wind, suppression side
+    "opp_lineup": 0.20,               # strength of the lineup he's facing, vs him specifically
+    "strikeout_potential": 0.17,      # his K stuff + how whiff-prone the lineup is
+    "team_runs_against": 0.17,        # Vegas implied total for the team he's facing
+    "contact_quality_allowed": 0.14,  # Statcast barrel/hard-hit/xwOBA allowed
+    "own_quality": 0.12,              # his season ERA vs league average
+    "park": 0.11,                     # ballpark run/HR suppression
+    "weather": 0.09,                  # temperature + wind, suppression side
 }
 
 
@@ -331,6 +377,46 @@ def own_quality_component(
 
     value = round(max(0.6, min(1.4, league_avg_era / era)), 3)
     return {"value": value, "era": era, "detail": f"{era} ERA"}
+
+
+def contact_quality_allowed_component(
+    profile: dict[str, Any] | None,
+    league_avg_barrel: float | None,
+    league_avg_hard_hit: float | None,
+    league_avg_xwoba: float | None,
+) -> dict[str, Any]:
+    """
+    Same Statcast blend as the hitter's `contact_quality_component`, but
+    for what this pitcher ALLOWS -- and inverted, since a pitcher who
+    gets weak contact is a good matchup, not a bad one.
+    """
+    if not profile:
+        return {"value": NEUTRAL, "detail": "no Statcast data"}
+
+    ratios = []
+    if profile.get("barrel_pct") is not None and league_avg_barrel:
+        ratios.append(profile["barrel_pct"] / league_avg_barrel)
+    if profile.get("hard_hit_pct") is not None and league_avg_hard_hit:
+        ratios.append(profile["hard_hit_pct"] / league_avg_hard_hit)
+    if profile.get("xwoba") is not None and league_avg_xwoba:
+        ratios.append(profile["xwoba"] / league_avg_xwoba)
+
+    if not ratios:
+        return {"value": NEUTRAL, "detail": "no Statcast data"}
+
+    raw = sum(ratios) / len(ratios)
+    value = invert_for_pitcher(raw)
+    return {
+        "value": value,
+        "barrel_pct": profile.get("barrel_pct"),
+        "hard_hit_pct": profile.get("hard_hit_pct"),
+        "xwoba": profile.get("xwoba"),
+        "detail": (
+            f"allows {profile.get('barrel_pct')}% barrels, "
+            f"{profile.get('hard_hit_pct')}% hard-hit, "
+            f"{profile.get('xwoba')} xwOBA"
+        ),
+    }
 
 
 # --------------------------------------------------------------------------

@@ -1,6 +1,16 @@
 import { ScoreMeter } from './ScoreMeter'
 import { localTime } from '../format'
 
+/** Average a stat across a team's top 5 bats -- same set stack_score uses. */
+function avgOf(hitters, field) {
+  const values = hitters
+    .slice(0, 5)
+    .map((h) => h.edge?.components?.contact_quality?.[field])
+    .filter((v) => v != null)
+  if (!values.length) return null
+  return values.reduce((a, b) => a + b, 0) / values.length
+}
+
 /**
  * Teams ranked by how attractive they are to stack.
  *
@@ -24,6 +34,8 @@ export function StackTable({ slate }) {
         startTime: localTime(g.game_time_utc),
         score: t.stack_score,
         impliedRuns: t.implied_runs,
+        avgXwoba: avgOf(t.hitters || [], 'xwoba'),
+        avgBarrel: avgOf(t.hitters || [], 'barrel_pct'),
         confirmed: t.lineup_confirmed,
         venue: g.venue.name,
         parkHr: g.venue.park_factors.hr,
@@ -51,6 +63,7 @@ export function StackTable({ slate }) {
             <th>Start</th>
             <th>Stack score</th>
             <th className="num">Implied runs</th>
+            <th className="num">Contact quality</th>
             <th>Opposing starter</th>
             <th>Park / conditions</th>
             <th>Top bats</th>
@@ -78,6 +91,12 @@ export function StackTable({ slate }) {
               <td className="num">
                 {r.impliedRuns != null ? r.impliedRuns.toFixed(1) : '—'}
               </td>
+              <td className="num">
+                {r.avgXwoba != null ? r.avgXwoba.toFixed(3) : '—'}
+                {r.avgBarrel != null && (
+                  <div className="sub-line">{r.avgBarrel.toFixed(1)}% barrels</div>
+                )}
+              </td>
               <td>
                 <div>{r.pitcher || <span className="dim">TBD</span>}</div>
                 <div className="sub-line">
@@ -95,7 +114,12 @@ export function StackTable({ slate }) {
               </td>
               <td>
                 <div className="sub-line">
-                  {r.topBats.map((b) => `${b.name} (${Math.round(b.edge.score)})`).join(', ') || '—'}
+                  {r.topBats
+                    .map((b) => {
+                      const xwoba = b.edge?.components?.contact_quality?.xwoba
+                      return `${b.name} (${Math.round(b.edge.score)}${xwoba != null ? `, ${xwoba.toFixed(3).slice(1)}` : ''})`
+                    })
+                    .join(', ') || '—'}
                 </div>
               </td>
             </tr>
