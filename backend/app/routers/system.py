@@ -27,6 +27,8 @@ async def health() -> dict[str, Any]:
         "features": {
             "mlb_data": True,          # free, always available
             "weather": True,           # free, always available
+            "injuries": True,          # free, always available (MLB roster status)
+            "pitcher_edge": True,      # free, always available
             "betting_lines": settings.has_odds,
             "ai_analysis": settings.has_claude,
             "player_props": settings.has_odds and settings.odds_fetch_props,
@@ -39,6 +41,7 @@ async def health() -> dict[str, Any]:
                 "stats": settings.ttl_stats,
                 "odds": settings.ttl_odds,
                 "weather": settings.ttl_weather,
+                "injuries": settings.ttl_injuries,
             },
         },
         "odds_api_credits": odds.get_usage(),

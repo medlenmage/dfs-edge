@@ -114,6 +114,57 @@ async def get_stacks(date: str | None = Query(None)) -> dict[str, Any]:
     return {"date": slate.get("date"), "stacks": stacks}
 
 
+@router.get("/pitchers")
+async def get_top_pitchers(date: str | None = Query(None)) -> dict[str, Any]:
+    """Today's probable starters, ranked by matchup edge."""
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+
+    rows = []
+    for game in slate.get("games") or []:
+        for side in ("home", "away"):
+            team = game[side]
+            opp = game["away" if side == "home" else "home"]
+            pitcher = team.get("probable_pitcher")
+            if not pitcher or not pitcher.get("edge"):
+                continue
+            rows.append(
+                {
+                    **pitcher,
+                    "team": team.get("abbrev"),
+                    "opponent": opp.get("abbrev"),
+                    "is_home": side == "home",
+                    "venue": game["venue"]["name"],
+                    "game_time_utc": game.get("game_time_utc"),
+                    "implied_runs_against": opp.get("implied_runs"),
+                }
+            )
+
+    rows.sort(key=lambda r: r["edge"]["score"], reverse=True)
+    return {"date": slate.get("date"), "pitchers": rows}
+
+
+@router.get("/injuries")
+async def get_injuries(date: str | None = Query(None)) -> dict[str, Any]:
+    """Every player currently off the active roster, by team."""
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+
+    rows = []
+    for game in slate.get("games") or []:
+        for side in ("home", "away"):
+            team = game[side]
+            for player in team.get("injuries") or []:
+                rows.append(
+                    {
+                        **player,
+                        "team": team.get("abbrev"),
+                    }
+                )
+
+    return {"date": slate.get("date"), "injuries": rows}
+
+
 @router.get("/analysis")
 async def get_analysis(
     date: str | None = Query(None),

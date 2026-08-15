@@ -1,16 +1,5 @@
 import { ScoreMeter } from './ScoreMeter'
-
-function localTime(iso) {
-  if (!iso) return ''
-  try {
-    return new Date(iso).toLocaleTimeString([], {
-      hour: 'numeric',
-      minute: '2-digit',
-    })
-  } catch {
-    return ''
-  }
-}
+import { localTime } from '../format'
 
 function TeamRow({ team, opponent, isHome }) {
   const p = opponent.probable_pitcher
@@ -27,6 +16,13 @@ function TeamRow({ team, opponent, isHome }) {
           {p?.throws ? ` (${p.throws}HP)` : ''}
           {p?.season?.era != null ? ` · ${p.season.era} ERA` : ''}
         </div>
+        {team.injuries?.length > 0 && (
+          <div className="sub-line">
+            <span className="badge risk">{team.injuries.length} on IL</span>{' '}
+            {team.injuries.slice(0, 3).map((i) => i.name).join(', ')}
+            {team.injuries.length > 3 ? `, +${team.injuries.length - 3} more` : ''}
+          </div>
+        )}
       </div>
       <div className="runs">
         {team.implied_runs != null ? `${team.implied_runs.toFixed(1)} R` : '—'}

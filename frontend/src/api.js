@@ -36,6 +36,10 @@ export const api = {
   hitters: (date, { limit = 60, minScore = 0 } = {}) =>
     request(`/api/mlb/hitters?date=${date}&limit=${limit}&min_score=${minScore}`),
 
+  pitchers: (date) => request(`/api/mlb/pitchers?date=${date}`),
+
+  injuries: (date) => request(`/api/mlb/injuries?date=${date}`),
+
   analysis: (date, { refresh = false } = {}) =>
     request(`/api/mlb/analysis?date=${date}${refresh ? '&refresh=true' : ''}`),
 

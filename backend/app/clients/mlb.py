@@ -154,6 +154,55 @@ async def get_active_roster(team_id: int, season: int) -> list[int]:
     ]
 
 
+
+# Roster status codes on the injured list (the Stats API prefixes every IL
+# tier with "D" -- D7, D10, D15, D60). Everything else that isn't "A"ctive
+# is a roster move (optioned to the minors, restricted list, suspended,
+# bereavement/paternity), not an injury, so it's excluded.
+_IL_STATUS_PREFIX = "D"
+
+
+async def get_team_injuries(team_id: int, season: int) -> list[dict[str, Any]]:
+    """
+    Players on this team's 40-man roster currently on the injured list.
+
+    This is just a roster-status flag (which IL tier) -- no body part or
+    expected return date, since the Stats API doesn't expose that. Good
+    enough to warn "this guy might not play."
+    """
+    settings = get_settings()
+
+    async def _load() -> Any:
+        return await get_json(
+            f"{BASE}/teams/{team_id}/roster",
+            params={"rosterType": "40Man", "season": season},
+            source="MLB Stats API",
+        )
+
+    payload = await cached(
+        f"mlb:injuries:{team_id}:{season}", settings.ttl_injuries, _load
+    )
+    out: list[dict[str, Any]] = []
+    for entry in payload.get("roster") or []:
+        status = entry.get("status") or {}
+        code = status.get("code") or ""
+        if not code.startswith(_IL_STATUS_PREFIX):
+            continue
+        person = entry.get("person") or {}
+        if not person.get("id"):
+            continue
+        out.append(
+            {
+                "id": person.get("id"),
+                "name": person.get("fullName"),
+                "position": (entry.get("position") or {}).get("abbreviation"),
+                "status_code": code,
+                "status_description": status.get("description"),
+            }
+        )
+    return out
+
+
 # --------------------------------------------------------------------------
 # League-wide splits (the efficient bit)
 # --------------------------------------------------------------------------

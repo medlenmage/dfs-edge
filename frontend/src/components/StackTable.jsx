@@ -1,4 +1,5 @@
 import { ScoreMeter } from './ScoreMeter'
+import { localTime } from '../format'
 
 /**
  * Teams ranked by how attractive they are to stack.
@@ -20,6 +21,7 @@ export function StackTable({ slate }) {
         fullName: t.name,
         isHome: side === 'home',
         opponent: opp.abbrev,
+        startTime: localTime(g.game_time_utc),
         score: t.stack_score,
         impliedRuns: t.implied_runs,
         confirmed: t.lineup_confirmed,
@@ -46,6 +48,7 @@ export function StackTable({ slate }) {
         <thead>
           <tr>
             <th>Team</th>
+            <th>Start</th>
             <th>Stack score</th>
             <th className="num">Implied runs</th>
             <th>Opposing starter</th>
@@ -68,6 +71,7 @@ export function StackTable({ slate }) {
                   )}
                 </div>
               </td>
+              <td className="sub-line">{r.startTime || '—'}</td>
               <td style={{ minWidth: 120 }}>
                 <ScoreMeter score={r.score} />
               </td>
