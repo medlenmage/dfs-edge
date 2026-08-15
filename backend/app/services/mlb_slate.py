@@ -119,6 +119,9 @@ async def build_slate(
         "hitter_ops_vr": scoring.league_average(data["hit_vr"], "ops", 80, "pa"),
         "pitcher_ops_vl": scoring.league_average(data["pit_vl"], "ops_against", 50, "bf"),
         "pitcher_ops_vr": scoring.league_average(data["pit_vr"], "ops_against", 50, "bf"),
+        "pitcher_era": scoring.league_average(data["pit_season"], "era", 20, "ip"),
+        "pitcher_k9": scoring.league_average(data["pit_season"], "k_per_9", 20, "ip"),
+        "hitter_k_pct": scoring.league_average(data["hit_season"], "k_pct", 80, "pa"),
     }
 
     built = await asyncio.gather(
@@ -250,7 +253,7 @@ async def _build_game(
     }
     lineups = await mlb.get_lineups(game_pk) if game_pk else {"home": [], "away": []}
 
-    home_hitters, away_hitters = await asyncio.gather(
+    home_hitters, away_hitters, home_injuries, away_injuries = await asyncio.gather(
         _team_hitters(
             home_t.get("id"), season, data, baselines, env,
             opposing_pitcher=away_pitcher, is_home=True,
@@ -263,15 +266,33 @@ async def _build_game(
             implied_runs=(line or {}).get("away_implied_runs"),
             confirmed=lineups.get("away") or [],
         ),
+        mlb.get_team_injuries(home_t.get("id"), season),
+        mlb.get_team_injuries(away_t.get("id"), season),
     )
     result["home"]["hitters"] = home_hitters
     result["away"]["hitters"] = away_hitters
     result["home"]["lineup_confirmed"] = bool(lineups.get("home"))
     result["away"]["lineup_confirmed"] = bool(lineups.get("away"))
+    result["home"]["injuries"] = home_injuries
+    result["away"]["injuries"] = away_injuries
 
     # Team-level stack score = average of the top 5 hitters' scores.
     result["home"]["stack_score"] = _stack_score(home_hitters)
     result["away"]["stack_score"] = _stack_score(away_hitters)
+
+    # Pitcher edge = the mirror image of the hitter model: the home
+    # pitcher faces the AWAY lineup and is trying to hold down the AWAY
+    # team's implied total, and vice versa.
+    home_edge = _pitcher_edge(
+        home_pitcher, away_hitters, result["away"]["implied_runs"], env, baselines
+    )
+    away_edge = _pitcher_edge(
+        away_pitcher, home_hitters, result["home"]["implied_runs"], env, baselines
+    )
+    if home_edge:
+        result["home"]["probable_pitcher"]["edge"] = home_edge
+    if away_edge:
+        result["away"]["probable_pitcher"]["edge"] = away_edge
 
     return result
 
@@ -289,6 +310,53 @@ def _stack_score(hitters: list[dict[str, Any]]) -> float | None:
     if not scores:
         return None
     return round(sum(scores) / len(scores), 1)
+
+
+def _pitcher_edge(
+    pitcher_card: dict[str, Any] | None,
+    facing_hitters: list[dict[str, Any]],
+    implied_runs_against: float | None,
+    env: dict[str, Any],
+    baselines: dict[str, Any],
+) -> dict[str, Any] | None:
+    """
+    A pitcher's matchup score -- the same component/weight machinery as
+    the hitter model, run in reverse: the batting environment (park,
+    weather, opponent's implied total) is inverted around 1.00, and the
+    opposing lineup's own matchup strength against this exact pitcher
+    (already computed by `_team_hitters`) is reused rather than refetched.
+    """
+    if not pitcher_card:
+        return None
+
+    park = env["park"]
+
+    runs_against = scoring.team_total_component(implied_runs_against)
+    runs_against = {**runs_against, "value": scoring.invert_for_pitcher(runs_against["value"])}
+
+    park_comp = scoring.park_component(park["hr"], park["runs"])
+    park_comp = {**park_comp, "value": scoring.invert_for_pitcher(park_comp["value"])}
+
+    weather_comp = scoring.weather_component(env["temp_fx"], env["wind_fx"], env["roof_closed"])
+    weather_comp = {**weather_comp, "value": scoring.invert_for_pitcher(weather_comp["value"])}
+
+    components = {
+        "opp_lineup": scoring.opp_lineup_component(facing_hitters),
+        "strikeout_potential": scoring.strikeout_potential_component(
+            pitcher_card.get("season"),
+            baselines.get("pitcher_k9"),
+            facing_hitters,
+            baselines.get("hitter_k_pct"),
+        ),
+        "team_runs_against": runs_against,
+        "own_quality": scoring.own_quality_component(
+            pitcher_card.get("season"), baselines.get("pitcher_era")
+        ),
+        "park": park_comp,
+        "weather": weather_comp,
+    }
+    edge = scoring.combine(components, scoring.PITCHER_WEIGHTS)
+    return {**edge, "components": components}
 
 
 def _pitcher_card(

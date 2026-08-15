@@ -223,6 +223,117 @@ def home_road_component(
 
 
 # --------------------------------------------------------------------------
+# Pitcher components -- same 1.00-centred multiplier convention as above,
+# reusing the hitter components wherever the underlying signal is
+# identical (park, weather, opponent's implied total) and just flipping
+# the sign, since what's good for a hitter is bad for the pitcher facing
+# him.
+# --------------------------------------------------------------------------
+PITCHER_WEIGHTS = {
+    "opp_lineup": 0.24,           # strength of the lineup he's facing, vs him specifically
+    "strikeout_potential": 0.20,  # his K stuff + how whiff-prone the lineup is
+    "team_runs_against": 0.20,    # Vegas implied total for the team he's facing
+    "own_quality": 0.14,          # his season ERA vs league average
+    "park": 0.12,                 # ballpark run/HR suppression
+    "weather": 0.10,               # temperature + wind, suppression side
+}
+
+
+def invert_for_pitcher(value: float, cap: float = 0.4) -> float:
+    """
+    Flip a hitter-favouring multiplier onto the pitcher's side of 1.00.
+
+    A hitter component of 1.20 (20% above average, good for the hitter)
+    becomes 0.80 for the pitcher facing him, and vice versa.
+    """
+    return round(max(1 - cap, min(1 + cap, 2 - value)), 3)
+
+
+def opp_lineup_component(opposing_hitters: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """
+    How tough is the lineup this pitcher is facing?
+
+    Reuses the opposing hitters' own composite scores (already computed
+    against this exact pitcher by the hitter model) rather than
+    recomputing anything -- their top five bats' average matchup
+    strength, inverted.
+    """
+    if not opposing_hitters:
+        return {"value": NEUTRAL, "detail": "no opposing lineup data"}
+
+    top = sorted((h["edge"]["composite"] for h in opposing_hitters), reverse=True)[:5]
+    if not top:
+        return {"value": NEUTRAL, "detail": "no opposing lineup data"}
+
+    avg = sum(top) / len(top)
+    value = invert_for_pitcher(avg)
+    return {
+        "value": value,
+        "opp_avg_composite": round(avg, 3),
+        "detail": f"opposing top bats average {avg:.2f}x vs this pitcher",
+    }
+
+
+def strikeout_potential_component(
+    season_stat: dict[str, Any] | None,
+    league_avg_k9: float | None,
+    opposing_hitters: list[dict[str, Any]] | None,
+    league_avg_hitter_k_pct: float | None,
+) -> dict[str, Any]:
+    """
+    Strikeout upside: his own swing-and-miss stuff, blended with how
+    strikeout-prone the lineup he's facing is.
+
+    A power arm against a whiff-prone lineup should score well here even
+    on a night his ERA is nothing special -- that's the point of
+    splitting this out from `own_quality` instead of burying it in ERA.
+    """
+    own_k9 = (season_stat or {}).get("k_per_9")
+    pitcher_factor = (
+        max(0.6, min(1.4, own_k9 / league_avg_k9))
+        if own_k9 and league_avg_k9
+        else NEUTRAL
+    )
+
+    opp_k_pcts = [
+        h["season"]["k_pct"]
+        for h in (opposing_hitters or [])
+        if (h.get("season") or {}).get("k_pct") is not None
+    ]
+    if opp_k_pcts and league_avg_hitter_k_pct:
+        opp_avg_k_pct = sum(opp_k_pcts) / len(opp_k_pcts)
+        opp_factor = max(0.6, min(1.4, opp_avg_k_pct / league_avg_hitter_k_pct))
+    else:
+        opp_avg_k_pct = None
+        opp_factor = NEUTRAL
+
+    value = round(max(0.6, min(1.4, 0.55 * pitcher_factor + 0.45 * opp_factor)), 3)
+    bits = []
+    if own_k9:
+        bits.append(f"{own_k9} K/9")
+    if opp_avg_k_pct is not None:
+        bits.append(f"opponent strikes out {opp_avg_k_pct:.1%} of PA")
+    return {
+        "value": value,
+        "own_k_per_9": own_k9,
+        "opp_avg_k_pct": round(opp_avg_k_pct, 4) if opp_avg_k_pct is not None else None,
+        "detail": ", ".join(bits) or "no strikeout data",
+    }
+
+
+def own_quality_component(
+    season_stat: dict[str, Any] | None, league_avg_era: float | None
+) -> dict[str, Any]:
+    """Pure run-prevention: his season ERA vs the league-average starter."""
+    era = (season_stat or {}).get("era")
+    if not era or not league_avg_era:
+        return {"value": NEUTRAL, "detail": "no season ERA"}
+
+    value = round(max(0.6, min(1.4, league_avg_era / era)), 3)
+    return {"value": value, "era": era, "detail": f"{era} ERA"}
+
+
+# --------------------------------------------------------------------------
 # Putting it together
 # --------------------------------------------------------------------------
 
@@ -231,7 +342,10 @@ def home_road_component(
 SCORE_SENSITIVITY = 4.0
 
 
-def combine(components: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def combine(
+    components: dict[str, dict[str, Any]],
+    weights: dict[str, float] = WEIGHTS,
+) -> dict[str, Any]:
     """
     Weighted blend of the components into a 0-100 display score.
 
@@ -245,13 +359,16 @@ def combine(components: dict[str, dict[str, Any]]) -> dict[str, Any]:
         composite 0.85 -> 23     composite 1.10 -> 69
         composite 0.90 -> 31     composite 1.20 -> 83
         composite 1.00 -> 50     composite 1.30 -> 92
+
+    `weights` defaults to the hitter WEIGHTS above; pass PITCHER_WEIGHTS
+    to score a pitcher's components with the same machinery.
     """
     import math
 
     composite = 0.0
     used_weight = 0.0
 
-    for name, weight in WEIGHTS.items():
+    for name, weight in weights.items():
         comp = components.get(name)
         if comp is None:
             continue
@@ -270,9 +387,9 @@ def combine(components: dict[str, dict[str, Any]]) -> dict[str, Any]:
     # Which single factor is doing the most work, for the "why" blurb.
     drivers = sorted(
         (
-            (name, (comp["value"] - 1.0) * WEIGHTS[name])
+            (name, (comp["value"] - 1.0) * weights[name])
             for name, comp in components.items()
-            if name in WEIGHTS
+            if name in weights
         ),
         key=lambda pair: abs(pair[1]),
         reverse=True,

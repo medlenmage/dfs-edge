@@ -175,6 +175,18 @@ async def fake_weather(lat, lon, when):
     return FAKE_WEATHER
 
 
+INJURIES = {
+    111: [
+        {"id": 301, "name": "Hurt Reliever", "position": "P",
+         "status_code": "D10", "status_description": "10-Day Injured List"},
+    ],
+}
+
+
+async def fake_injuries(team_id, season):
+    return INJURIES.get(team_id, [])
+
+
 def patch() -> None:
     mlb.get_schedule = fake_schedule
     mlb.get_people = fake_people
@@ -183,6 +195,7 @@ def patch() -> None:
     mlb.get_league_season = fake_season
     mlb.get_recent_form = fake_recent
     mlb.get_lineups = fake_lineups
+    mlb.get_team_injuries = fake_injuries
     odds.get_game_lines = fake_lines
     weather.get_game_weather = fake_weather
 
@@ -234,6 +247,30 @@ async def main() -> int:
           game["away"]["probable_pitcher"]["throws"] == "R")
     check("pitchers excluded from hitter list",
           all(h["position"] != "P" for h in game["away"]["hitters"]))
+
+    print("\nPitcher edge score")
+    home_edge = game["home"]["probable_pitcher"]["edge"]
+    away_edge = game["away"]["probable_pitcher"]["edge"]
+    check("home pitcher has an edge score", 0 <= home_edge["score"] <= 100,
+          str(home_edge["score"]))
+    check("away pitcher has an edge score", 0 <= away_edge["score"] <= 100,
+          str(away_edge["score"]))
+    check("pitcher edge has all six components",
+          set(home_edge["components"]) == {
+              "opp_lineup", "strikeout_potential", "team_runs_against",
+              "own_quality", "park", "weather",
+          },
+          str(set(home_edge["components"])))
+    check("lower ERA scores better on own_quality",
+          home_edge["components"]["own_quality"]["value"]
+          > away_edge["components"]["own_quality"]["value"],
+          f"{home_edge['components']['own_quality']} vs {away_edge['components']['own_quality']}")
+
+    print("\nInjuries")
+    check("Red Sox injury report includes the hurt reliever",
+          any(p["name"] == "Hurt Reliever" for p in game["home"]["injuries"]))
+    check("Yankees have no injuries in the fixture",
+          game["away"]["injuries"] == [])
 
     print("\nPlatoon logic (Yankees facing a LHP)")
     yanks = {h["name"]: h for h in game["away"]["hitters"]}

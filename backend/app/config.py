@@ -66,6 +66,7 @@ class Settings:
         self.ttl_stats: int = _int("CACHE_TTL_STATS", 21_600)
         self.ttl_odds: int = _int("CACHE_TTL_ODDS", 600)
         self.ttl_weather: int = _int("CACHE_TTL_WEATHER", 1_800)
+        self.ttl_injuries: int = _int("CACHE_TTL_INJURIES", 3_600)
 
         # --- Storage ---
         db_path = os.getenv("DB_PATH", "data/dfsedge.db").strip()

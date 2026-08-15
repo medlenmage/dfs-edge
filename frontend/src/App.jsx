@@ -3,6 +3,7 @@ import { api } from './api'
 import { SlateTiles } from './components/StatTile'
 import { StackTable } from './components/StackTable'
 import { HitterTable } from './components/HitterTable'
+import { PitcherTable } from './components/PitcherTable'
 import { GameGrid } from './components/GameCard'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { ScoreLegend } from './components/ScoreMeter'
@@ -10,6 +11,7 @@ import { ScoreLegend } from './components/ScoreMeter'
 const TABS = [
   { id: 'stacks', label: 'Stacks' },
   { id: 'hitters', label: 'Hitters' },
+  { id: 'pitchers', label: 'Pitchers' },
   { id: 'games', label: 'Games' },
   { id: 'ai', label: 'AI analysis' },
 ]
@@ -167,6 +169,19 @@ export default function App() {
             <span className="hint">click a column heading to re-sort</span>
           </div>
           <HitterTable slate={slate} limit={80} />
+          <div style={{ marginTop: 10 }}>
+            <ScoreLegend />
+          </div>
+        </section>
+      )}
+
+      {slate && tab === 'pitchers' && (
+        <section>
+          <div className="section-head">
+            <h2>Top pitchers</h2>
+            <span className="hint">today's probable starters, ranked by matchup edge</span>
+          </div>
+          <PitcherTable slate={slate} />
           <div style={{ marginTop: 10 }}>
             <ScoreLegend />
           </div>
