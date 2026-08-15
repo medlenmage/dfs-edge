@@ -8,6 +8,7 @@ const COLUMNS = [
   { key: 'opposing_pitcher', label: 'vs Pitcher', sortable: false },
   { key: 'vs_hand_ops', label: 'OPS vs hand', sortable: true, num: true },
   { key: 'season_ops', label: 'Season OPS', sortable: true, num: true },
+  { key: 'xwoba', label: 'xwOBA', sortable: true, num: true },
   { key: 'implied_runs', label: 'Team runs', sortable: true, num: true },
   { key: 'why', label: 'Biggest factor', sortable: false },
 ]
@@ -16,6 +17,7 @@ const DRIVER_LABELS = {
   platoon: 'his platoon split',
   pitcher: 'the pitcher',
   team_total: 'Vegas total',
+  contact_quality: 'his contact quality',
   park: 'the ballpark',
   weather: 'weather',
   form: 'recent form',
@@ -52,6 +54,8 @@ export function HitterTable({ slate, limit = 50 }) {
             season_pa: h.season?.pa ?? null,
             vs_hand_ops: h.vs_hand?.ops ?? null,
             vs_hand_pa: h.vs_hand?.pa ?? null,
+            xwoba: h.edge.components.contact_quality?.xwoba ?? null,
+            barrel_pct: h.edge.components.contact_quality?.barrel_pct ?? null,
             implied_runs: team.implied_runs ?? null,
             confirmed: team.lineup_confirmed,
             platoonDetail: h.edge.components.platoon.detail,
@@ -177,6 +181,12 @@ export function HitterTable({ slate, limit = 50 }) {
                   {r.season_ops != null ? r.season_ops.toFixed(3) : '—'}
                   {r.season_pa != null && (
                     <div className="sub-line">{r.season_pa} PA</div>
+                  )}
+                </td>
+                <td className="num">
+                  {r.xwoba != null ? r.xwoba.toFixed(3) : '—'}
+                  {r.barrel_pct != null && (
+                    <div className="sub-line">{r.barrel_pct}% barrels</div>
                   )}
                 </td>
                 <td className="num">

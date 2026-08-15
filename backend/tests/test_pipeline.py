@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.clients import mlb, odds, weather  # noqa: E402
+from app.clients import mlb, odds, savant, weather  # noqa: E402
 from app.services import mlb_slate, scoring  # noqa: E402
 
 DAY = "2026-08-14"
@@ -116,6 +116,24 @@ RECENT = {
     202: hit(58, 0.780, 0.270, 0.435, 1),
 }
 
+def savant_hit(barrel, hard_hit, xwoba):
+    return {"barrel_pct": barrel, "hard_hit_pct": hard_hit, "xwoba": xwoba,
+            "xslg": xwoba + 0.05, "exit_velo": 89.0}
+
+
+SAVANT_HIT = {
+    101: savant_hit(12.0, 45.0, 0.360),  # Big Righty Bat -- best contact of the bunch
+    102: savant_hit(8.0, 38.0, 0.320),   # Punchless Lefty
+    103: savant_hit(7.5, 36.0, 0.310),   # Switch Hitter Sam
+    201: savant_hit(10.0, 42.0, 0.340),  # Boston Slugger
+    202: savant_hit(5.0, 30.0, 0.290),   # Boston Contact
+}
+
+SAVANT_PITCH = {
+    9001: savant_hit(5.5, 32.0, 0.290),  # Lefty McLefterson -- allows weak contact
+    9002: savant_hit(9.5, 42.0, 0.340),  # Righty Rogers -- allows hard contact
+}
+
 FAKE_LINES = [
     {
         "event_id": "evt1", "commence_time": f"{DAY}T23:10:00Z",
@@ -187,6 +205,14 @@ async def fake_injuries(team_id, season):
     return INJURIES.get(team_id, [])
 
 
+async def fake_savant_hit(season):
+    return SAVANT_HIT
+
+
+async def fake_savant_pitch(season):
+    return SAVANT_PITCH
+
+
 def patch() -> None:
     mlb.get_schedule = fake_schedule
     mlb.get_people = fake_people
@@ -198,6 +224,8 @@ def patch() -> None:
     mlb.get_team_injuries = fake_injuries
     odds.get_game_lines = fake_lines
     weather.get_game_weather = fake_weather
+    savant.get_hitter_batted_ball = fake_savant_hit
+    savant.get_pitcher_batted_ball = fake_savant_pitch
 
 
 # --------------------------------------------------------------------------
@@ -255,16 +283,21 @@ async def main() -> int:
           str(home_edge["score"]))
     check("away pitcher has an edge score", 0 <= away_edge["score"] <= 100,
           str(away_edge["score"]))
-    check("pitcher edge has all six components",
+    check("pitcher edge has all seven components",
           set(home_edge["components"]) == {
               "opp_lineup", "strikeout_potential", "team_runs_against",
-              "own_quality", "park", "weather",
+              "contact_quality_allowed", "own_quality", "park", "weather",
           },
           str(set(home_edge["components"])))
     check("lower ERA scores better on own_quality",
           home_edge["components"]["own_quality"]["value"]
           > away_edge["components"]["own_quality"]["value"],
           f"{home_edge['components']['own_quality']} vs {away_edge['components']['own_quality']}")
+    check("pitcher who allows weaker contact scores better on contact_quality_allowed",
+          home_edge["components"]["contact_quality_allowed"]["value"]
+          > away_edge["components"]["contact_quality_allowed"]["value"],
+          f"{home_edge['components']['contact_quality_allowed']} vs "
+          f"{away_edge['components']['contact_quality_allowed']}")
 
     print("\nInjuries")
     check("Red Sox injury report includes the hurt reliever",
@@ -289,14 +322,19 @@ async def main() -> int:
     check("lefty's score is below average", lefty["edge"]["score"] < 50,
           str(lefty["edge"]["score"]))
 
+    check("better batted-ball profile scores above average on contact_quality",
+          righty["edge"]["components"]["contact_quality"]["value"] > 1.0,
+          str(righty["edge"]["components"]["contact_quality"]))
+
     switch = yanks["Switch Hitter Sam"]
     check("switch hitter gets pitcher's vs-RHB split (bats right vs LHP)",
           switch["edge"]["components"]["pitcher"]["ops_against"] == 0.910,
           str(switch["edge"]["components"]["pitcher"].get("ops_against")))
 
     print("\nScoring internals")
-    check("all seven components present",
-          len(righty["edge"]["components"]) == 7)
+    check("all eight components present",
+          len(righty["edge"]["components"]) == 8,
+          str(sorted(righty["edge"]["components"])))
     check("weights sum to 1.0",
           abs(sum(scoring.WEIGHTS.values()) - 1.0) < 1e-9,
           str(sum(scoring.WEIGHTS.values())))

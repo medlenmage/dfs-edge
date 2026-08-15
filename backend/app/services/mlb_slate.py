@@ -23,7 +23,7 @@ from datetime import date as date_cls
 from datetime import datetime
 from typing import Any
 
-from app.clients import mlb, odds, weather
+from app.clients import mlb, odds, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
 from app.services import scoring
 
@@ -99,6 +99,8 @@ async def build_slate(
         "pit_vr": mlb.get_league_splits(season, "vr", "pitching"),
         "pit_season": mlb.get_league_season(season, "pitching"),
         "lines": odds.get_game_lines("mlb", force=force_refresh),
+        "savant_hit": savant.get_hitter_batted_ball(season),
+        "savant_pitch": savant.get_pitcher_batted_ball(season),
     }
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
     data: dict[str, Any] = {}
@@ -122,6 +124,14 @@ async def build_slate(
         "pitcher_era": scoring.league_average(data["pit_season"], "era", 20, "ip"),
         "pitcher_k9": scoring.league_average(data["pit_season"], "k_per_9", 20, "ip"),
         "hitter_k_pct": scoring.league_average(data["hit_season"], "k_pct", 80, "pa"),
+        # Savant's leaderboard is already filtered to a minimum sample
+        # (see clients/savant.py), so no further sample-size gate here.
+        "hitter_barrel": scoring.league_average(data["savant_hit"], "barrel_pct", 0, "barrel_pct"),
+        "hitter_hard_hit": scoring.league_average(data["savant_hit"], "hard_hit_pct", 0, "hard_hit_pct"),
+        "hitter_xwoba": scoring.league_average(data["savant_hit"], "xwoba", 0, "xwoba"),
+        "pitcher_barrel": scoring.league_average(data["savant_pitch"], "barrel_pct", 0, "barrel_pct"),
+        "pitcher_hard_hit": scoring.league_average(data["savant_pitch"], "hard_hit_pct", 0, "hard_hit_pct"),
+        "pitcher_xwoba": scoring.league_average(data["savant_pitch"], "xwoba", 0, "xwoba"),
     }
 
     built = await asyncio.gather(
@@ -284,10 +294,12 @@ async def _build_game(
     # pitcher faces the AWAY lineup and is trying to hold down the AWAY
     # team's implied total, and vice versa.
     home_edge = _pitcher_edge(
-        home_pitcher, away_hitters, result["away"]["implied_runs"], env, baselines
+        home_pitcher, away_hitters, result["away"]["implied_runs"], env, baselines,
+        data["savant_pitch"],
     )
     away_edge = _pitcher_edge(
-        away_pitcher, home_hitters, result["home"]["implied_runs"], env, baselines
+        away_pitcher, home_hitters, result["home"]["implied_runs"], env, baselines,
+        data["savant_pitch"],
     )
     if home_edge:
         result["home"]["probable_pitcher"]["edge"] = home_edge
@@ -318,6 +330,7 @@ def _pitcher_edge(
     implied_runs_against: float | None,
     env: dict[str, Any],
     baselines: dict[str, Any],
+    savant_pitch: dict[int, dict[str, Any]],
 ) -> dict[str, Any] | None:
     """
     A pitcher's matchup score -- the same component/weight machinery as
@@ -349,6 +362,12 @@ def _pitcher_edge(
             baselines.get("hitter_k_pct"),
         ),
         "team_runs_against": runs_against,
+        "contact_quality_allowed": scoring.contact_quality_allowed_component(
+            savant_pitch.get(pitcher_card.get("id")),
+            baselines.get("pitcher_barrel"),
+            baselines.get("pitcher_hard_hit"),
+            baselines.get("pitcher_xwoba"),
+        ),
         "own_quality": scoring.own_quality_component(
             pitcher_card.get("season"), baselines.get("pitcher_era")
         ),
@@ -450,6 +469,12 @@ async def _team_hitters(
             "platoon": scoring.platoon_component(split_stat, hitter_baseline),
             "pitcher": scoring.pitcher_component(pitcher_split, pitcher_baseline),
             "team_total": scoring.team_total_component(implied_runs),
+            "contact_quality": scoring.contact_quality_component(
+                data["savant_hit"].get(pid),
+                baselines["hitter_barrel"],
+                baselines["hitter_hard_hit"],
+                baselines["hitter_xwoba"],
+            ),
             "park": scoring.park_component(
                 hr_factor_for_hand(park, bats), park["runs"]
             ),
