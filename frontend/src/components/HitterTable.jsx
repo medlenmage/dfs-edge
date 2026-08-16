@@ -18,6 +18,7 @@ const DRIVER_LABELS = {
   pitcher: 'the pitcher',
   team_total: 'Vegas total',
   contact_quality: 'his contact quality',
+  bullpen: 'the opposing bullpen',
   park: 'the ballpark',
   weather: 'weather',
   form: 'recent form',

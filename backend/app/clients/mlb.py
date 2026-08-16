@@ -331,6 +331,76 @@ async def get_recent_form(
 
 
 # --------------------------------------------------------------------------
+# Bullpen quality -- relievers only, aggregated by team
+# --------------------------------------------------------------------------
+
+# Minimum bullpen innings logged before a team's aggregate is trusted.
+MIN_BULLPEN_IP = 20
+
+
+async def get_bullpen_stats(season: int) -> dict[int, dict[str, Any]]:
+    """
+    Each team's bullpen ERA/WHIP/K-9, keyed by team id -- built from every
+    pitcher with zero starts this season, not the team's blended staff
+    line (which the /teams/{id}/stats endpoint would give you, starters
+    and all).
+
+    A starter goes five or six innings; the bullpen covers the rest, and
+    a shaky one is a real edge for a hitter facing that team late,
+    independent of how good the starter himself is.
+    """
+    settings = get_settings()
+
+    async def _load() -> Any:
+        return await get_json(
+            f"{BASE}/stats",
+            params={
+                "stats": "season",
+                "group": "pitching",
+                "season": season,
+                "sportId": SPORT_ID,
+                "playerPool": "All",
+                "limit": 2000,
+                "gameType": "R",
+            },
+            source="MLB Stats API",
+        )
+
+    payload = await cached(f"mlb:bullpen:{season}", settings.ttl_stats, _load)
+
+    totals: dict[int, dict[str, int]] = {}
+    for block in payload.get("stats") or []:
+        for split in block.get("splits") or []:
+            stat = split.get("stat") or {}
+            if _i(stat.get("gamesStarted")) > 0:
+                continue  # anyone who has started a game isn't a reliever
+            team_id = (split.get("team") or {}).get("id")
+            if not team_id:
+                continue
+            t = totals.setdefault(
+                team_id, {"outs": 0, "er": 0, "bb": 0, "k": 0, "hits": 0}
+            )
+            t["outs"] += _i(stat.get("outs"))
+            t["er"] += _i(stat.get("earnedRuns"))
+            t["bb"] += _i(stat.get("baseOnBalls"))
+            t["k"] += _i(stat.get("strikeOuts"))
+            t["hits"] += _i(stat.get("hits"))
+
+    out: dict[int, dict[str, Any]] = {}
+    for team_id, t in totals.items():
+        if t["outs"] < MIN_BULLPEN_IP * 3:
+            continue
+        ip = t["outs"] / 3
+        out[team_id] = {
+            "era": round(t["er"] * 27 / t["outs"], 2),
+            "whip": round((t["hits"] + t["bb"]) / ip, 3),
+            "k_per_9": round(t["k"] * 27 / t["outs"], 2),
+            "ip": round(ip, 1),
+        }
+    return out
+
+
+# --------------------------------------------------------------------------
 # Stat normalisation
 # --------------------------------------------------------------------------
 

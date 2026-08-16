@@ -134,6 +134,11 @@ SAVANT_PITCH = {
     9002: savant_hit(9.5, 42.0, 0.340),  # Righty Rogers -- allows hard contact
 }
 
+BULLPEN = {
+    111: {"era": 5.20, "whip": 1.55, "k_per_9": 8.0, "ip": 200.0},   # Red Sox -- shaky
+    147: {"era": 3.00, "whip": 1.10, "k_per_9": 9.5, "ip": 210.0},   # Yankees -- strong
+}
+
 FAKE_LINES = [
     {
         "event_id": "evt1", "commence_time": f"{DAY}T23:10:00Z",
@@ -213,6 +218,10 @@ async def fake_savant_pitch(season):
     return SAVANT_PITCH
 
 
+async def fake_bullpen(season):
+    return BULLPEN
+
+
 def patch() -> None:
     mlb.get_schedule = fake_schedule
     mlb.get_people = fake_people
@@ -226,6 +235,7 @@ def patch() -> None:
     weather.get_game_weather = fake_weather
     savant.get_hitter_batted_ball = fake_savant_hit
     savant.get_pitcher_batted_ball = fake_savant_pitch
+    mlb.get_bullpen_stats = fake_bullpen
 
 
 # --------------------------------------------------------------------------
@@ -325,6 +335,14 @@ async def main() -> int:
     check("better batted-ball profile scores above average on contact_quality",
           righty["edge"]["components"]["contact_quality"]["value"] > 1.0,
           str(righty["edge"]["components"]["contact_quality"]))
+    check("Yankees hitter benefits from the Red Sox's shaky bullpen",
+          righty["edge"]["components"]["bullpen"]["value"] > 1.0,
+          str(righty["edge"]["components"]["bullpen"]))
+
+    sox = {h["name"]: h for h in game["home"]["hitters"]}
+    check("Red Sox hitter is hurt by the Yankees' strong bullpen",
+          sox["Boston Slugger"]["edge"]["components"]["bullpen"]["value"] < 1.0,
+          str(sox["Boston Slugger"]["edge"]["components"]["bullpen"]))
 
     switch = yanks["Switch Hitter Sam"]
     check("switch hitter gets pitcher's vs-RHB split (bats right vs LHP)",
@@ -332,8 +350,8 @@ async def main() -> int:
           str(switch["edge"]["components"]["pitcher"].get("ops_against")))
 
     print("\nScoring internals")
-    check("all eight components present",
-          len(righty["edge"]["components"]) == 8,
+    check("all nine components present",
+          len(righty["edge"]["components"]) == 9,
           str(sorted(righty["edge"]["components"])))
     check("weights sum to 1.0",
           abs(sum(scoring.WEIGHTS.values()) - 1.0) < 1e-9,
