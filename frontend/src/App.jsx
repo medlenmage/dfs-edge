@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { SlateTiles } from './components/StatTile'
 import { StackTable } from './components/StackTable'
@@ -33,6 +33,8 @@ export default function App() {
   const [theme, setTheme] = useState(
     () => document.documentElement.dataset.theme || 'auto',
   )
+  const [salaryMsg, setSalaryMsg] = useState(null)
+  const salaryInputRef = useRef(null)
 
   const load = useCallback(
     async (refresh = false) => {
@@ -58,6 +60,20 @@ export default function App() {
     load(false)
   }, [load])
 
+  async function handleSalaryUpload(e) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow re-selecting the same file later
+    if (!file) return
+    setSalaryMsg('Uploading…')
+    try {
+      const result = await api.uploadSalaries(date, file)
+      setSalaryMsg(`Loaded ${result.players_loaded} salaries`)
+      load(true)
+    } catch (err) {
+      setSalaryMsg(`Upload failed: ${err.message}`)
+    }
+  }
+
   function cycleTheme() {
     const next = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'
     setTheme(next)
@@ -82,11 +98,30 @@ export default function App() {
           <button onClick={() => load(true)} disabled={loading}>
             {loading ? 'Loading…' : 'Refresh'}
           </button>
+          <input
+            ref={salaryInputRef}
+            type="file"
+            accept=".csv"
+            onChange={handleSalaryUpload}
+            style={{ display: 'none' }}
+          />
+          <button
+            onClick={() => salaryInputRef.current?.click()}
+            title="Upload a DraftKings salary CSV for this date"
+          >
+            Upload salaries
+          </button>
           <button onClick={cycleTheme} title="Theme">
             {theme === 'auto' ? 'Auto' : theme === 'light' ? 'Light' : 'Dark'}
           </button>
         </div>
       </header>
+
+      {salaryMsg && (
+        <div className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
+          {salaryMsg}
+        </div>
+      )}
 
       {health && !features.betting_lines && (
         <div className="notice" style={{ marginBottom: 16 }}>

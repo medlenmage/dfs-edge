@@ -10,6 +10,8 @@ const COLUMNS = [
   { key: 'season_ops', label: 'Season OPS', sortable: true, num: true },
   { key: 'xwoba', label: 'xwOBA', sortable: true, num: true },
   { key: 'implied_runs', label: 'Team runs', sortable: true, num: true },
+  { key: 'salary', label: 'Salary', sortable: true, num: true },
+  { key: 'value', label: 'Value', sortable: true, num: true },
   { key: 'why', label: 'Biggest factor', sortable: false },
 ]
 
@@ -58,6 +60,9 @@ export function HitterTable({ slate, limit = 50 }) {
             xwoba: h.edge.components.contact_quality?.xwoba ?? null,
             barrel_pct: h.edge.components.contact_quality?.barrel_pct ?? null,
             implied_runs: team.implied_runs ?? null,
+            salary: h.salary?.salary ?? null,
+            value: h.salary?.value ?? null,
+            avgPoints: h.salary?.avg_points ?? null,
             confirmed: team.lineup_confirmed,
             platoonDetail: h.edge.components.platoon.detail,
           })
@@ -192,6 +197,15 @@ export function HitterTable({ slate, limit = 50 }) {
                 </td>
                 <td className="num">
                   {r.implied_runs != null ? r.implied_runs.toFixed(1) : '—'}
+                </td>
+                <td className="num">
+                  {r.salary != null ? `$${r.salary.toLocaleString()}` : '—'}
+                  {r.avgPoints != null && (
+                    <div className="sub-line">{r.avgPoints.toFixed(1)} avg pts</div>
+                  )}
+                </td>
+                <td className="num">
+                  {r.value != null ? r.value.toFixed(1) : '—'}
                 </td>
                 <td className="sub-line">
                   {DRIVER_LABELS[r.driver] || r.driver || '—'}

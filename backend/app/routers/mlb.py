@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import date as date_cls
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
-from app.services import analysis, mlb_slate
+from app.services import analysis, mlb_slate, salaries
 
 router = APIRouter(prefix="/api/mlb", tags=["mlb"])
 
@@ -163,6 +163,42 @@ async def get_injuries(date: str | None = Query(None)) -> dict[str, Any]:
                 )
 
     return {"date": slate.get("date"), "injuries": rows}
+
+
+@router.post("/salaries")
+async def upload_salaries(
+    date: str | None = Query(None, description="Slate date this CSV is for, defaults to today"),
+    file: UploadFile = File(..., description="DraftKings 'DKSalaries.csv' export"),
+) -> dict[str, Any]:
+    """
+    Upload a DraftKings salary CSV for a slate.
+
+    Cached until you upload a new one for the same date -- there's no
+    live salary feed to pull from, so this is how they get in.
+    """
+    day = date or date_cls.today().isoformat()
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Couldn't read that as text: {exc}") from exc
+
+    rows = salaries.parse_dk_csv(text)
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No players found in that file -- is it a DraftKings salary export?",
+        )
+    salaries.store(day, rows)
+    return {"date": day, "players_loaded": len(rows)}
+
+
+@router.get("/salaries")
+async def get_salaries(date: str | None = Query(None)) -> dict[str, Any]:
+    """Whatever salary data is currently loaded for a date."""
+    day = date or date_cls.today().isoformat()
+    rows = salaries.load(day)
+    return {"date": day, "loaded": bool(rows), "players": rows}
 
 
 @router.get("/analysis")

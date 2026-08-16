@@ -37,6 +37,9 @@ export function PitcherTable({ slate }) {
         era: p.season?.era,
         k9: p.season?.k_per_9,
         impliedRunsAgainst: opp.implied_runs,
+        salary: p.salary?.salary ?? null,
+        value: p.salary?.value ?? null,
+        avgPoints: p.salary?.avg_points ?? null,
         venue: g.venue.name,
         parkHr: g.venue.park_factors.hr,
         roofClosed: g.venue.roof_closed,
@@ -60,6 +63,8 @@ export function PitcherTable({ slate }) {
             <th>Edge</th>
             <th className="num">Season</th>
             <th className="num">Runs against</th>
+            <th className="num">Salary</th>
+            <th className="num">Value</th>
             <th>Park / conditions</th>
             <th>Biggest factor</th>
           </tr>
@@ -84,6 +89,15 @@ export function PitcherTable({ slate }) {
               </td>
               <td className="num">
                 {r.impliedRunsAgainst != null ? r.impliedRunsAgainst.toFixed(1) : '—'}
+              </td>
+              <td className="num">
+                {r.salary != null ? `$${r.salary.toLocaleString()}` : '—'}
+                {r.avgPoints != null && (
+                  <div className="sub-line">{r.avgPoints.toFixed(1)} avg pts</div>
+                )}
+              </td>
+              <td className="num">
+                {r.value != null ? r.value.toFixed(1) : '—'}
               </td>
               <td>
                 <div className="sub-line">{r.venue}</div>
