@@ -442,18 +442,18 @@ async def main() -> int:
 
     print("\nLineup optimizer (DraftKings Classic MLB)")
 
-    def opt_hitter(pid, name, team, pos, salary, fpts):
+    def opt_hitter(pid, name, team, pos, salary, fpts, own=None):
         return {
             "id": pid, "name": name,
             "salary": {"salary": salary, "position": pos, "avg_points": None, "value": None},
-            "projection": {"fpts": fpts, "ownership_pct": None},
+            "projection": {"fpts": fpts, "ownership_pct": own},
         }
 
-    def opt_pitcher(pid, name, salary, fpts):
+    def opt_pitcher(pid, name, salary, fpts, own=None):
         return {
             "id": pid, "name": name,
             "salary": {"salary": salary, "position": "P", "avg_points": None, "value": None},
-            "projection": {"fpts": fpts, "ownership_pct": None},
+            "projection": {"fpts": fpts, "ownership_pct": own},
         }
 
     # Deliberately more hitter depth than the shared fixture has, since a
@@ -994,6 +994,76 @@ async def main() -> int:
         check("one-off restriction rejects one_off_min_salary above one_off_max_salary", False)
     except optimizer.OptimizerError:
         check("one-off restriction rejects one_off_min_salary above one_off_max_salary", True)
+
+    print("\nLineup optimizer: cumulative ownership")
+
+    # Two options per slot -- "chalk" (high ownership) and "contrarian"
+    # (low ownership) -- with fpts deliberately tilted so the fpts-max
+    # objective alone would always pick one side, proving an ownership
+    # bound actually forces a swap rather than trivially matching what
+    # the optimizer would have built anyway.
+    def own_hitter(pid, name, pos, salary, fpts, own):
+        return opt_hitter(pid, name, "OWN", pos, salary, fpts, own=own)
+
+    def build_own_slate(chalk_wins):
+        d = 0.5 if chalk_wins else -0.5
+        hitters = []
+        pid = 9800
+        for pos, sal in (("C", 3000), ("1B", 3500), ("2B", 3200), ("3B", 3800), ("SS", 3400)):
+            hitters.append(own_hitter(pid, f"{pos}chalk", pos, sal, 10 + d, 40))
+            pid += 1
+            hitters.append(own_hitter(pid, f"{pos}contra", pos, sal, 9.5 - d, 5))
+            pid += 1
+        for i in range(3):
+            hitters.append(own_hitter(pid, f"OFchalk{i}", "OF", 4000, 10 + d, 40))
+            pid += 1
+        for i in range(3):
+            hitters.append(own_hitter(pid, f"OFcontra{i}", "OF", 4000, 9.5 - d, 5))
+            pid += 1
+        pitcher_chalk = opt_pitcher(9850, "Pchalk1", 6000, 15 + d, own=40)
+        pitcher_contra = opt_pitcher(9852, "Pcontra1", 6000, 14.5 - d, own=5)
+        hitters.append(opt_pitcher(9851, "Pchalk2", 6000, 15 + d, own=40))
+        hitters.append(opt_pitcher(9853, "Pcontra2", 6000, 14.5 - d, own=5))
+        return {
+            "games": [
+                {
+                    "home": {"abbrev": "OWN", "hitters": hitters,
+                             "probable_pitcher": pitcher_chalk, "scratches": []},
+                    "away": {"abbrev": "OWO", "hitters": [],
+                             "probable_pitcher": pitcher_contra, "scratches": []},
+                }
+            ]
+        }
+
+    def total_ownership(lu):
+        return sum(p["ownership_pct"] for slot in lu["slots"].values() for p in slot)
+
+    max_slate = build_own_slate(chalk_wins=True)
+    baseline_max = optimizer.generate_lineups(max_slate)["lineups"][0]
+    check("total_ownership_pct is reported and matches the sum of the 10 rostered players",
+          baseline_max["total_ownership_pct"] == total_ownership(baseline_max),
+          str(baseline_max["total_ownership_pct"]))
+    check("ownership baseline: an unconstrained fpts-max solve naturally builds the chalky lineup",
+          total_ownership(baseline_max) == 400, str(total_ownership(baseline_max)))
+
+    capped = optimizer.generate_lineups(max_slate, max_ownership_pct=100)["lineups"][0]
+    check("max_ownership_pct forces total ownership down, even at a fpts cost",
+          total_ownership(capped) <= 100, str(total_ownership(capped)))
+
+    min_slate = build_own_slate(chalk_wins=False)
+    baseline_min = optimizer.generate_lineups(min_slate)["lineups"][0]
+    check("ownership baseline: an unconstrained fpts-max solve can just as easily be low-ownership",
+          total_ownership(baseline_min) == 50, str(total_ownership(baseline_min)))
+
+    floored = optimizer.generate_lineups(min_slate, min_ownership_pct=300)["lineups"][0]
+    check("min_ownership_pct forces total ownership up, even at a fpts cost",
+          total_ownership(floored) >= 300, str(total_ownership(floored)))
+
+    try:
+        optimizer.generate_lineups(max_slate, min_ownership_pct=200, max_ownership_pct=100)
+        check("optimizer rejects min_ownership_pct above max_ownership_pct", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects min_ownership_pct above max_ownership_pct", True)
 
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",

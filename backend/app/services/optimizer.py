@@ -260,6 +260,7 @@ def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
                         "team": abbrev,
                         "salary": salary_info["salary"],
                         "projected_fpts": proj_info["fpts"],
+                        "ownership_pct": proj_info.get("ownership_pct") or 0,
                         "slots": slots,
                     }
                 )
@@ -280,6 +281,8 @@ def _solve_one(
     min_teams_per_lineup: int | None = None,
     max_teams_per_lineup: int | None = None,
     one_off_eligible: Callable[[dict[str, Any]], bool] | None = None,
+    min_ownership_pct: float | None = None,
+    max_ownership_pct: float | None = None,
 ) -> dict[str, Any] | None:
     """
     Solve a single lineup against `pool`, minus anyone in `excluded_ids`
@@ -331,6 +334,15 @@ def _solve_one(
             >= min_salary
         )
 
+    if min_ownership_pct is not None or max_ownership_pct is not None:
+        total_ownership = pulp.lpSum(
+            p["ownership_pct"] * x[(p["id"], slot)] for p in usable for slot in p["slots"]
+        )
+        if min_ownership_pct is not None:
+            prob += total_ownership >= min_ownership_pct
+        if max_ownership_pct is not None:
+            prob += total_ownership <= max_ownership_pct
+
     stack_auto_y: dict[tuple[int, str], pulp.LpVariable] = {}
     if stack_groups:
         stack_auto_y = _stack_constraints(
@@ -363,6 +375,7 @@ def _solve_one(
     slots_out: dict[str, list[dict[str, Any]]] = {slot: [] for slot in SLOT_TYPES}
     salary_used = 0
     projected_points = 0.0
+    total_ownership_pct = 0.0
     player_ids: set[int] = set()
     for p in usable:
         for slot in p["slots"]:
@@ -374,10 +387,12 @@ def _solve_one(
                         "team": p["team"],
                         "salary": p["salary"],
                         "projected_fpts": p["projected_fpts"],
+                        "ownership_pct": p["ownership_pct"],
                     }
                 )
                 salary_used += p["salary"]
                 projected_points += p["projected_fpts"]
+                total_ownership_pct += p["ownership_pct"]
                 player_ids.add(p["id"])
 
     # Which team(s) the solver actually picked for each auto stack
@@ -390,6 +405,7 @@ def _solve_one(
         "salary_used": salary_used,
         "salary_remaining": SALARY_CAP - salary_used,
         "projected_points": round(projected_points, 2),
+        "total_ownership_pct": round(total_ownership_pct, 1),
         "slots": slots_out,
         "_player_ids": player_ids,
         "_auto_stack_teams": auto_stack_teams,
@@ -414,6 +430,8 @@ def generate_lineups(
     one_off_group_ids: list[int] | None = None,
     one_off_min_salary: int | None = None,
     one_off_max_salary: int | None = None,
+    min_ownership_pct: float | None = None,
+    max_ownership_pct: float | None = None,
 ) -> dict[str, Any]:
     """
     Generate up to `num_lineups` distinct legal lineups.
@@ -481,6 +499,12 @@ def generate_lineups(
     answer the same question. Requires a partial `stack_groups` shape
     (one summing to fewer than the 8 hitter slots); a full shape has no
     leftover slots for this to apply to.
+
+    `min_ownership_pct` / `max_ownership_pct`, if given, bound each
+    lineup's cumulative ownership -- the sum of the 10 rostered
+    players' RotoWire `ownership_pct`, the DFS-community-standard
+    measure of how "chalky" a build is. Players missing an ownership
+    number (not every RotoWire export has one for everyone) count as 0.
 
     Returns `{"lineups": [...], "exposure": [...]}`. If the pool or
     constraints can't support the full count requested, returns as many
@@ -620,6 +644,13 @@ def generate_lineups(
             hi = one_off_max_salary if one_off_max_salary is not None else SALARY_CAP
             one_off_eligible = lambda p: lo <= p["salary"] <= hi  # noqa: E731
 
+    if (
+        min_ownership_pct is not None
+        and max_ownership_pct is not None
+        and min_ownership_pct > max_ownership_pct
+    ):
+        raise OptimizerError("min_ownership_pct can't be more than max_ownership_pct.")
+
     def _cap_to_count(pct: float) -> int:
         return max(1, round(pct / 100 * num_lineups))
 
@@ -644,6 +675,8 @@ def generate_lineups(
             min_teams_per_lineup=min_teams_per_lineup,
             max_teams_per_lineup=max_teams_per_lineup,
             one_off_eligible=one_off_eligible,
+            min_ownership_pct=min_ownership_pct,
+            max_ownership_pct=max_ownership_pct,
         )
         if result is None:
             if i == 0:

@@ -56,6 +56,8 @@ export function LineupsPanel({ date, slate }) {
   const [oneOff, setOneOff] = useState(new Set())
   const [oneOffMinSalary, setOneOffMinSalary] = useState('')
   const [oneOffMaxSalary, setOneOffMaxSalary] = useState('')
+  const [minOwnership, setMinOwnership] = useState('')
+  const [maxOwnership, setMaxOwnership] = useState('')
 
   const teams = useMemo(() => teamsOnSlate(slate), [slate])
   const groups = STACK_SHAPES[stackShape]
@@ -162,6 +164,8 @@ export function LineupsPanel({ date, slate }) {
           isPartialStack && oneOffMode === 'range' && oneOffMaxSalary.trim()
             ? Number(oneOffMaxSalary)
             : null,
+        minOwnershipPct: minOwnership.trim() ? Number(minOwnership) : null,
+        maxOwnershipPct: maxOwnership.trim() ? Number(maxOwnership) : null,
       })
       setSelected(0)
       setState({ status: 'ready', ...result })
@@ -222,8 +226,14 @@ export function LineupsPanel({ date, slate }) {
         </button>
         <button onClick={() => setShowRules((v) => !v)}>
           {showRules ? 'Hide lineup rules' : 'Lineup rules'}
-          {[minSalary, minUniquePlayers, minTeams, maxTeams].filter((v) => v.trim()).length > 0
-            ? ` (${[minSalary, minUniquePlayers, minTeams, maxTeams].filter((v) => v.trim()).length})`
+          {[minSalary, minUniquePlayers, minTeams, maxTeams, minOwnership, maxOwnership].filter(
+            (v) => v.trim(),
+          ).length > 0
+            ? ` (${
+                [minSalary, minUniquePlayers, minTeams, maxTeams, minOwnership, maxOwnership].filter(
+                  (v) => v.trim(),
+                ).length
+              })`
             : ''}
         </button>
       </div>
@@ -279,6 +289,32 @@ export function LineupsPanel({ date, slate }) {
                 onChange={(e) => setMaxTeams(e.target.value)}
                 style={{ width: 55 }}
               />
+            </label>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Min ownership{' '}
+              <input
+                type="number"
+                min="0"
+                max="1000"
+                placeholder="—"
+                value={minOwnership}
+                onChange={(e) => setMinOwnership(e.target.value)}
+                style={{ width: 65 }}
+              />
+              %
+            </label>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Max ownership{' '}
+              <input
+                type="number"
+                min="0"
+                max="1000"
+                placeholder="—"
+                value={maxOwnership}
+                onChange={(e) => setMaxOwnership(e.target.value)}
+                style={{ width: 65 }}
+              />
+              %
             </label>
           </div>
         </div>

@@ -89,6 +89,8 @@ export const api = {
       oneOffGroupIds = null,
       oneOffMinSalary = null,
       oneOffMaxSalary = null,
+      minOwnershipPct = null,
+      maxOwnershipPct = null,
     } = {},
   ) =>
     request('/api/mlb/lineups', {
@@ -110,6 +112,8 @@ export const api = {
         one_off_group_ids: oneOffGroupIds,
         one_off_min_salary: oneOffMinSalary,
         one_off_max_salary: oneOffMaxSalary,
+        min_ownership_pct: minOwnershipPct,
+        max_ownership_pct: maxOwnershipPct,
       }),
     }),
 

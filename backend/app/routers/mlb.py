@@ -320,6 +320,12 @@ async def generate_lineups(
     one_off_max_salary: int | None = Body(
         None, embed=True, description="Maximum salary for a player to fill a one-off slot in a partial stack shape"
     ),
+    min_ownership_pct: float | None = Body(
+        None, embed=True, description="Floor on a lineup's cumulative RotoWire ownership%"
+    ),
+    max_ownership_pct: float | None = Body(
+        None, embed=True, description="Ceiling on a lineup's cumulative RotoWire ownership%"
+    ),
 ) -> dict[str, Any]:
     """
     Up to `num_lineups` distinct, highest-projected DraftKings Classic
@@ -350,6 +356,8 @@ async def generate_lineups(
             one_off_group_ids=one_off_group_ids,
             one_off_min_salary=one_off_min_salary,
             one_off_max_salary=one_off_max_salary,
+            min_ownership_pct=min_ownership_pct,
+            max_ownership_pct=max_ownership_pct,
         )
     except optimizer.OptimizerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
