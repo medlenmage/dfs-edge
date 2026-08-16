@@ -1,14 +1,16 @@
 import { useState } from 'react'
 import { api } from '../api'
+import { NflPlayerPoolTable } from './NflPlayerPoolTable'
 
 const SLOT_ORDER = ['QB', 'RB', 'RB', 'WR', 'WR', 'WR', 'TE', 'FLEX', 'DST']
+const ROSTER_SLOTS = ['QB', 'RB', 'WR', 'TE', 'FLEX', 'DST']
 const SALARY_CAP = 50_000
 
 /**
  * Generates one or many optimal DraftKings Classic NFL lineups from
  * whatever salary + projections CSVs are loaded for the week.
  */
-export function NflLineupsPanel({ season, week }) {
+export function NflLineupsPanel({ season, week, slate }) {
   const [state, setState] = useState({ status: 'idle' })
   const [numLineups, setNumLineups] = useState(1)
   const [maxExposure, setMaxExposure] = useState('')
@@ -16,6 +18,48 @@ export function NflLineupsPanel({ season, week }) {
   const [minUniquePlayers, setMinUniquePlayers] = useState('')
   const [qbStackMin, setQbStackMin] = useState('0')
   const [selected, setSelected] = useState(0)
+  const [locked, setLocked] = useState(new Set())
+  const [excluded, setExcluded] = useState(new Set())
+  const [showPool, setShowPool] = useState(false)
+  const [showExposure, setShowExposure] = useState(false)
+  const [slotExposure, setSlotExposure] = useState({})
+
+  function toggleLock(id) {
+    setLocked((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+    setExcluded((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }
+
+  function toggleExclude(id) {
+    setExcluded((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+    setLocked((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }
+
+  function setSlotCap(slot, value) {
+    setSlotExposure((prev) => {
+      const next = { ...prev }
+      if (value.trim()) next[slot] = value
+      else delete next[slot]
+      return next
+    })
+  }
 
   async function run() {
     setState({ status: 'loading' })
@@ -23,6 +67,11 @@ export function NflLineupsPanel({ season, week }) {
       const result = await api.nflGenerateLineups(season, week, {
         numLineups,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
+        exposureBySlot: Object.keys(slotExposure).length
+          ? Object.fromEntries(Object.entries(slotExposure).map(([k, v]) => [k, Number(v)]))
+          : null,
+        lockedIds: locked.size ? [...locked] : null,
+        excludedIds: excluded.size ? [...excluded] : null,
         minSalary: minSalary.trim() ? Number(minSalary) : null,
         minUniquePlayers: minUniquePlayers.trim() ? Number(minUniquePlayers) : 1,
         qbStackMin: Number(qbStackMin),
@@ -97,7 +146,52 @@ export function NflLineupsPanel({ season, week }) {
             ? 'Solving…'
             : `Generate ${numLineups > 1 ? `${numLineups} lineups` : 'lineup'}`}
         </button>
+        <button onClick={() => setShowPool((v) => !v)}>
+          {showPool ? 'Hide player pool' : 'Player pool'}
+          {locked.size + excluded.size > 0 ? ` (${locked.size + excluded.size})` : ''}
+        </button>
+        <button onClick={() => setShowExposure((v) => !v)}>
+          {showExposure ? 'Hide exposure limits' : 'Exposure limits'}
+          {Object.keys(slotExposure).length > 0 ? ` (${Object.keys(slotExposure).length})` : ''}
+        </button>
       </div>
+
+      {showPool && (
+        <div style={{ marginBottom: 14 }}>
+          <NflPlayerPoolTable
+            slate={slate}
+            locked={locked}
+            excluded={excluded}
+            onToggleLock={toggleLock}
+            onToggleExclude={toggleExclude}
+          />
+        </div>
+      )}
+
+      {showExposure && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="sub-line" style={{ marginBottom: 8 }}>
+            Position exposure — overrides the general max exposure for specific slots
+          </div>
+          <div className="controls" style={{ flexWrap: 'wrap' }}>
+            {ROSTER_SLOTS.map((slot) => (
+              <label key={slot} className="dim" style={{ fontSize: 13 }}>
+                {slot}{' '}
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  placeholder="—"
+                  value={slotExposure[slot] || ''}
+                  onChange={(e) => setSlotCap(slot, e.target.value)}
+                  style={{ width: 55 }}
+                />
+                %
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       {state.status === 'idle' && (
         <p style={{ marginTop: 0, color: 'var(--text-secondary)' }}>

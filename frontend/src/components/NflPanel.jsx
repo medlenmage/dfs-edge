@@ -224,7 +224,7 @@ export function NflPanel() {
           </div>
 
           {tab === 'matchups' && <NflMatchups slate={slate} />}
-          {tab === 'lineups' && <NflLineupsPanel season={slate.season} week={slate.week} />}
+          {tab === 'lineups' && <NflLineupsPanel season={slate.season} week={slate.week} slate={slate} />}
         </>
       )}
     </div>
