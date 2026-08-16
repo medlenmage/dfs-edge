@@ -25,7 +25,7 @@ from typing import Any
 
 from app.clients import mlb, odds, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
-from app.services import scoring
+from app.services import salaries, scoring
 
 log = logging.getLogger(__name__)
 
@@ -138,9 +138,13 @@ async def build_slate(
         "bullpen_era": scoring.league_average(data["bullpen"], "era", 0, "era"),
     }
 
+    # Salaries are a manual upload, not a fetch -- see services/salaries.py.
+    # Whatever's cached for this date (possibly nothing) gets matched in.
+    salary_lookup = salaries.build_lookup(salaries.load(day))
+
     built = await asyncio.gather(
         *[
-            _build_game(g, season, data, baselines, lines, include_hitters)
+            _build_game(g, season, data, baselines, lines, include_hitters, salary_lookup)
             for g in games
         ],
         return_exceptions=True,
@@ -177,6 +181,7 @@ async def _build_game(
     baselines: dict[str, Any],
     lines: list[dict[str, Any]],
     include_hitters: bool,
+    salary_lookup: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
     game_pk = game.get("gamePk")
     teams = game.get("teams") or {}
@@ -274,6 +279,7 @@ async def _build_game(
             is_home=True,
             implied_runs=(line or {}).get("home_implied_runs"),
             confirmed=lineups.get("home") or [],
+            team_abbrev=home_abbrev, salary_lookup=salary_lookup,
         ),
         _team_hitters(
             away_t.get("id"), season, data, baselines, env,
@@ -281,6 +287,7 @@ async def _build_game(
             is_home=False,
             implied_runs=(line or {}).get("away_implied_runs"),
             confirmed=lineups.get("away") or [],
+            team_abbrev=away_t.get("abbreviation") or "", salary_lookup=salary_lookup,
         ),
         mlb.get_team_injuries(home_t.get("id"), season),
         mlb.get_team_injuries(away_t.get("id"), season),
@@ -309,10 +316,36 @@ async def _build_game(
     )
     if home_edge:
         result["home"]["probable_pitcher"]["edge"] = home_edge
+        result["home"]["probable_pitcher"]["salary"] = _salary_info(
+            salary_lookup, home_pitcher.get("name"), home_abbrev, home_edge["score"]
+        )
     if away_edge:
         result["away"]["probable_pitcher"]["edge"] = away_edge
+        result["away"]["probable_pitcher"]["salary"] = _salary_info(
+            salary_lookup, away_pitcher.get("name"), away_t.get("abbreviation") or "", away_edge["score"]
+        )
 
     return result
+
+
+def _salary_info(
+    lookup: dict[tuple[str, str], dict[str, Any]],
+    name: str | None,
+    team_abbrev: str,
+    edge_score: float | None,
+) -> dict[str, Any] | None:
+    """Salary + value for one player, or None if no salary file is loaded
+    for this date or the name/team didn't match anything in it."""
+    if not lookup or not name:
+        return None
+    row = salaries.match(lookup, name, team_abbrev)
+    if not row:
+        return None
+    return {
+        "salary": row["salary"],
+        "avg_points": row["avg_points"],
+        "value": salaries.value_score(edge_score, row["salary"]),
+    }
 
 
 def _stack_score(hitters: list[dict[str, Any]]) -> float | None:
@@ -417,6 +450,8 @@ async def _team_hitters(
     is_home: bool,
     implied_runs: float | None,
     confirmed: list[int],
+    team_abbrev: str = "",
+    salary_lookup: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if not team_id:
         return []
@@ -512,6 +547,7 @@ async def _team_hitters(
                 "season": season_stat,
                 "vs_hand": split_stat,
                 "edge": {**edge, "components": components},
+                "salary": _salary_info(salary_lookup, bio.get("name"), team_abbrev, edge["score"]),
             }
         )
 

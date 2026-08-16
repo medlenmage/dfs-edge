@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.clients import mlb, odds, savant, weather  # noqa: E402
-from app.services import mlb_slate, scoring  # noqa: E402
+from app.services import mlb_slate, salaries, scoring  # noqa: E402
 
 DAY = "2026-08-14"
 
@@ -157,6 +157,20 @@ FAKE_WEATHER = {
     "cloud_cover_pct": 20, "forecast_time_utc": f"{DAY}T23:00",
 }
 
+def salary_row(name, team, salary, avg_points):
+    return {
+        "name": name, "normalized_name": salaries.normalize_name(name),
+        "team": team, "position": "", "salary": salary, "avg_points": avg_points,
+    }
+
+
+SALARIES = [
+    salary_row("Big Righty Bat", "NYY", 4200, 9.5),
+    salary_row("Boston Slugger", "BOS", 5600, 11.0),
+    salary_row("Lefty McLefterson", "BOS", 8800, 16.0),
+    # "Punchless Lefty" is deliberately absent -- exercises the no-match path.
+]
+
 
 # --------------------------------------------------------------------------
 # Monkeypatch the clients
@@ -222,6 +236,10 @@ async def fake_bullpen(season):
     return BULLPEN
 
 
+def fake_salary_load(day):
+    return SALARIES
+
+
 def patch() -> None:
     mlb.get_schedule = fake_schedule
     mlb.get_people = fake_people
@@ -236,6 +254,7 @@ def patch() -> None:
     savant.get_hitter_batted_ball = fake_savant_hit
     savant.get_pitcher_batted_ball = fake_savant_pitch
     mlb.get_bullpen_stats = fake_bullpen
+    salaries.load = fake_salary_load
 
 
 # --------------------------------------------------------------------------
@@ -309,6 +328,14 @@ async def main() -> int:
           f"{home_edge['components']['contact_quality_allowed']} vs "
           f"{away_edge['components']['contact_quality_allowed']}")
 
+    print("\nSalaries")
+    home_salary = game["home"]["probable_pitcher"]["salary"]
+    check("home starter matched a salary", home_salary is not None and home_salary["salary"] == 8800,
+          str(home_salary))
+    check("pitcher value is edge score per $1000",
+          home_salary["value"] == round(home_edge["score"] / 8.8, 2),
+          f"{home_salary['value']} vs expected {round(home_edge['score'] / 8.8, 2)}")
+
     print("\nInjuries")
     check("Red Sox injury report includes the hurt reliever",
           any(p["name"] == "Hurt Reliever" for p in game["home"]["injuries"]))
@@ -343,6 +370,15 @@ async def main() -> int:
     check("Red Sox hitter is hurt by the Yankees' strong bullpen",
           sox["Boston Slugger"]["edge"]["components"]["bullpen"]["value"] < 1.0,
           str(sox["Boston Slugger"]["edge"]["components"]["bullpen"]))
+
+    check("hitter matched a salary by name + team",
+          righty["salary"] is not None and righty["salary"]["salary"] == 4200,
+          str(righty["salary"]))
+    check("hitter value is edge score per $1000",
+          righty["salary"]["value"] == round(righty["edge"]["score"] / 4.2, 2),
+          f"{righty['salary']['value']} vs expected {round(righty['edge']['score'] / 4.2, 2)}")
+    check("hitter with no salary match returns None, not a crash",
+          lefty["salary"] is None, str(lefty["salary"]))
 
     switch = yanks["Switch Hitter Sam"]
     check("switch hitter gets pitcher's vs-RHB split (bats right vs LHP)",
