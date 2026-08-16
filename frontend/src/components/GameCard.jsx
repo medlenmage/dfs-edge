@@ -23,6 +23,12 @@ function TeamRow({ team, opponent, isHome }) {
             {team.injuries.length > 3 ? `, +${team.injuries.length - 3} more` : ''}
           </div>
         )}
+        {team.scratches?.length > 0 && (
+          <div className="sub-line">
+            <span className="badge risk">⚠ scratched today</span>{' '}
+            {team.scratches.map((s) => s.name).join(', ')}
+          </div>
+        )}
       </div>
       <div className="runs">
         {team.implied_runs != null ? `${team.implied_runs.toFixed(1)} R` : '—'}

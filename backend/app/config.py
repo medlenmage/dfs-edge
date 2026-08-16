@@ -68,6 +68,12 @@ class Settings:
         self.ttl_weather: int = _int("CACHE_TTL_WEATHER", 1_800)
         self.ttl_injuries: int = _int("CACHE_TTL_INJURIES", 3_600)
 
+        # --- Background lineup watcher ---
+        # How often to re-check confirmed lineups for scratches, in
+        # seconds. Matches mlb.get_lineups()'s own 300s cache TTL so a
+        # poll is never wasted work re-fetching something still fresh.
+        self.lineup_poll_interval_sec: int = _int("LINEUP_POLL_INTERVAL_SEC", 300)
+
         # --- Storage ---
         db_path = os.getenv("DB_PATH", "data/dfsedge.db").strip()
         self.db_path: Path = (

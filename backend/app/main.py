@@ -10,6 +10,7 @@ Then open http://127.0.0.1:8000/docs for interactive API documentation.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -19,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.clients.http import close_client
 from app.config import get_settings
 from app.routers import mlb, system
+from app.services import lineup_watch
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,7 +37,10 @@ async def lifespan(app: FastAPI):
     log.info("  betting lines : %s", "ON" if settings.has_odds else "off (no ODDS_API_KEY)")
     log.info("  AI analysis   : %s", "ON" if settings.has_claude else "off (no ANTHROPIC_API_KEY)")
     log.info("  cache db      : %s", settings.db_path)
+    log.info("  lineup watch  : polling every %ds for scratches", settings.lineup_poll_interval_sec)
+    watch_task = asyncio.create_task(lineup_watch._poll_loop())
     yield
+    watch_task.cancel()
     await close_client()
     log.info("DFS Edge shut down")
 
