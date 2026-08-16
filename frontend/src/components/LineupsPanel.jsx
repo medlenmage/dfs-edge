@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { api } from '../api'
 import { LineupsTable } from './LineupsTable'
+import { PlayerPoolTable } from './PlayerPoolTable'
 
 // Named stack shapes, largest group first. Shapes that sum to 8 use
 // every hitter slot; "4-2" and "3-3" leave 2 hitters as free picks.
@@ -36,9 +37,40 @@ export function LineupsPanel({ date, slate }) {
   const [stackTeams, setStackTeams] = useState([])
   const [maxExposure, setMaxExposure] = useState('')
   const [selected, setSelected] = useState(0)
+  const [locked, setLocked] = useState(new Set())
+  const [excluded, setExcluded] = useState(new Set())
+  const [showPool, setShowPool] = useState(false)
 
   const teams = useMemo(() => teamsOnSlate(slate), [slate])
   const groups = STACK_SHAPES[stackShape]
+
+  function toggleLock(id) {
+    setLocked((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+    setExcluded((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }
+
+  function toggleExclude(id) {
+    setExcluded((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+    setLocked((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }
 
   function changeShape(shape) {
     setStackShape(shape)
@@ -61,6 +93,8 @@ export function LineupsPanel({ date, slate }) {
         stackGroups: groups.length ? groups : null,
         stackTeams: groups.length ? stackTeams.map((t) => t || null) : null,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
+        lockedIds: locked.size ? [...locked] : null,
+        excludedIds: excluded.size ? [...excluded] : null,
       })
       setSelected(0)
       setState({ status: 'ready', ...result })
@@ -109,7 +143,23 @@ export function LineupsPanel({ date, slate }) {
             ? 'Solving…'
             : `Generate ${numLineups > 1 ? `${numLineups} lineups` : 'lineup'}`}
         </button>
+        <button onClick={() => setShowPool((v) => !v)}>
+          {showPool ? 'Hide player pool' : 'Player pool'}
+          {locked.size + excluded.size > 0 ? ` (${locked.size + excluded.size})` : ''}
+        </button>
       </div>
+
+      {showPool && (
+        <div style={{ marginBottom: 14 }}>
+          <PlayerPoolTable
+            slate={slate}
+            locked={locked}
+            excluded={excluded}
+            onToggleLock={toggleLock}
+            onToggleExclude={toggleExclude}
+          />
+        </div>
+      )}
 
       {groups.length > 0 && (
         <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
@@ -145,7 +195,8 @@ export function LineupsPanel({ date, slate }) {
           for more
           than one lineup forces each to differ from the ones before it;
           a max exposure cap keeps any one player from showing up in too
-          many of them.
+          many of them. Open the player pool to lock someone into every
+          lineup or exclude them entirely.
         </p>
       )}
 

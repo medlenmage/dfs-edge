@@ -268,6 +268,32 @@ td.num { font-variant-numeric: tabular-nums; text-align: right; }
 .badge.warn { color: var(--text-primary); border-color: color-mix(in oklab, var(--warning) 55%, transparent); }
 .badge.risk { color: var(--critical); border-color: color-mix(in oklab, var(--critical) 40%, transparent); }
 
+/* ---------- Toggle pills (player pool lock/exclude controls) ---------- */
+
+button.pill-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 550;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+}
+button.pill-toggle:hover:not(:disabled) { border-color: var(--baseline); }
+button.pill-toggle.active.lock {
+  background: color-mix(in oklab, var(--good) 18%, transparent);
+  border-color: color-mix(in oklab, var(--good) 45%, transparent);
+  color: var(--success-text);
+}
+button.pill-toggle.active.exclude {
+  background: color-mix(in oklab, var(--critical) 14%, transparent);
+  border-color: color-mix(in oklab, var(--critical) 45%, transparent);
+  color: var(--critical);
+}
+
 /* ---------- Game cards ---------- */
 
 .games {
