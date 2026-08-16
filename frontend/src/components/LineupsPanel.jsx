@@ -26,6 +26,8 @@ function teamsOnSlate(slate) {
   return [...teams].sort()
 }
 
+const ROSTER_SLOTS = ['P', 'C', '1B', '2B', '3B', 'SS', 'OF']
+
 /**
  * Generates one or many optimal DraftKings Classic MLB lineups from
  * whatever salary + projections CSVs are loaded for the date.
@@ -40,9 +42,35 @@ export function LineupsPanel({ date, slate }) {
   const [locked, setLocked] = useState(new Set())
   const [excluded, setExcluded] = useState(new Set())
   const [showPool, setShowPool] = useState(false)
+  const [showExposure, setShowExposure] = useState(false)
+  const [slotExposure, setSlotExposure] = useState({})
+  const [teamExposure, setTeamExposure] = useState([])
+  const [newTeamCap, setNewTeamCap] = useState({ team: '', pct: '' })
 
   const teams = useMemo(() => teamsOnSlate(slate), [slate])
   const groups = STACK_SHAPES[stackShape]
+
+  function setSlotCap(slot, value) {
+    setSlotExposure((prev) => {
+      const next = { ...prev }
+      if (value.trim()) next[slot] = value
+      else delete next[slot]
+      return next
+    })
+  }
+
+  function addTeamCap() {
+    if (!newTeamCap.team || !newTeamCap.pct.trim()) return
+    setTeamExposure((prev) => [
+      ...prev.filter((e) => e.team !== newTeamCap.team),
+      { team: newTeamCap.team, pct: newTeamCap.pct },
+    ])
+    setNewTeamCap({ team: '', pct: '' })
+  }
+
+  function removeTeamCap(team) {
+    setTeamExposure((prev) => prev.filter((e) => e.team !== team))
+  }
 
   function toggleLock(id) {
     setLocked((prev) => {
@@ -93,6 +121,12 @@ export function LineupsPanel({ date, slate }) {
         stackGroups: groups.length ? groups : null,
         stackTeams: groups.length ? stackTeams.map((t) => t || null) : null,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
+        exposureBySlot: Object.keys(slotExposure).length
+          ? Object.fromEntries(Object.entries(slotExposure).map(([k, v]) => [k, Number(v)]))
+          : null,
+        teamExposureCap: teamExposure.length
+          ? Object.fromEntries(teamExposure.map((e) => [e.team, Number(e.pct)]))
+          : null,
         lockedIds: locked.size ? [...locked] : null,
         excludedIds: excluded.size ? [...excluded] : null,
       })
@@ -147,6 +181,12 @@ export function LineupsPanel({ date, slate }) {
           {showPool ? 'Hide player pool' : 'Player pool'}
           {locked.size + excluded.size > 0 ? ` (${locked.size + excluded.size})` : ''}
         </button>
+        <button onClick={() => setShowExposure((v) => !v)}>
+          {showExposure ? 'Hide exposure limits' : 'Exposure limits'}
+          {Object.keys(slotExposure).length + teamExposure.length > 0
+            ? ` (${Object.keys(slotExposure).length + teamExposure.length})`
+            : ''}
+        </button>
       </div>
 
       {showPool && (
@@ -158,6 +198,78 @@ export function LineupsPanel({ date, slate }) {
             onToggleLock={toggleLock}
             onToggleExclude={toggleExclude}
           />
+        </div>
+      )}
+
+      {showExposure && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="sub-line" style={{ marginBottom: 8 }}>
+            Position exposure — overrides the general max exposure for specific slots
+          </div>
+          <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
+            {ROSTER_SLOTS.map((slot) => (
+              <label key={slot} className="dim" style={{ fontSize: 13 }}>
+                {slot}{' '}
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  placeholder="—"
+                  value={slotExposure[slot] || ''}
+                  onChange={(e) => setSlotCap(slot, e.target.value)}
+                  style={{ width: 55 }}
+                />
+                %
+              </label>
+            ))}
+          </div>
+
+          {groups.length > 0 && (
+            <>
+              <div className="sub-line" style={{ marginBottom: 8 }}>
+                Team exposure — caps how often a team is used AS THE STACK (auto-assigned groups only)
+              </div>
+              <div className="controls" style={{ marginBottom: 8, flexWrap: 'wrap' }}>
+                <select
+                  value={newTeamCap.team}
+                  onChange={(e) => setNewTeamCap((prev) => ({ ...prev, team: e.target.value }))}
+                >
+                  <option value="">Team…</option>
+                  {teams.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  placeholder="%"
+                  value={newTeamCap.pct}
+                  onChange={(e) => setNewTeamCap((prev) => ({ ...prev, pct: e.target.value }))}
+                  style={{ width: 60 }}
+                />
+                <button onClick={addTeamCap}>Add</button>
+              </div>
+              {teamExposure.length > 0 && (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {teamExposure.map((e) => (
+                    <span key={e.team} className="badge">
+                      {e.team} ≤ {e.pct}%{' '}
+                      <button
+                        className="pill-toggle"
+                        style={{ padding: '0 4px', border: 'none' }}
+                        onClick={() => removeTeamCap(e.team)}
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -264,6 +376,33 @@ export function LineupsPanel({ date, slate }) {
                     <tr key={e.id}>
                       <td>{e.name}</td>
                       <td className="dim">{e.team}</td>
+                      <td className="num">{e.count}</td>
+                      <td className="num">{e.pct}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {state.team_exposure?.length > 0 && (
+            <div className="card table-wrap" style={{ marginTop: 16 }}>
+              <div className="sub-line" style={{ marginBottom: 8 }}>
+                Team stack usage across {state.lineups.length} lineup
+                {state.lineups.length > 1 ? 's' : ''}
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Team</th>
+                    <th className="num">Lineups stacked</th>
+                    <th className="num">Exposure</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.team_exposure.map((e) => (
+                    <tr key={e.team}>
+                      <td className="name">{e.team}</td>
                       <td className="num">{e.count}</td>
                       <td className="num">{e.pct}%</td>
                     </tr>

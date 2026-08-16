@@ -287,6 +287,12 @@ async def generate_lineups(
     max_exposure_pct: float | None = Body(
         None, embed=True, description="Cap how often any one player appears across the set"
     ),
+    exposure_by_slot: dict[str, float] | None = Body(
+        None, embed=True, description="Per-slot exposure cap overrides, e.g. {'OF': 40}"
+    ),
+    team_exposure_cap: dict[str, float] | None = Body(
+        None, embed=True, description="Cap how often a team is used AS THE STACK, e.g. {'NYY': 30}"
+    ),
     locked_ids: list[int] | None = Body(
         None, embed=True, description="Player ids that must appear in every generated lineup"
     ),
@@ -312,6 +318,8 @@ async def generate_lineups(
             stack_groups=stack_groups,
             stack_teams=stack_teams,
             max_exposure_pct=max_exposure_pct,
+            exposure_by_slot=exposure_by_slot,
+            team_exposure_cap=team_exposure_cap,
             locked_ids=locked_ids,
             excluded_ids=excluded_ids,
         )

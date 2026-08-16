@@ -80,7 +80,8 @@ def _stack_constraints(
     usable: list[dict[str, Any]],
     stack_groups: list[int],
     stack_teams: list[str | None],
-) -> None:
+    banned_stack_teams: set[str],
+) -> dict[tuple[int, str], pulp.LpVariable]:
     """
     Force at least `stack_groups` hitters onto each of that many distinct
     teams (e.g. [4, 2, 2] for a "4-2-2" -- at least 4 from one team, at
@@ -88,7 +89,10 @@ def _stack_constraints(
     `stack_teams` entry is a real team name gets a direct constraint on
     that team; a group left as None ("auto") gets an indicator-variable
     assignment so the solver picks the best team for that slot -- never
-    colliding with another group's team, manual or auto.
+    colliding with another group's team, manual or auto, and never
+    picking a team in `banned_stack_teams` (a team that's hit its own
+    stack-exposure cap in an earlier lineup -- manual picks are exempt,
+    since naming a team explicitly is a deliberate override each time).
 
     Deliberately a LOWER bound, not an exact count: for shapes whose
     groups already sum to all 8 hitter slots (5-3, 4-4, etc.) there's no
@@ -97,10 +101,15 @@ def _stack_constraints(
     leftover 2 hitters land anywhere -- including padding one of the
     named stacks further -- rather than artificially requiring a THIRD
     team to exist just to soak up slots nobody asked to constrain.
+
+    Returns the auto-assignment indicator variables (`y[i, t]`) so the
+    caller can read back, after solving, which team ended up filling
+    each auto group -- needed for stack-exposure tracking. Empty if
+    there are no auto groups.
     """
     all_teams = sorted({p["team"] for p in usable})
     manual_teams = {t for t in stack_teams if t is not None}
-    auto_teams = [t for t in all_teams if t not in manual_teams]
+    auto_teams = [t for t in all_teams if t not in manual_teams and t not in banned_stack_teams]
     auto_group_idx = [i for i, t in enumerate(stack_teams) if t is None]
 
     def hitter_count_for_team(t: str) -> pulp.LpAffineExpression:
@@ -112,7 +121,7 @@ def _stack_constraints(
             prob += hitter_count_for_team(team) >= size
 
     if not auto_group_idx:
-        return
+        return {}
 
     # y[i, t] = 1 means auto group i is assigned to team t. Each auto
     # group gets exactly one team; each team fills at most one auto
@@ -134,6 +143,8 @@ def _stack_constraints(
         size = stack_groups[i]
         for t in auto_teams:
             prob += hitter_count_for_team(t) >= size - MAX_HITTERS * (1 - y[(i, t)])
+
+    return y
 
 
 def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -189,6 +200,7 @@ def _solve_one(
     excluded_ids: set[int],
     no_good_cuts: list[set[int]],
     locked_ids: set[int],
+    banned_stack_teams: set[str],
 ) -> dict[str, Any] | None:
     """
     Solve a single lineup against `pool`, minus anyone in `excluded_ids`
@@ -235,8 +247,11 @@ def _solve_one(
         <= SALARY_CAP
     )
 
+    stack_auto_y: dict[tuple[int, str], pulp.LpVariable] = {}
     if stack_groups:
-        _stack_constraints(prob, x, usable, stack_groups, stack_teams)
+        stack_auto_y = _stack_constraints(
+            prob, x, usable, stack_groups, stack_teams, banned_stack_teams
+        )
 
     # No-good cuts: forbid exactly reproducing any earlier lineup by
     # capping how many of its 10 players can reappear together.
@@ -273,12 +288,19 @@ def _solve_one(
                 projected_points += p["projected_fpts"]
                 player_ids.add(p["id"])
 
+    # Which team(s) the solver actually picked for each auto stack
+    # group, read back from the solved indicator variables -- exact,
+    # not a guess, since we already forced exactly one y[i,t]==1 per
+    # auto group.
+    auto_stack_teams = {t for (i, t), var in stack_auto_y.items() if round(var.value() or 0) == 1}
+
     return {
         "salary_used": salary_used,
         "salary_remaining": SALARY_CAP - salary_used,
         "projected_points": round(projected_points, 2),
         "slots": slots_out,
         "_player_ids": player_ids,
+        "_auto_stack_teams": auto_stack_teams,
     }
 
 
@@ -289,11 +311,29 @@ def generate_lineups(
     stack_groups: list[int] | None = None,
     stack_teams: list[str | None] | None = None,
     max_exposure_pct: float | None = None,
+    exposure_by_slot: dict[str, float] | None = None,
+    team_exposure_cap: dict[str, float] | None = None,
     locked_ids: list[int] | None = None,
     excluded_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     Generate up to `num_lineups` distinct legal lineups.
+
+    `exposure_by_slot`, if given, overrides `max_exposure_pct` for
+    specific roster slots -- e.g. `{"OF": 40}` caps outfield exposure at
+    40% while everything else still uses the general cap (or is
+    unlimited, if `max_exposure_pct` wasn't set either). The cap applied
+    to a player is based on whichever slot they actually filled in that
+    particular lineup, since a multi-eligible player can occupy
+    different slots across the set.
+
+    `team_exposure_cap`, if given, caps how often a team is used AS THE
+    STACK -- not incidental one-off appearances of its players -- across
+    the generated set, e.g. `{"NYY": 30}` means an auto-assigned stack
+    group lands on NYY in no more than 30% of lineups. Only applies to
+    auto-assigned groups (`stack_teams` entries left as `None`); a team
+    you explicitly name in `stack_teams` is a deliberate override each
+    time and is never banned by this cap. Requires `stack_groups`.
 
     `locked_ids`, if given, are player ids that must appear in EVERY
     generated lineup, exempt from the exposure cap (a lock is a
@@ -384,14 +424,26 @@ def generate_lineups(
     else:
         stack_teams = []
 
-    exposure_cap = (
-        max(1, round(max_exposure_pct / 100 * num_lineups))
-        if max_exposure_pct is not None
-        else None
-    )
+    if exposure_by_slot:
+        bad_slots = set(exposure_by_slot) - set(SLOT_TYPES)
+        if bad_slots:
+            raise OptimizerError(f"Unknown roster slot(s) in exposure_by_slot: {sorted(bad_slots)}.")
+
+    if team_exposure_cap:
+        if not stack_groups:
+            raise OptimizerError("team_exposure_cap requires stack_groups to be set.")
+        pool_teams = {p["team"] for p in pool}
+        unknown = set(team_exposure_cap) - pool_teams
+        if unknown:
+            raise OptimizerError(f"Unknown team(s) in team_exposure_cap: {sorted(unknown)}.")
+
+    def _cap_to_count(pct: float) -> int:
+        return max(1, round(pct / 100 * num_lineups))
 
     exposure_count: dict[int, int] = {}
+    team_stack_count: dict[str, int] = {}
     excluded_ids: set[int] = set()
+    banned_stack_teams: set[str] = set()
     no_good_cuts: list[set[int]] = []
     lineups: list[dict[str, Any]] = []
 
@@ -403,6 +455,7 @@ def generate_lineups(
             excluded_ids=excluded_ids,
             no_good_cuts=no_good_cuts,
             locked_ids=locked,
+            banned_stack_teams=banned_stack_teams,
         )
         if result is None:
             if i == 0:
@@ -414,8 +467,13 @@ def generate_lineups(
             break  # ran out of room for more unique/exposure-legal lineups
 
         player_ids: set[int] = result.pop("_player_ids")
+        auto_stack_teams: set[str] = result.pop("_auto_stack_teams")
         no_good_cuts.append(player_ids)
         lineups.append(result)
+
+        slot_of: dict[int, str] = {
+            p["id"]: slot for slot, players in result["slots"].items() for p in players
+        }
 
         for pid in player_ids:
             exposure_count[pid] = exposure_count.get(pid, 0) + 1
@@ -424,8 +482,15 @@ def generate_lineups(
             # exposure limit, and they're guaranteed to reappear anyway.
             if pid in locked:
                 continue
-            if exposure_cap is not None and exposure_count[pid] >= exposure_cap:
+            slot_cap_pct = (exposure_by_slot or {}).get(slot_of[pid], max_exposure_pct)
+            if slot_cap_pct is not None and exposure_count[pid] >= _cap_to_count(slot_cap_pct):
                 excluded_ids.add(pid)
+
+        for t in auto_stack_teams:
+            team_stack_count[t] = team_stack_count.get(t, 0) + 1
+            cap_pct = (team_exposure_cap or {}).get(t)
+            if cap_pct is not None and team_stack_count[t] >= _cap_to_count(cap_pct):
+                banned_stack_teams.add(t)
 
     by_id = {p["id"]: p for p in pool}
     exposure = [
@@ -438,5 +503,9 @@ def generate_lineups(
         }
         for pid, count in sorted(exposure_count.items(), key=lambda kv: -kv[1])
     ]
+    team_exposure = [
+        {"team": t, "count": count, "pct": round(100 * count / len(lineups), 1)}
+        for t, count in sorted(team_stack_count.items(), key=lambda kv: -kv[1])
+    ]
 
-    return {"lineups": lineups, "exposure": exposure}
+    return {"lineups": lineups, "exposure": exposure, "team_exposure": team_exposure}
