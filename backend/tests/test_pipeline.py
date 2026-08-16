@@ -488,7 +488,7 @@ async def main() -> int:
         ]
     }
 
-    lineup = optimizer.generate_lineup(opt_slate)
+    lineup = optimizer.generate_lineups(opt_slate)["lineups"][0]
     all_ids = [p["id"] for slot in lineup["slots"].values() for p in slot]
     slot_counts = {slot: len(players) for slot, players in lineup["slots"].items()}
     check("optimizer respects the salary cap",
@@ -498,7 +498,7 @@ async def main() -> int:
     check("optimizer never rosters a scratched player, even a huge-projection one",
           9106 not in all_ids, str(all_ids))
 
-    stacked = optimizer.generate_lineup(opt_slate, min_stack=5)
+    stacked = optimizer.generate_lineups(opt_slate, min_stack=5)["lineups"][0]
     opt_hitter_count = sum(
         1
         for slot, players in stacked["slots"].items()
@@ -509,10 +509,102 @@ async def main() -> int:
     check("min_stack constraint is honored", opt_hitter_count >= 5, str(opt_hitter_count))
 
     try:
-        optimizer.generate_lineup({"games": []})
+        optimizer.generate_lineups({"games": []})
         check("optimizer raises OptimizerError on an empty pool", False)
     except optimizer.OptimizerError:
         check("optimizer raises OptimizerError on an empty pool", True)
+
+    print("\nLineup optimizer: multi-lineup generation and exposure caps")
+
+    # Real headroom at every slot type (3+ options per infield position,
+    # 10 outfield-eligible, 6 pitchers) so a 50% cap over 4 lineups is
+    # comfortably satisfiable regardless of which players earlier,
+    # greedy solves happen to pick -- a tighter pool risks a slot type
+    # running out even though a smarter global allocation would work,
+    # which would make this test flaky rather than proving the feature.
+    mul_hitters_home = [
+        opt_hitter(9301, "MC1", "MUL1", "C", 3000, 8.0),
+        opt_hitter(9302, "MC2", "MUL1", "C", 2900, 7.5),
+        opt_hitter(9303, "MC3", "MUL1", "C", 2800, 7.2),
+        opt_hitter(9304, "M1B1", "MUL1", "1B", 4000, 10.0),
+        opt_hitter(9305, "M1B2", "MUL1", "1B", 3900, 9.6),
+        opt_hitter(9306, "M1B3", "MUL1", "1B", 3800, 9.3),
+        opt_hitter(9307, "M2B1", "MUL1", "2B", 3500, 9.0),
+        opt_hitter(9308, "M2B2", "MUL1", "2B", 3400, 8.7),
+        opt_hitter(9309, "M2B3", "MUL1", "2B", 3300, 8.4),
+        opt_hitter(9310, "M3B1", "MUL1", "3B", 4500, 12.0),
+        opt_hitter(9311, "M3B2", "MUL1", "3B", 4400, 11.5),
+        opt_hitter(9312, "M3B3", "MUL1", "3B", 4300, 11.2),
+        opt_hitter(9313, "MSS1", "MUL1", "SS", 3800, 9.5),
+        opt_hitter(9314, "MSS2", "MUL1", "SS", 3700, 9.2),
+        opt_hitter(9315, "MSS3", "MUL1", "SS", 3600, 8.9),
+        opt_hitter(9316, "MOF1", "MUL1", "OF", 5000, 14.0),
+        opt_hitter(9317, "MOF2", "MUL1", "OF", 4800, 13.5),
+        opt_hitter(9318, "MOF3", "MUL1", "OF", 4600, 13.0),
+        opt_hitter(9319, "MOF4", "MUL1", "OF", 4400, 12.5),
+        opt_hitter(9320, "MOF5", "MUL1", "OF", 4200, 12.0),
+    ]
+    mul_hitters_away = [
+        opt_hitter(9321, "MOF6", "MUL2", "OF", 4000, 11.5),
+        opt_hitter(9322, "MOF7", "MUL2", "OF", 3900, 11.2),
+        opt_hitter(9323, "MOF8", "MUL2", "OF", 3800, 10.9),
+        opt_hitter(9324, "MOF9", "MUL2", "OF", 3700, 10.6),
+        opt_hitter(9325, "MOF10", "MUL2", "OF", 3600, 10.3),
+    ]
+    mul_slate = {
+        "games": [
+            {
+                "home": {"abbrev": "MUL1", "hitters": mul_hitters_home,
+                         "probable_pitcher": opt_pitcher(9400, "MP1", 9000, 18.0), "scratches": []},
+                "away": {"abbrev": "MUL2", "hitters": mul_hitters_away,
+                         "probable_pitcher": opt_pitcher(9401, "MP2", 8800, 17.5), "scratches": []},
+            },
+            {
+                "home": {"abbrev": "MUL3", "hitters": [],
+                         "probable_pitcher": opt_pitcher(9402, "MP3", 8600, 17.0), "scratches": []},
+                "away": {"abbrev": "MUL4", "hitters": [],
+                         "probable_pitcher": opt_pitcher(9403, "MP4", 8400, 16.5), "scratches": []},
+            },
+            {
+                "home": {"abbrev": "MUL5", "hitters": [],
+                         "probable_pitcher": opt_pitcher(9404, "MP5", 8200, 16.0), "scratches": []},
+                "away": {"abbrev": "MUL6", "hitters": [],
+                         "probable_pitcher": opt_pitcher(9405, "MP6", 8000, 15.5), "scratches": []},
+            },
+        ]
+    }
+
+    multi = optimizer.generate_lineups(mul_slate, num_lineups=4, max_exposure_pct=50)
+    check("multi-lineup: requested count fully satisfied when the pool supports it",
+          len(multi["lineups"]) == 4, str(len(multi["lineups"])))
+    id_sets = [
+        frozenset(p["id"] for slot in lu["slots"].values() for p in slot)
+        for lu in multi["lineups"]
+    ]
+    check("multi-lineup: every generated lineup is distinct (no-good cuts hold)",
+          len(id_sets) == len(set(id_sets)), str(id_sets))
+    max_count = max((e["count"] for e in multi["exposure"]), default=0)
+    check("multi-lineup: 50% exposure cap over 4 lineups holds (no one appears more than 2x)",
+          max_count <= 2, str(multi["exposure"]))
+    check("multi-lineup: exposure summary is sorted by count descending",
+          multi["exposure"] == sorted(multi["exposure"], key=lambda e: -e["count"]),
+          str(multi["exposure"]))
+
+    thin_result = optimizer.generate_lineups(opt_slate, num_lineups=10)
+    check("multi-lineup: gracefully returns fewer than requested once the pool runs dry",
+          0 < len(thin_result["lineups"]) < 10, str(len(thin_result["lineups"])))
+
+    try:
+        optimizer.generate_lineups(opt_slate, num_lineups=0)
+        check("optimizer rejects num_lineups < 1", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects num_lineups < 1", True)
+
+    try:
+        optimizer.generate_lineups(opt_slate, num_lineups=optimizer.MAX_LINEUPS + 1)
+        check("optimizer rejects num_lineups above MAX_LINEUPS", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects num_lineups above MAX_LINEUPS", True)
 
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",

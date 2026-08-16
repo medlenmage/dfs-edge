@@ -275,13 +275,18 @@ async def ask(
 
 
 @router.post("/lineups")
-async def generate_lineup(
+async def generate_lineups(
     date: str | None = Body(None, embed=True),
+    num_lineups: int = Body(1, embed=True, description="How many distinct lineups to build"),
     min_stack: int | None = Body(None, embed=True, description="Require this many hitters from one team"),
+    max_exposure_pct: float | None = Body(
+        None, embed=True, description="Cap how often any one player appears across the set"
+    ),
 ) -> dict[str, Any]:
     """
-    The single highest-projected DraftKings Classic MLB lineup, built
-    from whatever salary + projections CSVs are loaded for the date.
+    Up to `num_lineups` distinct, highest-projected DraftKings Classic
+    MLB lineups, built from whatever salary + projections CSVs are
+    loaded for the date.
 
     Requires both -- this app doesn't build its own FPTS projections
     yet, so a RotoWire projections file is the objective function this
@@ -290,7 +295,9 @@ async def generate_lineup(
     day = date or date_cls.today().isoformat()
     slate = await mlb_slate.build_slate(day)
     try:
-        lineup = optimizer.generate_lineup(slate, min_stack=min_stack)
+        result = optimizer.generate_lineups(
+            slate, num_lineups=num_lineups, min_stack=min_stack, max_exposure_pct=max_exposure_pct
+        )
     except optimizer.OptimizerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"date": day, **lineup}
+    return {"date": day, **result}

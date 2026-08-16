@@ -71,10 +71,15 @@ export const api = {
       body: JSON.stringify({ question, date }),
     }),
 
-  generateLineup: (date, { minStack = null } = {}) =>
+  generateLineups: (date, { numLineups = 1, minStack = null, maxExposurePct = null } = {}) =>
     request('/api/mlb/lineups', {
       method: 'POST',
-      body: JSON.stringify({ date, min_stack: minStack }),
+      body: JSON.stringify({
+        date,
+        num_lineups: numLineups,
+        min_stack: minStack,
+        max_exposure_pct: maxExposurePct,
+      }),
     }),
 
   clearCache: (prefix) =>
