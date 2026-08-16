@@ -101,6 +101,7 @@ async def build_slate(
         "lines": odds.get_game_lines("mlb", force=force_refresh),
         "savant_hit": savant.get_hitter_batted_ball(season),
         "savant_pitch": savant.get_pitcher_batted_ball(season),
+        "bullpen": mlb.get_bullpen_stats(season),
     }
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
     data: dict[str, Any] = {}
@@ -132,6 +133,9 @@ async def build_slate(
         "pitcher_barrel": scoring.league_average(data["savant_pitch"], "barrel_pct", 0, "barrel_pct"),
         "pitcher_hard_hit": scoring.league_average(data["savant_pitch"], "hard_hit_pct", 0, "hard_hit_pct"),
         "pitcher_xwoba": scoring.league_average(data["savant_pitch"], "xwoba", 0, "xwoba"),
+        # get_bullpen_stats() already filters to teams with a trustworthy
+        # sample of relief innings, so no further gate here either.
+        "bullpen_era": scoring.league_average(data["bullpen"], "era", 0, "era"),
     }
 
     built = await asyncio.gather(
@@ -266,13 +270,15 @@ async def _build_game(
     home_hitters, away_hitters, home_injuries, away_injuries = await asyncio.gather(
         _team_hitters(
             home_t.get("id"), season, data, baselines, env,
-            opposing_pitcher=away_pitcher, is_home=True,
+            opposing_pitcher=away_pitcher, opponent_team_id=away_t.get("id"),
+            is_home=True,
             implied_runs=(line or {}).get("home_implied_runs"),
             confirmed=lineups.get("home") or [],
         ),
         _team_hitters(
             away_t.get("id"), season, data, baselines, env,
-            opposing_pitcher=home_pitcher, is_home=False,
+            opposing_pitcher=home_pitcher, opponent_team_id=home_t.get("id"),
+            is_home=False,
             implied_runs=(line or {}).get("away_implied_runs"),
             confirmed=lineups.get("away") or [],
         ),
@@ -407,12 +413,15 @@ async def _team_hitters(
     env: dict[str, Any],
     *,
     opposing_pitcher: dict[str, Any] | None,
+    opponent_team_id: int | None,
     is_home: bool,
     implied_runs: float | None,
     confirmed: list[int],
 ) -> list[dict[str, Any]]:
     if not team_id:
         return []
+
+    opp_bullpen = data["bullpen"].get(opponent_team_id)
 
     # Prefer the confirmed lineup; fall back to the active roster.
     if confirmed:
@@ -475,6 +484,7 @@ async def _team_hitters(
                 baselines["hitter_hard_hit"],
                 baselines["hitter_xwoba"],
             ),
+            "bullpen": scoring.bullpen_component(opp_bullpen, baselines["bullpen_era"]),
             "park": scoring.park_component(
                 hr_factor_for_hand(park, bats), park["runs"]
             ),

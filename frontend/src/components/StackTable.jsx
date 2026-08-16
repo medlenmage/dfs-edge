@@ -44,6 +44,9 @@ export function StackTable({ slate }) {
         pitcher: opp.probable_pitcher?.name,
         pitcherHand: opp.probable_pitcher?.throws,
         pitcherEra: opp.probable_pitcher?.season?.era,
+        // Every hitter on this team faces the same opposing bullpen, so
+        // any one of them carries the number.
+        bullpenEra: (t.hitters || [])[0]?.edge?.components?.bullpen?.era ?? null,
         topBats: (t.hitters || []).slice(0, 4),
       })
     }
@@ -103,6 +106,12 @@ export function StackTable({ slate }) {
                   {r.pitcherHand ? `${r.pitcherHand}HP` : ''}
                   {r.pitcherEra != null ? ` · ${r.pitcherEra} ERA` : ''}
                 </div>
+                {r.bullpenEra != null && (
+                  <div className="sub-line">
+                    {r.bullpenEra.toFixed(2)} bullpen ERA
+                    {r.bullpenEra >= 4.5 && <span className="badge risk" style={{ marginLeft: 4 }}>shaky pen</span>}
+                  </div>
+                )}
               </td>
               <td>
                 <div className="sub-line">{r.venue}</div>

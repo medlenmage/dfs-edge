@@ -26,11 +26,12 @@ from typing import Any
 # --------------------------------------------------------------------------
 WEIGHTS = {
     "platoon": 0.21,          # how the hitter performs vs this pitcher's hand
-    "pitcher": 0.19,          # how vulnerable this pitcher is to this hand
-    "team_total": 0.20,       # Vegas implied runs for his team
+    "pitcher": 0.16,          # how vulnerable this pitcher is to this hand
+    "team_total": 0.19,       # Vegas implied runs for his team
     "contact_quality": 0.15,  # Statcast barrel/hard-hit/xwOBA vs league average
-    "park": 0.12,             # ballpark HR factor for his handedness
-    "weather": 0.08,          # temperature + wind
+    "bullpen": 0.08,          # opposing team's relief corps, for the innings after the starter leaves
+    "park": 0.10,             # ballpark HR factor for his handedness
+    "weather": 0.06,          # temperature + wind
     "form": 0.03,             # last 15 games vs season baseline
     "home_road": 0.02,        # his own home/road split
 }
@@ -221,6 +222,28 @@ def home_road_component(
         "value": round(value, 3),
         "detail": f"{split_stat['ops']:.3f} OPS at {where}",
     }
+
+
+def bullpen_component(
+    opp_bullpen: dict[str, Any] | None, league_avg_bullpen_era: float | None
+) -> dict[str, Any]:
+    """
+    How exposed is this hitter to a shaky bullpen once the starter is out?
+
+    The `pitcher` component already covers the starter matchup -- this is
+    a second, smaller read on the innings after he leaves. A starter only
+    goes five or six innings, and a 5.20 bullpen ERA against a ~4.00
+    league average is a real edge late, independent of how tough the
+    starter himself is. Hitter-only: a probable starter's own fantasy
+    line isn't affected by his team's bullpen, since he's out of the
+    game by the time it pitches.
+    """
+    era = (opp_bullpen or {}).get("era")
+    if not era or not league_avg_bullpen_era:
+        return {"value": NEUTRAL, "detail": "no bullpen data"}
+
+    value = round(max(0.8, min(1.2, era / league_avg_bullpen_era)), 3)
+    return {"value": value, "era": era, "detail": f"{era} opposing bullpen ERA"}
 
 
 def contact_quality_component(
