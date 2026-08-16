@@ -27,16 +27,19 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from typing import Any
 
 from app.cache import get, put
-from app.services.player_match import build_lookup, match, normalize_name
+from app.services.player_match import build_lookup, match, normalize_name, normalize_team
 
 __all__ = [
     "build_lookup",
     "match",
     "normalize_name",
     "parse_dk_csv",
+    "parse_game_info",
+    "slate_games",
     "store",
     "load",
     "value_score",
@@ -46,6 +49,11 @@ _CACHE_PREFIX = "salaries"
 # A week -- long enough that an upload survives you closing the tab,
 # short enough that a stale slate doesn't linger forever.
 _TTL = 60 * 60 * 24 * 7
+
+# DK's "Game Info" column starts with "AWAY@HOME" (e.g. "NYY@BOS
+# 08/16/2026 07:05PM ET") -- everything after that (date, time,
+# occasionally a live status like "In Progress") isn't needed here.
+_GAME_INFO_RE = re.compile(r"^([A-Z]{2,4})@([A-Z]{2,4})\b")
 
 
 def parse_dk_csv(text: str) -> list[dict[str, Any]]:
@@ -83,9 +91,43 @@ def parse_dk_csv(text: str) -> list[dict[str, Any]]:
                 "position": (row.get("Position") or "").strip(),
                 "salary": salary,
                 "avg_points": avg_points,
+                "game_info": (row.get("Game Info") or "").strip(),
             }
         )
     return rows
+
+
+def parse_game_info(game_info: str) -> tuple[str, str] | None:
+    """
+    Pull the (away, home) team codes out of DK's "Game Info" column,
+    e.g. "NYY@BOS 08/16/2026 07:05PM ET" -> ("NYY", "BOS"). Returns
+    None for anything that doesn't start with that pattern -- DK shows
+    non-matchup text here sometimes (a postponed game, "In Progress").
+    """
+    m = _GAME_INFO_RE.match((game_info or "").strip())
+    return (m.group(1), m.group(2)) if m else None
+
+
+def slate_games(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """
+    The distinct games actually represented in a salary upload, derived
+    from "Game Info" -- e.g. [{"away": "NYY", "home": "BOS"}, ...].
+
+    This is what "the slate" means: a DraftKings CSV export only
+    contains players from the specific games in the contest/slate it
+    was exported from, and Game Info is the one column that says
+    exactly which games those are (team abbreviations normalised the
+    same way matching already does, so DK's "ARI" lines up with MLB's
+    own "AZ").
+    """
+    seen: dict[frozenset[str], dict[str, str]] = {}
+    for r in rows:
+        parsed = parse_game_info(r.get("game_info") or "")
+        if not parsed:
+            continue
+        away, home = normalize_team(parsed[0]), normalize_team(parsed[1])
+        seen.setdefault(frozenset((away, home)), {"away": away, "home": home})
+    return list(seen.values())
 
 
 def store(day: str, rows: list[dict[str, Any]]) -> None:

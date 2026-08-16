@@ -91,6 +91,7 @@ export const api = {
       oneOffMaxSalary = null,
       minOwnershipPct = null,
       maxOwnershipPct = null,
+      includedGamePks = null,
     } = {},
   ) =>
     request('/api/mlb/lineups', {
@@ -114,6 +115,7 @@ export const api = {
         one_off_max_salary: oneOffMaxSalary,
         min_ownership_pct: minOwnershipPct,
         max_ownership_pct: maxOwnershipPct,
+        included_game_pks: includedGamePks,
       }),
     }),
 

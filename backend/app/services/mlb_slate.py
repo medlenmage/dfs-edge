@@ -142,14 +142,25 @@ async def build_slate(
     # Salaries and projections are manual uploads, not a fetch -- see
     # services/salaries.py and services/projections.py. Whatever's
     # cached for this date (possibly nothing) gets matched in.
-    salary_lookup = salaries.build_lookup(salaries.load(day))
+    salary_rows = salaries.load(day)
+    salary_lookup = salaries.build_lookup(salary_rows)
     projection_lookup = projections.build_lookup(projections.load(day))
+
+    # Which games the uploaded DK salary CSV actually covers, so each
+    # game can be flagged as in/out of that slate for the optimizer (and
+    # anything else that wants it) -- None (not True/False) when no
+    # salary CSV is loaded yet, since there's nothing to detect against.
+    detected_slate_pairs = (
+        {frozenset((g["away"], g["home"])) for g in salaries.slate_games(salary_rows)}
+        if salary_rows
+        else None
+    )
 
     built = await asyncio.gather(
         *[
             _build_game(
                 g, season, data, baselines, lines, include_hitters,
-                salary_lookup, projection_lookup, day,
+                salary_lookup, projection_lookup, day, detected_slate_pairs,
             )
             for g in games
         ],
@@ -190,6 +201,7 @@ async def _build_game(
     salary_lookup: dict[tuple[str, str], dict[str, Any]],
     projection_lookup: dict[tuple[str, str], dict[str, Any]],
     day: str,
+    detected_slate_pairs: set[frozenset[str]] | None,
 ) -> dict[str, Any]:
     game_pk = game.get("gamePk")
     teams = game.get("teams") or {}
@@ -198,8 +210,17 @@ async def _build_game(
     venue = game.get("venue") or {}
 
     home_abbrev = home_t.get("abbreviation") or ""
+    away_abbrev = away_t.get("abbreviation") or ""
     park = get_park(home_abbrev, venue.get("name"))
     game_time = game.get("gameDate") or ""
+
+    # Whether the uploaded DK salary CSV's slate covers this game --
+    # None when no CSV is loaded yet (nothing to detect against).
+    in_slate = (
+        frozenset((away_abbrev, home_abbrev)) in detected_slate_pairs
+        if detected_slate_pairs is not None
+        else None
+    )
 
     # --- Weather ---
     roof_closed = park["roof"] == "dome"
@@ -238,6 +259,7 @@ async def _build_game(
         "game_pk": game_pk,
         "game_time_utc": game_time,
         "status": ((game.get("status") or {}).get("detailedState")),
+        "in_slate": in_slate,
         "venue": {
             "name": venue.get("name") or park["name"],
             "roof": park["roof"],

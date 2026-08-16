@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { localTime } from '../format'
 import { LineupsTable } from './LineupsTable'
 import { PlayerPoolTable } from './PlayerPoolTable'
 
@@ -58,10 +59,45 @@ export function LineupsPanel({ date, slate }) {
   const [oneOffMaxSalary, setOneOffMaxSalary] = useState('')
   const [minOwnership, setMinOwnership] = useState('')
   const [maxOwnership, setMaxOwnership] = useState('')
+  const [showSlateGames, setShowSlateGames] = useState(false)
+  const [includedGames, setIncludedGames] = useState(new Set())
 
   const teams = useMemo(() => teamsOnSlate(slate), [slate])
   const groups = STACK_SHAPES[stackShape]
   const isPartialStack = groups.length > 0 && groups.reduce((a, b) => a + b, 0) < MAX_HITTERS
+
+  const slateGames = useMemo(
+    () =>
+      (slate?.games || [])
+        .filter((g) => g.game_pk != null)
+        .map((g) => ({
+          pk: g.game_pk,
+          away: g.away?.abbrev,
+          home: g.home?.abbrev,
+          time: g.game_time_utc,
+          inSlate: g.in_slate,
+        })),
+    [slate],
+  )
+  const slateDetected = slateGames.some((g) => g.inSlate != null)
+
+  // Re-derive the default selection whenever the slate's own set of
+  // games changes (a new date, a refresh) -- default to whatever the
+  // uploaded DK CSV's Game Info detected (or everyone, if nothing's
+  // been uploaded yet), not whatever the user last toggled for a
+  // different day's slate.
+  const slateGamePks = slateGames.map((g) => g.pk).join(',')
+  useEffect(() => {
+    setIncludedGames(new Set(slateGames.filter((g) => g.inSlate !== false).map((g) => g.pk)))
+  }, [slateGamePks])
+
+  function toggleGame(pk) {
+    setIncludedGames((prev) => {
+      const next = new Set(prev)
+      next.has(pk) ? next.delete(pk) : next.add(pk)
+      return next
+    })
+  }
 
   function setSlotCap(slot, value) {
     setSlotExposure((prev) => {
@@ -166,6 +202,8 @@ export function LineupsPanel({ date, slate }) {
             : null,
         minOwnershipPct: minOwnership.trim() ? Number(minOwnership) : null,
         maxOwnershipPct: maxOwnership.trim() ? Number(maxOwnership) : null,
+        includedGamePks:
+          slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
       })
       setSelected(0)
       setState({ status: 'ready', ...result })
@@ -236,7 +274,44 @@ export function LineupsPanel({ date, slate }) {
               })`
             : ''}
         </button>
+        {slateGames.length > 0 && (
+          <button onClick={() => setShowSlateGames((v) => !v)}>
+            {showSlateGames ? 'Hide slate games' : 'Slate games'} ({includedGames.size} of{' '}
+            {slateGames.length})
+          </button>
+        )}
       </div>
+
+      {showSlateGames && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="sub-line" style={{ marginBottom: 8 }}>
+            {slateDetected
+              ? 'Auto-detected from your uploaded DK salary CSV -- untick a game to leave it out, or tick one back in.'
+              : 'No DK salary CSV uploaded yet, so every game is included by default -- upload one to auto-detect your slate.'}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {slateGames.map((g) => (
+              <label
+                key={g.pk}
+                className="dim"
+                style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}
+              >
+                <input
+                  type="checkbox"
+                  checked={includedGames.has(g.pk)}
+                  onChange={() => toggleGame(g.pk)}
+                />
+                {g.away} @ {g.home}
+                <span className="dim" style={{ fontSize: 12 }}>
+                  {localTime(g.time)}
+                </span>
+                {g.inSlate === true && <span className="badge ok">in DK slate</span>}
+                {g.inSlate === false && <span className="badge">not in DK slate</span>}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       {showRules && (
         <div className="card" style={{ marginBottom: 14 }}>

@@ -167,10 +167,11 @@ FAKE_WEATHER = {
     "cloud_cover_pct": 20, "forecast_time_utc": f"{DAY}T23:00",
 }
 
-def salary_row(name, team, salary, avg_points):
+def salary_row(name, team, salary, avg_points, game_info=""):
     return {
         "name": name, "normalized_name": salaries.normalize_name(name),
         "team": team, "position": "", "salary": salary, "avg_points": avg_points,
+        "game_info": game_info,
     }
 
 
@@ -402,6 +403,50 @@ async def main() -> int:
     check("querying with the uploader's own ARI still matches too",
           player_match.match(ari_rows, "Geraldo Perdomo", "ARI") is not None)
 
+    print("\nDK slate detection (Game Info column -> which games are in this slate)")
+    check("parse_game_info extracts the away@home pair, ignoring date/time",
+          salaries.parse_game_info("NYY@BOS 08/16/2026 07:05PM ET") == ("NYY", "BOS"))
+    check("parse_game_info normalises DK's team codes via the shared alias table",
+          salaries.slate_games([salary_row("X", "ARI", 3000, 5.0, game_info="ARI@LAD 08/16/2026 10:10PM ET")])
+          == [{"away": "AZ", "home": "LAD"}])
+    check("parse_game_info returns None for non-matchup text (postponed, in progress)",
+          salaries.parse_game_info("Postponed") is None)
+    check("parse_game_info returns None for an empty/missing column",
+          salaries.parse_game_info("") is None)
+    check("slate_games dedupes multiple players from the same game into one entry",
+          salaries.slate_games([
+              salary_row("A", "NYY", 4000, 8.0, game_info="NYY@BOS 08/16/2026 07:05PM ET"),
+              salary_row("B", "BOS", 3000, 6.0, game_info="NYY@BOS 08/16/2026 07:05PM ET"),
+          ]) == [{"away": "NYY", "home": "BOS"}])
+    check("slate_games skips rows with unparseable Game Info rather than raising",
+          salaries.slate_games([salary_row("A", "NYY", 4000, 8.0, game_info="")]) == [])
+
+    def fake_salary_load_in_slate(day):
+        return [salary_row("Big Righty Bat", "NYY", 4200, 9.5, game_info="NYY@BOS 08/14/2026 07:10PM ET")]
+
+    def fake_salary_load_out_of_slate(day):
+        return [salary_row("Some Guy", "LAD", 4200, 9.5, game_info="LAD@SF 08/14/2026 10:10PM ET")]
+
+    def fake_salary_load_empty(day):
+        return []
+
+    salaries.load = fake_salary_load_in_slate
+    in_slate_slate = await mlb_slate.build_slate(DAY)
+    check("build_slate flags in_slate=True when the DK CSV's Game Info covers this game",
+          in_slate_slate["games"][0]["in_slate"] is True)
+
+    salaries.load = fake_salary_load_out_of_slate
+    out_of_slate_slate = await mlb_slate.build_slate(DAY)
+    check("build_slate flags in_slate=False when the DK CSV covers a different game entirely",
+          out_of_slate_slate["games"][0]["in_slate"] is False)
+
+    salaries.load = fake_salary_load_empty
+    no_upload_slate = await mlb_slate.build_slate(DAY)
+    check("build_slate leaves in_slate=None (not False) when no salary CSV is loaded at all",
+          no_upload_slate["games"][0]["in_slate"] is None)
+
+    salaries.load = fake_salary_load  # restore the default fixture
+
     print("\nLineup watcher (catching scratches between polls)")
     _scratch_poll = {"n": 0}
 
@@ -555,18 +600,21 @@ async def main() -> int:
     mul_slate = {
         "games": [
             {
+                "game_pk": 88001,
                 "home": {"abbrev": "MUL1", "hitters": mul_hitters_home,
                          "probable_pitcher": opt_pitcher(9400, "MP1", 9000, 18.0), "scratches": []},
                 "away": {"abbrev": "MUL2", "hitters": mul_hitters_away,
                          "probable_pitcher": opt_pitcher(9401, "MP2", 8800, 17.5), "scratches": []},
             },
             {
+                "game_pk": 88002,
                 "home": {"abbrev": "MUL3", "hitters": [],
                          "probable_pitcher": opt_pitcher(9402, "MP3", 8600, 17.0), "scratches": []},
                 "away": {"abbrev": "MUL4", "hitters": [],
                          "probable_pitcher": opt_pitcher(9403, "MP4", 8400, 16.5), "scratches": []},
             },
             {
+                "game_pk": 88003,
                 "home": {"abbrev": "MUL5", "hitters": [],
                          "probable_pitcher": opt_pitcher(9404, "MP5", 8200, 16.0), "scratches": []},
                 "away": {"abbrev": "MUL6", "hitters": [],
@@ -1064,6 +1112,36 @@ async def main() -> int:
         check("optimizer rejects min_ownership_pct above max_ownership_pct", False)
     except optimizer.OptimizerError:
         check("optimizer rejects min_ownership_pct above max_ownership_pct", True)
+
+    print("\nLineup optimizer: restricting the pool to specific DK-slate games")
+
+    def all_players(lu):
+        return {p["name"] for slot in lu["slots"].values() for p in slot}
+
+    restricted = optimizer.generate_lineups(
+        mul_slate, included_game_pks=[88001, 88002]
+    )["lineups"][0]
+    check("included_game_pks excludes pitchers from a game left out entirely",
+          not ({"MP5", "MP6"} & all_players(restricted)), str(all_players(restricted)))
+
+    all_included = optimizer.generate_lineups(
+        mul_slate, included_game_pks=[88001, 88002, 88003]
+    )["lineups"][0]
+    baseline = optimizer.generate_lineups(mul_slate)["lineups"][0]
+    check("including every game reproduces the fully unconstrained result",
+          all_included == baseline, str(all_included))
+
+    try:
+        optimizer.generate_lineups(mul_slate, included_game_pks=[88003])
+        check("restricting to a game with no hitters at all fails to build a legal lineup", False)
+    except optimizer.OptimizerError:
+        check("restricting to a game with no hitters at all fails to build a legal lineup", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, included_game_pks=[])
+        check("optimizer rejects an empty included_game_pks list", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects an empty included_game_pks list", True)
 
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",
