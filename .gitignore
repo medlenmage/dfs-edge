@@ -16,11 +16,16 @@ env/
 .ruff_cache/
 
 # ---- Local data / cache ----
-data/
+# NOTE: these are anchored with a leading slash on purpose. A bare
+# "data/" would also match backend/app/data/ -- which is SOURCE CODE
+# (the ballpark reference table), not cache -- and silently drop it
+# from the repo.
+/backend/data/
+/data/
 *.db
 *.sqlite
 *.sqlite3
-cache/
+/cache/
 
 # ---- Node / frontend ----
 node_modules/
