@@ -34,7 +34,9 @@ export default function App() {
     () => document.documentElement.dataset.theme || 'auto',
   )
   const [salaryMsg, setSalaryMsg] = useState(null)
+  const [projectionMsg, setProjectionMsg] = useState(null)
   const salaryInputRef = useRef(null)
+  const projectionInputRef = useRef(null)
 
   const load = useCallback(
     async (refresh = false) => {
@@ -60,19 +62,26 @@ export default function App() {
     load(false)
   }, [load])
 
-  async function handleSalaryUpload(e) {
-    const file = e.target.files?.[0]
-    e.target.value = '' // allow re-selecting the same file later
-    if (!file) return
-    setSalaryMsg('Uploading…')
-    try {
-      const result = await api.uploadSalaries(date, file)
-      setSalaryMsg(`Loaded ${result.players_loaded} salaries`)
-      load(true)
-    } catch (err) {
-      setSalaryMsg(`Upload failed: ${err.message}`)
+  // Shared shape for both CSV uploads: pick a file, POST it, reload the
+  // slate so the match shows up, report success/failure transiently.
+  function makeUploadHandler(uploadFn, setMsg, label) {
+    return async (e) => {
+      const file = e.target.files?.[0]
+      e.target.value = '' // allow re-selecting the same file later
+      if (!file) return
+      setMsg('Uploading…')
+      try {
+        const result = await uploadFn(date, file)
+        setMsg(`Loaded ${result.players_loaded} ${label}`)
+        load(true)
+      } catch (err) {
+        setMsg(`Upload failed: ${err.message}`)
+      }
     }
   }
+
+  const handleSalaryUpload = makeUploadHandler(api.uploadSalaries, setSalaryMsg, 'salaries')
+  const handleProjectionUpload = makeUploadHandler(api.uploadProjections, setProjectionMsg, 'projections')
 
   function cycleTheme() {
     const next = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'
@@ -111,15 +120,28 @@ export default function App() {
           >
             Upload salaries
           </button>
+          <input
+            ref={projectionInputRef}
+            type="file"
+            accept=".csv"
+            onChange={handleProjectionUpload}
+            style={{ display: 'none' }}
+          />
+          <button
+            onClick={() => projectionInputRef.current?.click()}
+            title="Upload a RotoWire FPTS/ownership projections CSV for this date"
+          >
+            Upload projections
+          </button>
           <button onClick={cycleTheme} title="Theme">
             {theme === 'auto' ? 'Auto' : theme === 'light' ? 'Light' : 'Dark'}
           </button>
         </div>
       </header>
 
-      {salaryMsg && (
+      {(salaryMsg || projectionMsg) && (
         <div className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
-          {salaryMsg}
+          {[salaryMsg, projectionMsg].filter(Boolean).join(' · ')}
         </div>
       )}
 
