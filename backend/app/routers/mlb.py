@@ -278,7 +278,12 @@ async def ask(
 async def generate_lineups(
     date: str | None = Body(None, embed=True),
     num_lineups: int = Body(1, embed=True, description="How many distinct lineups to build"),
-    min_stack: int | None = Body(None, embed=True, description="Require this many hitters from one team"),
+    stack_groups: list[int] | None = Body(
+        None, embed=True, description="Hitter-group sizes to force, e.g. [4, 2, 2] for a 4-2-2 stack"
+    ),
+    stack_teams: list[str | None] | None = Body(
+        None, embed=True, description="One team per stack group (or null for auto), same length as stack_groups"
+    ),
     max_exposure_pct: float | None = Body(
         None, embed=True, description="Cap how often any one player appears across the set"
     ),
@@ -296,7 +301,11 @@ async def generate_lineups(
     slate = await mlb_slate.build_slate(day)
     try:
         result = optimizer.generate_lineups(
-            slate, num_lineups=num_lineups, min_stack=min_stack, max_exposure_pct=max_exposure_pct
+            slate,
+            num_lineups=num_lineups,
+            stack_groups=stack_groups,
+            stack_teams=stack_teams,
+            max_exposure_pct=max_exposure_pct,
         )
     except optimizer.OptimizerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

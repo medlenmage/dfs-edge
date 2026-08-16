@@ -48,6 +48,7 @@ SLOT_REQUIREMENTS = {
 }
 SLOT_TYPES = list(SLOT_REQUIREMENTS)
 ROSTER_SIZE = sum(SLOT_REQUIREMENTS.values())
+MAX_HITTERS = ROSTER_SIZE - SLOT_REQUIREMENTS["P"]
 
 # A safety ceiling, not a real-world limit anyone should hit -- each
 # lineup is its own MILP solve, and this keeps a mistaken request (or a
@@ -71,6 +72,68 @@ def _eligible_slots(dk_position: str) -> list[str]:
     if raw & {"P", "SP", "RP"}:
         return ["P"]
     return [slot for slot in SLOT_TYPES if slot in raw]
+
+
+def _stack_constraints(
+    prob: pulp.LpProblem,
+    x: dict[tuple[int, str], pulp.LpVariable],
+    usable: list[dict[str, Any]],
+    stack_groups: list[int],
+    stack_teams: list[str | None],
+) -> None:
+    """
+    Force at least `stack_groups` hitters onto each of that many distinct
+    teams (e.g. [4, 2, 2] for a "4-2-2" -- at least 4 from one team, at
+    least 2 from another, at least 2 from a third). A group whose
+    `stack_teams` entry is a real team name gets a direct constraint on
+    that team; a group left as None ("auto") gets an indicator-variable
+    assignment so the solver picks the best team for that slot -- never
+    colliding with another group's team, manual or auto.
+
+    Deliberately a LOWER bound, not an exact count: for shapes whose
+    groups already sum to all 8 hitter slots (5-3, 4-4, etc.) there's no
+    room left for any group to exceed its target, so this behaves like
+    an exact split anyway. For partial shapes (4-2, 3-3) it lets the
+    leftover 2 hitters land anywhere -- including padding one of the
+    named stacks further -- rather than artificially requiring a THIRD
+    team to exist just to soak up slots nobody asked to constrain.
+    """
+    all_teams = sorted({p["team"] for p in usable})
+    manual_teams = {t for t in stack_teams if t is not None}
+    auto_teams = [t for t in all_teams if t not in manual_teams]
+    auto_group_idx = [i for i, t in enumerate(stack_teams) if t is None]
+
+    def hitter_count_for_team(t: str) -> pulp.LpAffineExpression:
+        hitters_on_team = [p for p in usable if p["team"] == t and "P" not in p["slots"]]
+        return pulp.lpSum(x[(p["id"], slot)] for p in hitters_on_team for slot in p["slots"])
+
+    for size, team in zip(stack_groups, stack_teams):
+        if team is not None:
+            prob += hitter_count_for_team(team) >= size
+
+    if not auto_group_idx:
+        return
+
+    # y[i, t] = 1 means auto group i is assigned to team t. Each auto
+    # group gets exactly one team; each team fills at most one auto
+    # group -- the standard "assign distinct options to slots" pattern.
+    y = {
+        (i, t): pulp.LpVariable(f"stackgrp{i}_{t}", cat="Binary")
+        for i in auto_group_idx
+        for t in auto_teams
+    }
+    for i in auto_group_idx:
+        prob += pulp.lpSum(y[(i, t)] for t in auto_teams) == 1
+    for t in auto_teams:
+        prob += pulp.lpSum(y[(i, t)] for i in auto_group_idx) <= 1
+
+    # Big-M (MAX_HITTERS is a tight, safe bound -- no team can ever
+    # supply more than 8 hitters) gates the lower-bound constraint so it
+    # only bites when that group really is assigned to that team.
+    for i in auto_group_idx:
+        size = stack_groups[i]
+        for t in auto_teams:
+            prob += hitter_count_for_team(t) >= size - MAX_HITTERS * (1 - y[(i, t)])
 
 
 def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -121,7 +184,8 @@ def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
 def _solve_one(
     pool: list[dict[str, Any]],
     *,
-    min_stack: int | None,
+    stack_groups: list[int],
+    stack_teams: list[str | None],
     excluded_ids: set[int],
     no_good_cuts: list[set[int]],
 ) -> dict[str, Any] | None:
@@ -162,19 +226,8 @@ def _solve_one(
         <= SALARY_CAP
     )
 
-    if min_stack:
-        teams = {p["team"] for p in usable}
-        # is_stack_team[t] = 1 means "team t is the stack" -- forcing at
-        # least one team to hit the min_stack threshold without pinning
-        # down which one in advance.
-        is_stack_team = {t: pulp.LpVariable(f"stack_{t}", cat="Binary") for t in teams}
-        for t in teams:
-            hitters_on_team = [p for p in usable if p["team"] == t and "P" not in p["slots"]]
-            hitter_count = pulp.lpSum(
-                x[(p["id"], slot)] for p in hitters_on_team for slot in p["slots"]
-            )
-            prob += hitter_count >= min_stack * is_stack_team[t]
-        prob += pulp.lpSum(is_stack_team.values()) >= 1
+    if stack_groups:
+        _stack_constraints(prob, x, usable, stack_groups, stack_teams)
 
     # No-good cuts: forbid exactly reproducing any earlier lineup by
     # capping how many of its 10 players can reappear together.
@@ -224,14 +277,25 @@ def generate_lineups(
     slate: dict[str, Any],
     *,
     num_lineups: int = 1,
-    min_stack: int | None = None,
+    stack_groups: list[int] | None = None,
+    stack_teams: list[str | None] | None = None,
     max_exposure_pct: float | None = None,
 ) -> dict[str, Any]:
     """
     Generate up to `num_lineups` distinct legal lineups.
 
-    `min_stack`, if given, requires at least one team to contribute that
-    many hitters in every lineup (pitchers never count toward a stack).
+    `stack_groups` is a list of minimum hitter-group sizes to force,
+    largest first -- e.g. `[4, 2, 2]` for a "4-2-2" stack (at least 4
+    hitters from one team, at least 2 from another, at least 2 from a
+    third). Groups that sum to fewer than 8 (DK's hitter-slot count)
+    leave the remainder free -- those slots can land anywhere, including
+    padding one of the named stacks further; groups summing to 8 come
+    out exact since there's no room left over. `stack_teams`, if given,
+    must have one entry per group -- a real team name to force that
+    group onto a specific team, or `None` to let the solver pick the
+    best available team for that group (never
+    colliding with another group's team, manual or auto).
+
     `max_exposure_pct`, if given, caps how often any one player can
     appear across the whole generated set -- e.g. 50 means no player
     shows up in more than half the lineups.
@@ -253,6 +317,30 @@ def generate_lineups(
             "DraftKings salary CSV and a RotoWire projections CSV first."
         )
 
+    stack_groups = stack_groups or []
+    if stack_groups:
+        if any(not isinstance(size, int) or size < 1 for size in stack_groups):
+            raise OptimizerError("Stack group sizes must be positive whole numbers.")
+        if sum(stack_groups) > MAX_HITTERS:
+            raise OptimizerError(
+                f"Stack groups add up to {sum(stack_groups)} hitters, but a DK "
+                f"Classic MLB roster only has {MAX_HITTERS} hitter slots."
+            )
+        if stack_teams is not None and len(stack_teams) != len(stack_groups):
+            raise OptimizerError(
+                "stack_teams needs exactly one entry per stack group (use null for auto)."
+            )
+        stack_teams = list(stack_teams) if stack_teams is not None else [None] * len(stack_groups)
+        named = [t for t in stack_teams if t is not None]
+        if len(named) != len(set(named)):
+            raise OptimizerError("Each stack group must be assigned to a different team.")
+        pool_teams = {p["team"] for p in pool}
+        unknown = [t for t in named if t not in pool_teams]
+        if unknown:
+            raise OptimizerError(f"Unknown team(s) for stacking: {', '.join(unknown)}.")
+    else:
+        stack_teams = []
+
     exposure_cap = (
         max(1, round(max_exposure_pct / 100 * num_lineups))
         if max_exposure_pct is not None
@@ -266,7 +354,11 @@ def generate_lineups(
 
     for i in range(num_lineups):
         result = _solve_one(
-            pool, min_stack=min_stack, excluded_ids=excluded_ids, no_good_cuts=no_good_cuts
+            pool,
+            stack_groups=stack_groups,
+            stack_teams=stack_teams,
+            excluded_ids=excluded_ids,
+            no_good_cuts=no_good_cuts,
         )
         if result is None:
             if i == 0:

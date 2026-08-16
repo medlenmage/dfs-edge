@@ -1,24 +1,65 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { api } from '../api'
 import { LineupsTable } from './LineupsTable'
+
+// Named stack shapes, largest group first. Shapes that sum to 8 use
+// every hitter slot; "4-2" and "3-3" leave 2 hitters as free picks.
+const STACK_SHAPES = {
+  'no stack': [],
+  '5-3': [5, 3],
+  '5-2-1': [5, 2, 1],
+  '4-4': [4, 4],
+  '4-3-1': [4, 3, 1],
+  '4-2-2': [4, 2, 2],
+  '4-2': [4, 2],
+  '3-3-2': [3, 3, 2],
+  '3-3': [3, 3],
+}
+
+function teamsOnSlate(slate) {
+  const teams = new Set()
+  for (const g of slate?.games || []) {
+    if (g.home?.abbrev) teams.add(g.home.abbrev)
+    if (g.away?.abbrev) teams.add(g.away.abbrev)
+  }
+  return [...teams].sort()
+}
 
 /**
  * Generates one or many optimal DraftKings Classic MLB lineups from
  * whatever salary + projections CSVs are loaded for the date.
  */
-export function LineupsPanel({ date }) {
+export function LineupsPanel({ date, slate }) {
   const [state, setState] = useState({ status: 'idle' })
   const [numLineups, setNumLineups] = useState(1)
-  const [minStack, setMinStack] = useState('')
+  const [stackShape, setStackShape] = useState('no stack')
+  const [stackTeams, setStackTeams] = useState([])
   const [maxExposure, setMaxExposure] = useState('')
   const [selected, setSelected] = useState(0)
+
+  const teams = useMemo(() => teamsOnSlate(slate), [slate])
+  const groups = STACK_SHAPES[stackShape]
+
+  function changeShape(shape) {
+    setStackShape(shape)
+    setStackTeams(new Array(STACK_SHAPES[shape].length).fill(''))
+  }
+
+  function changeStackTeam(i, team) {
+    setStackTeams((prev) => {
+      const next = [...prev]
+      next[i] = team
+      return next
+    })
+  }
 
   async function run() {
     setState({ status: 'loading' })
     try {
       const result = await api.generateLineups(date, {
         numLineups,
-        minStack: minStack.trim() ? Number(minStack) : null,
+        stackGroups: groups.length ? groups : null,
+        stackTeams: groups.length ? stackTeams.map((t) => t || null) : null,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
       })
       setSelected(0)
@@ -43,12 +84,11 @@ export function LineupsPanel({ date }) {
           />
         </label>
         <label className="dim" style={{ fontSize: 13 }}>
-          Min stack{' '}
-          <select value={minStack} onChange={(e) => setMinStack(e.target.value)}>
-            <option value="">none</option>
-            {[2, 3, 4, 5].map((n) => (
-              <option key={n} value={n}>
-                {n}+ hitters, one team
+          Stack{' '}
+          <select value={stackShape} onChange={(e) => changeShape(e.target.value)}>
+            {Object.keys(STACK_SHAPES).map((shape) => (
+              <option key={shape} value={shape}>
+                {shape}
               </option>
             ))}
           </select>
@@ -71,16 +111,41 @@ export function LineupsPanel({ date }) {
         </button>
       </div>
 
+      {groups.length > 0 && (
+        <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
+          {groups.map((size, i) => (
+            <label key={i} className="dim" style={{ fontSize: 13 }}>
+              {size}-stack team{' '}
+              <select value={stackTeams[i] || ''} onChange={(e) => changeStackTeam(i, e.target.value)}>
+                <option value="">Auto</option>
+                {teams.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+      )}
+
       {state.status === 'idle' && (
         <p style={{ marginTop: 0, color: 'var(--text-secondary)' }}>
           Builds distinct lineups that each fit DraftKings' $50,000 salary
           cap and Classic MLB roster, using whatever salary and
           projections CSVs are loaded for this date. Upload both first —
           the optimizer needs a real salary and a real projection for
-          every player it considers. Asking for more than one lineup
-          forces each to differ from the ones before it; a max exposure
-          cap keeps any one player from showing up in too many of them —
-          useful once you're entering the same slate several times.
+          every player it considers. A stack shape like "4-2-2" forces at
+          least that many hitters onto each of that many distinct teams
+          — leave a group on Auto to let the solver pick the best team
+          for it, or choose one yourself. Shapes that use all 8 hitters
+          (5-3, 4-4, etc.) come out exact since there's no room left
+          over; partial shapes (4-2, 3-3) leave 2 free, which can land
+          anywhere — including padding one of the stacks further. Asking
+          for more
+          than one lineup forces each to differ from the ones before it;
+          a max exposure cap keeps any one player from showing up in too
+          many of them.
         </p>
       )}
 
