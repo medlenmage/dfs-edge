@@ -1,8 +1,9 @@
 # DFS Edge
 
 A personal daily-fantasy research dashboard. It pulls real MLB stats,
-betting lines and weather, scores every hitter's matchup, and hands the
-whole slate to Claude for a written read.
+betting lines, weather and batted-ball data, scores every hitter's and
+pitcher's matchup, and hands the whole slate to Claude for a written
+read.
 
 Built to run on your own machine for free (or close to it). NFL and NBA
 are designed for but not built yet — see [Roadmap](#roadmap).
@@ -17,32 +18,59 @@ are designed for but not built yet — see [Roadmap](#roadmap).
 
 | Source | What it gives you | Cost |
 |---|---|---|
-| MLB Stats API | schedules, probable pitchers, confirmed lineups, every player's splits vs LHP/RHP and home/road, last-15-game form | free, no key |
+| MLB Stats API | schedules, probable pitchers, confirmed lineups, every player's splits vs LHP/RHP and home/road, last-15-game form, roster status (injuries), bullpen ERA | free, no key |
 | Open-Meteo | temperature, wind speed and direction, rain probability at each park | free, no key |
+| Baseball Savant | barrel rate, hard-hit rate, expected wOBA (real contact quality, not just outcomes) | free, no key |
 | The Odds API | game totals, moneylines, run lines → implied team runs | free tier, or $30/mo |
 | Anthropic API | the written slate analysis | pay per use, ~2-5¢ a run |
 
 **Turns it into one number per hitter.** Every hitter gets a 0-100
-matchup score where 50 is a league-average spot. Seven things feed it:
+matchup score where 50 is a league-average spot. Nine things feed it:
 
 | Component | Weight | What it asks |
 |---|---|---|
-| Platoon split | 26% | How does he hit pitchers of this hand? |
-| Pitcher vulnerability | 24% | How does this pitcher do against batters of his hand? |
-| Vegas implied runs | 20% | How many runs is his team expected to score? |
-| Park factor | 12% | Does this park help home runs *for his handedness*? |
-| Weather | 8% | Is the ball carrying? Is the wind helping? |
-| Recent form | 6% | Hot or cold over the last 15 games? |
-| Home/road split | 4% | Does he travel well? |
+| Platoon split | 21% | How does he hit pitchers of this hand? |
+| Vegas implied runs | 19% | How many runs is his team expected to score? |
+| Pitcher vulnerability | 16% | How does this pitcher do against batters of his hand? |
+| Contact quality | 15% | What do his Statcast barrel rate, hard-hit rate and xwOBA say, independent of luck? |
+| Park factor | 10% | Does this park help home runs *for his handedness*? |
+| Bullpen quality | 8% | How shaky is the relief corps he'll face after the starter leaves? |
+| Weather | 6% | Is the ball carrying? Is the wind helping — for real, using the park's actual orientation? |
+| Recent form | 3% | Hot or cold over the last 15 games? |
+| Home/road split | 2% | Does he travel well? |
 
 Nothing is hidden. Click into any player in the API response and you see
 each component's value, its sample size, and a plain-English reason.
+
+**The same model runs in reverse for pitchers.** The Top Pitchers tab
+scores every probable starter with the mirror-image logic:
+
+| Component | Weight | What it asks |
+|---|---|---|
+| Opposing lineup | 20% | How do these hitters, specifically, score against him? |
+| Strikeout potential | 17% | His K stuff, blended with how whiff-prone this lineup is |
+| Vegas implied runs against | 17% | How many runs is the team facing him expected to score? |
+| Contact quality allowed | 14% | Barrel/hard-hit/xwOBA he's allowing, independent of luck |
+| Own quality | 12% | His season ERA vs league average |
+| Park factor | 11% | Does this park suppress runs and home runs? |
+| Weather | 9% | Suppression side of the same wind/temperature read |
+
+So a start looking good tonight is scored with the same rigor as a bat.
 
 **Then Claude reads the whole slate.** It only sees numbers the app has
 already computed — it is never asked to recall a stat from memory. Its
 job is the part models are actually good at: looking at 15 games at once,
 spotting where the signals disagree, and telling you which edges are real
 versus which are park factor in a trench coat.
+
+**Two things it doesn't compute for you, but will show you.** Upload a
+DraftKings salary CSV and every player gets a Salary and Value (edge
+score per $1,000) column — the score tells you who's in a good spot, the
+value column tells you who's worth it. Upload a RotoWire projections CSV
+and you get their FPTS and ownership% projections as reference columns.
+Neither feeds the matchup score itself — they're someone else's numbers
+(a price, a projection), not a component this app can vouch for the way
+it can vouch for a platoon split it computed itself.
 
 ---
 
@@ -149,19 +177,29 @@ data. Useful in the off-season too.
 
 ## Using it
 
-**Stacks tab** — teams ranked by how good it is to stack them. Stacking
-means rostering 4-5 hitters from one team so a big inning pays you
-multiple times. The stack score is the average matchup score of a team's
-five best bats.
+**Stacks tab** — teams ranked by how good it is to stack them, with each
+game's start time. Stacking means rostering 4-5 hitters from one team so
+a big inning pays you multiple times. The stack score is the average
+matchup score of a team's five best bats.
 
-**Hitters tab** — every hitter on the slate, sortable by any column.
-Filter by minimum score to cut to the good spots.
+**Hitters tab** — every hitter on the slate, sortable by any column,
+including salary/value and FPTS/ownership once you've uploaded those
+CSVs. Filter by minimum score to cut to the good spots.
 
-**Games tab** — the environment for each game: park factors, weather,
-the betting total, and each side's implied runs.
+**Pitchers tab** — today's probable starters ranked by matchup edge, the
+mirror image of Stacks: strikeout upside, the lineup he's facing, the
+Vegas total against him, and the rest of the pitcher-side model.
+
+**Games tab** — the environment for each game: park factors, weather
+(including a real in/out/cross-wind read, not a guess), the betting
+total, each side's implied runs, and key injuries for both teams.
 
 **AI analysis tab** — Claude's writeup, plus a box to ask follow-ups
 ("who's the best cheap bat in a good park tonight?").
+
+**Upload salaries / Upload projections** (top-right of every tab) — drop
+in a DraftKings salary CSV or a RotoWire player-pool CSV for the day's
+slate. Both are cached per date and re-matched automatically on refresh.
 
 ### The rhythm that works
 
@@ -178,7 +216,7 @@ the betting total, and each side's implied runs.
 ### Reading the score honestly
 
 A 78 is not a projection and it is not a lock. It says "this matchup is
-well above average on the seven things we measure." Things it does not
+well above average on the nine things we measure." Things it does not
 know about: a hitter playing hurt, a bullpen that threw 40 pitches last
 night, a manager who rests people on getaway days, DFS salary and
 ownership.
@@ -229,15 +267,19 @@ dfs-edge/
 │   │   ├── config.py         reads .env
 │   │   ├── cache.py          SQLite response cache
 │   │   ├── clients/          one file per external API
-│   │   │   ├── mlb.py        MLB Stats API
+│   │   │   ├── mlb.py        MLB Stats API (splits, rosters, injuries, bullpens)
 │   │   │   ├── odds.py       The Odds API
+│   │   │   ├── savant.py     Baseball Savant batted-ball CSV export
 │   │   │   ├── weather.py    Open-Meteo + wind/temp effects
 │   │   │   └── http.py       shared HTTP client with retries
-│   │   ├── data/parks.py     park factors, coordinates, roofs
+│   │   ├── data/parks.py     park factors, coordinates, roofs, wind orientation
 │   │   ├── services/
-│   │   │   ├── scoring.py    THE MODEL - all weights live here
+│   │   │   ├── scoring.py    THE MODEL - all weights live here (hitter + pitcher)
 │   │   │   ├── mlb_slate.py  assembles the daily slate
-│   │   │   └── analysis.py   Claude integration
+│   │   │   ├── analysis.py   Claude integration
+│   │   │   ├── salaries.py   DraftKings salary CSV upload
+│   │   │   ├── projections.py  RotoWire FPTS/ownership CSV upload
+│   │   │   └── player_match.py  shared name/team matching for both uploads
 │   │   └── routers/          HTTP endpoints
 │   └── tests/test_pipeline.py  offline test, no API calls
 │
@@ -263,43 +305,47 @@ cd backend
 .venv/bin/python -m tests.test_pipeline
 ```
 
-40 checks covering the whole pipeline on fake data — no network, no
+70 checks covering the whole pipeline on fake data — no network, no
 credits spent. Run it after you touch the scoring model.
 
 ---
 
+## Shipped since the first version
+
+All of these started as items on this list. Leaving them here, marked
+off, so it's clear what changed and why rather than just quietly
+vanishing from the doc:
+
+- **Batted-ball quality.** `clients/savant.py` pulls Baseball Savant's
+  barrel rate, hard-hit rate and xwOBA CSV export; `contact_quality`
+  (hitter) and `contact_quality_allowed` (pitcher) fold it into both
+  scores and into the Stacks tab.
+- **Bullpen quality.** `bullpen` component — the opposing team's relief
+  corps ERA, since a starter only throws ~5 innings.
+- **Top Pitchers tab.** A full mirror-image scoring model for probable
+  starters — see `PITCHER_WEIGHTS` in `scoring.py` — with real weight on
+  strikeout upside: the pitcher's own K stuff blended with how
+  whiff-prone the lineup he's facing actually is.
+- **Key injuries and game start times.** Roster status from the MLB
+  Stats API on the Games tab; start times on Stacks.
+- **DFS salaries and value.** Upload a DraftKings CSV, get Salary and
+  Value (edge score per $1,000) columns.
+- **FPTS/ownership projections.** Upload a RotoWire player-pool CSV, get
+  their projections as reference columns — deliberately kept out of the
+  edge score itself; see the note above on why.
+- **Real park orientations for wind.** `wind_effect()` always accepted a
+  park orientation but nothing passed one in, so every wind read
+  defaulted to "north" and flagged itself low-confidence — sometimes
+  just wrong. `data/parks.py` now has real bearings for all 30 parks.
+
 ## Improving it from here
 
-Ordered by value-per-hour-of-work:
-
-**1. Batted-ball quality (biggest single upgrade).** OPS is a blunt
-instrument. Barrel rate, hard-hit rate and expected wOBA from Baseball
-Savant describe what a hitter is actually doing far better, and they
-stabilise in fewer plate appearances. Savant has a CSV export; a new
-client in `clients/savant.py` plus two extra components in `scoring.py`
-would be a meaningful jump in accuracy.
-
-**2. Bullpen quality.** The model currently treats the starting pitcher
-as the whole matchup, but a starter throws maybe 5 innings. A team with
-a 5.20 bullpen ERA is a materially better target late. `/api/v1/teams/stats`
-with `group=pitching` gets you most of the way.
-
-**3. DFS salaries and value.** The score tells you who's in a good spot,
-not who's *worth it*. DraftKings publishes a salary CSV per contest; drop
-it in and compute points-per-$1000. This is where the real edge lives —
-a 72 at $3,800 beats an 80 at $6,200 most nights.
-
-**4. Track your own results.** Log each night's scores and what actually
+**1. Track your own results.** Log each night's scores and what actually
 happened. After a month you can check whether your weights are any good,
 which is the only way to know. A `results` table in the same SQLite file
 is enough.
 
-**5. Park orientations for wind.** `weather.py` computes wind effect but
-defaults every park's home-plate-to-centre-field bearing to north, so it
-flags the result as low confidence. Filling in the real bearings for 30
-parks is an afternoon of work and makes wind genuinely useful.
-
-**6. Then NFL.** The architecture already assumes it: add
+**2. Then NFL.** The architecture already assumes it: add
 `clients/nfl.py` (nfl_data_py is excellent and free), `services/nfl_slate.py`,
 and a `routers/nfl.py`. The scoring module's component pattern carries
 over directly — position vs defense, pace, spread-implied game script.
@@ -308,10 +354,13 @@ over directly — position vs defense, pace, spread-implied game script.
 
 ## Roadmap
 
-- [x] MLB: splits, park factors, weather, lines, AI analysis
-- [ ] Batted-ball data from Baseball Savant
-- [ ] Bullpen strength
-- [ ] DraftKings salaries + value scores
+- [x] MLB: splits, park factors, weather (with real wind orientation), lines, AI analysis
+- [x] Batted-ball data from Baseball Savant
+- [x] Bullpen strength
+- [x] Top Pitchers tab with strikeout-aware scoring
+- [x] Key injuries and game start times
+- [x] DraftKings salaries + value scores
+- [x] RotoWire FPTS/ownership projections
 - [ ] Results tracking and weight backtesting
 - [ ] NFL
 - [ ] NBA
