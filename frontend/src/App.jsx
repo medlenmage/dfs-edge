@@ -7,6 +7,7 @@ import { PitcherTable } from './components/PitcherTable'
 import { GameGrid } from './components/GameCard'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { LineupsPanel } from './components/LineupsPanel'
+import { NflPanel } from './components/NflPanel'
 import { ScoreLegend } from './components/ScoreMeter'
 
 const TABS = [
@@ -26,6 +27,7 @@ function today() {
 }
 
 export default function App() {
+  const [sport, setSport] = useState('mlb')
   const [date, setDate] = useState(today())
   const [tab, setTab] = useState('stacks')
   const [slate, setSlate] = useState(null)
@@ -98,49 +100,64 @@ export default function App() {
     <div className="app">
       <header className="header">
         <h1>DFS Edge</h1>
-        <span className="dim" style={{ fontSize: 13 }}>MLB</span>
+        <div className="tabs" style={{ marginBottom: 0 }}>
+          <button className={`tab ${sport === 'mlb' ? 'active' : ''}`} onClick={() => setSport('mlb')}>
+            MLB
+          </button>
+          <button className={`tab ${sport === 'nfl' ? 'active' : ''}`} onClick={() => setSport('nfl')}>
+            NFL
+          </button>
+        </div>
         <div className="spacer" />
         <div className="controls">
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-          />
-          <button onClick={() => load(true)} disabled={loading}>
-            {loading ? 'Loading…' : 'Refresh'}
-          </button>
-          <input
-            ref={salaryInputRef}
-            type="file"
-            accept=".csv"
-            onChange={handleSalaryUpload}
-            style={{ display: 'none' }}
-          />
-          <button
-            onClick={() => salaryInputRef.current?.click()}
-            title="Upload a DraftKings salary CSV for this date"
-          >
-            Upload salaries
-          </button>
-          <input
-            ref={projectionInputRef}
-            type="file"
-            accept=".csv"
-            onChange={handleProjectionUpload}
-            style={{ display: 'none' }}
-          />
-          <button
-            onClick={() => projectionInputRef.current?.click()}
-            title="Upload a RotoWire FPTS/ownership projections CSV for this date"
-          >
-            Upload projections
-          </button>
+          {sport === 'mlb' && (
+            <>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+              <button onClick={() => load(true)} disabled={loading}>
+                {loading ? 'Loading…' : 'Refresh'}
+              </button>
+              <input
+                ref={salaryInputRef}
+                type="file"
+                accept=".csv"
+                onChange={handleSalaryUpload}
+                style={{ display: 'none' }}
+              />
+              <button
+                onClick={() => salaryInputRef.current?.click()}
+                title="Upload a DraftKings salary CSV for this date"
+              >
+                Upload salaries
+              </button>
+              <input
+                ref={projectionInputRef}
+                type="file"
+                accept=".csv"
+                onChange={handleProjectionUpload}
+                style={{ display: 'none' }}
+              />
+              <button
+                onClick={() => projectionInputRef.current?.click()}
+                title="Upload a RotoWire FPTS/ownership projections CSV for this date"
+              >
+                Upload projections
+              </button>
+            </>
+          )}
           <button onClick={cycleTheme} title="Theme">
             {theme === 'auto' ? 'Auto' : theme === 'light' ? 'Light' : 'Dark'}
           </button>
         </div>
       </header>
 
+      {sport === 'nfl' && <NflPanel />}
+
+      {sport === 'mlb' && (
+        <>
       {(salaryMsg || projectionMsg) && (
         <div className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
           {[salaryMsg, projectionMsg].filter(Boolean).join(' · ')}
@@ -286,6 +303,8 @@ export default function App() {
         {health?.odds_api_credits?.remaining &&
           ` · ${health.odds_api_credits.remaining} odds credits left`}
       </footer>
+        </>
+      )}
     </div>
   )
 }

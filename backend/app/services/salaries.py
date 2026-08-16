@@ -92,6 +92,11 @@ def parse_dk_csv(text: str) -> list[dict[str, Any]]:
                 "salary": salary,
                 "avg_points": avg_points,
                 "game_info": (row.get("Game Info") or "").strip(),
+                # DK's own numeric player id. Unused for MLB (Stats API's
+                # own player id is the authoritative one there) but
+                # NFL/DST rows have no equivalent separate roster fetch
+                # in this app, so this is their only stable identity.
+                "dk_id": (row.get("ID") or "").strip(),
             }
         )
     return rows

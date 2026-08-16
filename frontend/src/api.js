@@ -123,4 +123,48 @@ export const api = {
     request(`/api/cache/clear${prefix ? `?prefix=${prefix}` : ''}`, {
       method: 'POST',
     }),
+
+  nflSlate: (season, week) => {
+    const params = new URLSearchParams()
+    if (season) params.set('season', season)
+    if (week) params.set('week', week)
+    const qs = params.toString()
+    return request(`/api/nfl/slate${qs ? `?${qs}` : ''}`)
+  },
+
+  nflUploadSalaries: (season, week, file) =>
+    uploadFile(`/api/nfl/salaries?season=${season}&week=${week}`, file),
+
+  nflUploadProjections: (season, week, file) =>
+    uploadFile(`/api/nfl/projections?season=${season}&week=${week}`, file),
+
+  nflGenerateLineups: (
+    season,
+    week,
+    {
+      numLineups = 1,
+      maxExposurePct = null,
+      exposureBySlot = null,
+      lockedIds = null,
+      excludedIds = null,
+      minSalary = null,
+      minUniquePlayers = 1,
+      qbStackMin = 0,
+    } = {},
+  ) =>
+    request('/api/nfl/lineups', {
+      method: 'POST',
+      body: JSON.stringify({
+        season,
+        week,
+        num_lineups: numLineups,
+        max_exposure_pct: maxExposurePct,
+        exposure_by_slot: exposureBySlot,
+        locked_ids: lockedIds,
+        excluded_ids: excludedIds,
+        min_salary: minSalary,
+        min_unique_players: minUniquePlayers,
+        qb_stack_min: qbStackMin,
+      }),
+    }),
 }

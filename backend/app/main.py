@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.clients.http import close_client
 from app.config import get_settings
-from app.routers import mlb, system
+from app.routers import mlb, nfl, system
 from app.services import lineup_watch
 
 logging.basicConfig(
@@ -67,6 +67,7 @@ app.add_middleware(
 
 app.include_router(system.router)
 app.include_router(mlb.router)
+app.include_router(nfl.router)
 
 
 @app.get("/")
@@ -81,5 +82,7 @@ async def root() -> dict[str, object]:
             "/api/mlb/hitters",
             "/api/mlb/stacks",
             "/api/mlb/analysis",
+            "/api/nfl/slate",
+            "/api/nfl/lineups",
         ],
     }
