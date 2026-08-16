@@ -207,7 +207,11 @@ async def _build_game(
 
     temp_fx = weather.temperature_effect((wx or {}).get("temp_f")) if wx else None
     wind_fx = (
-        weather.wind_effect((wx or {}).get("wind_dir_deg"), (wx or {}).get("wind_mph"))
+        weather.wind_effect(
+            (wx or {}).get("wind_dir_deg"),
+            (wx or {}).get("wind_mph"),
+            park.get("orientation_deg"),
+        )
         if wx
         else None
     )
