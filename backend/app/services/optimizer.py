@@ -147,6 +147,35 @@ def _stack_constraints(
     return y
 
 
+def _team_count_constraints(
+    prob: pulp.LpProblem,
+    x: dict[tuple[int, str], pulp.LpVariable],
+    usable: list[dict[str, Any]],
+    min_teams: int | None,
+    max_teams: int | None,
+) -> None:
+    """
+    Bound how many DISTINCT teams appear among the 10 selected players in
+    a single lineup. `team_used[t]` is pinned to 1 exactly when at least
+    one player from team t is selected, via the standard two-sided
+    "presence indicator" pair: ROSTER_SIZE is a safe, tight big-M since
+    no team can ever supply more than all 10 slots.
+    """
+    all_teams = sorted({p["team"] for p in usable})
+    team_used = {t: pulp.LpVariable(f"teamused_{t}", cat="Binary") for t in all_teams}
+    for t in all_teams:
+        team_players = [p for p in usable if p["team"] == t]
+        total = pulp.lpSum(x[(p["id"], slot)] for p in team_players for slot in p["slots"])
+        prob += total <= ROSTER_SIZE * team_used[t]
+        prob += total >= team_used[t]
+
+    total_teams = pulp.lpSum(team_used[t] for t in all_teams)
+    if min_teams is not None:
+        prob += total_teams >= min_teams
+    if max_teams is not None:
+        prob += total_teams <= max_teams
+
+
 def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Flatten every hitter and probable pitcher across the slate into one
@@ -201,6 +230,10 @@ def _solve_one(
     no_good_cuts: list[set[int]],
     locked_ids: set[int],
     banned_stack_teams: set[str],
+    min_salary: int | None = None,
+    min_unique_players: int = 1,
+    min_teams_per_lineup: int | None = None,
+    max_teams_per_lineup: int | None = None,
 ) -> dict[str, Any] | None:
     """
     Solve a single lineup against `pool`, minus anyone in `excluded_ids`
@@ -246,6 +279,11 @@ def _solve_one(
         pulp.lpSum(p["salary"] * x[(p["id"], slot)] for p in usable for slot in p["slots"])
         <= SALARY_CAP
     )
+    if min_salary is not None:
+        prob += (
+            pulp.lpSum(p["salary"] * x[(p["id"], slot)] for p in usable for slot in p["slots"])
+            >= min_salary
+        )
 
     stack_auto_y: dict[tuple[int, str], pulp.LpVariable] = {}
     if stack_groups:
@@ -253,15 +291,18 @@ def _solve_one(
             prob, x, usable, stack_groups, stack_teams, banned_stack_teams
         )
 
-    # No-good cuts: forbid exactly reproducing any earlier lineup by
-    # capping how many of its 10 players can reappear together.
+    if min_teams_per_lineup is not None or max_teams_per_lineup is not None:
+        _team_count_constraints(prob, x, usable, min_teams_per_lineup, max_teams_per_lineup)
+
+    # No-good cuts: forbid reproducing any earlier lineup too closely --
+    # at least `min_unique_players` of its 10 players must differ.
     for prior_ids in no_good_cuts:
         prior_in_pool = [p for p in usable if p["id"] in prior_ids]
         if len(prior_in_pool) < ROSTER_SIZE:
             continue  # some of that lineup's players are excluded now anyway
         prob += (
             pulp.lpSum(x[(p["id"], slot)] for p in prior_in_pool for slot in p["slots"])
-            <= ROSTER_SIZE - 1
+            <= ROSTER_SIZE - min_unique_players
         )
 
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
@@ -315,6 +356,10 @@ def generate_lineups(
     team_exposure_cap: dict[str, float] | None = None,
     locked_ids: list[int] | None = None,
     excluded_ids: list[int] | None = None,
+    min_salary: int | None = None,
+    min_unique_players: int = 1,
+    min_teams_per_lineup: int | None = None,
+    max_teams_per_lineup: int | None = None,
 ) -> dict[str, Any]:
     """
     Generate up to `num_lineups` distinct legal lineups.
@@ -358,6 +403,17 @@ def generate_lineups(
     `max_exposure_pct`, if given, caps how often any one player can
     appear across the whole generated set -- e.g. 50 means no player
     shows up in more than half the lineups.
+
+    `min_salary`, if given, is a floor on total lineup salary, symmetric
+    with the fixed $50,000 cap.
+
+    `min_unique_players`, if given (default 1), is how many of a
+    lineup's 10 players must differ from every earlier lineup in the
+    set -- 1 is today's default behavior (just not an exact repeat); a
+    higher value forces more genuinely different builds.
+
+    `min_teams_per_lineup` / `max_teams_per_lineup`, if given, bound how
+    many distinct teams appear among a single lineup's 10 players.
 
     Returns `{"lineups": [...], "exposure": [...]}`. If the pool or
     constraints can't support the full count requested, returns as many
@@ -437,6 +493,27 @@ def generate_lineups(
         if unknown:
             raise OptimizerError(f"Unknown team(s) in team_exposure_cap: {sorted(unknown)}.")
 
+    if min_salary is not None and min_salary > SALARY_CAP:
+        raise OptimizerError(
+            f"min_salary ({min_salary}) can't be more than the ${SALARY_CAP} salary cap."
+        )
+
+    if not (1 <= min_unique_players <= ROSTER_SIZE):
+        raise OptimizerError(f"min_unique_players must be between 1 and {ROSTER_SIZE}.")
+
+    for label, value in (
+        ("min_teams_per_lineup", min_teams_per_lineup),
+        ("max_teams_per_lineup", max_teams_per_lineup),
+    ):
+        if value is not None and not (1 <= value <= ROSTER_SIZE):
+            raise OptimizerError(f"{label} must be between 1 and {ROSTER_SIZE}.")
+    if (
+        min_teams_per_lineup is not None
+        and max_teams_per_lineup is not None
+        and min_teams_per_lineup > max_teams_per_lineup
+    ):
+        raise OptimizerError("min_teams_per_lineup can't be more than max_teams_per_lineup.")
+
     def _cap_to_count(pct: float) -> int:
         return max(1, round(pct / 100 * num_lineups))
 
@@ -456,6 +533,10 @@ def generate_lineups(
             no_good_cuts=no_good_cuts,
             locked_ids=locked,
             banned_stack_teams=banned_stack_teams,
+            min_salary=min_salary,
+            min_unique_players=min_unique_players,
+            min_teams_per_lineup=min_teams_per_lineup,
+            max_teams_per_lineup=max_teams_per_lineup,
         )
         if result is None:
             if i == 0:

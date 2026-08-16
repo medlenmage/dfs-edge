@@ -82,6 +82,10 @@ export const api = {
       teamExposureCap = null,
       lockedIds = null,
       excludedIds = null,
+      minSalary = null,
+      minUniquePlayers = 1,
+      minTeamsPerLineup = null,
+      maxTeamsPerLineup = null,
     } = {},
   ) =>
     request('/api/mlb/lineups', {
@@ -96,6 +100,10 @@ export const api = {
         team_exposure_cap: teamExposureCap,
         locked_ids: lockedIds,
         excluded_ids: excludedIds,
+        min_salary: minSalary,
+        min_unique_players: minUniquePlayers,
+        min_teams_per_lineup: minTeamsPerLineup,
+        max_teams_per_lineup: maxTeamsPerLineup,
       }),
     }),
 
