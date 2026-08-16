@@ -17,9 +17,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import cache  # noqa: E402
 from app.clients import mlb, odds, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
-from app.services import mlb_slate, player_match, projections, salaries, scoring  # noqa: E402
+from app.services import (  # noqa: E402
+    lineup_watch,
+    mlb_slate,
+    player_match,
+    projections,
+    salaries,
+    scoring,
+)
 
 DAY = "2026-08-14"
 
@@ -261,6 +269,20 @@ def fake_projection_load(day):
     return PROJECTIONS
 
 
+# In-memory stand-in for app.cache so lineup_watch.py (and mlb_slate.py's
+# read of the scratches it writes) never touch the real on-disk SQLite
+# cache during tests.
+_FAKE_CACHE: dict[str, object] = {}
+
+
+def fake_cache_get(key):
+    return _FAKE_CACHE.get(key)
+
+
+def fake_cache_put(key, value, ttl):
+    _FAKE_CACHE[key] = value
+
+
 def patch() -> None:
     mlb.get_schedule = fake_schedule
     mlb.get_people = fake_people
@@ -277,6 +299,8 @@ def patch() -> None:
     mlb.get_bullpen_stats = fake_bullpen
     salaries.load = fake_salary_load
     projections.load = fake_projection_load
+    cache.get = fake_cache_get
+    cache.put = fake_cache_put
 
 
 # --------------------------------------------------------------------------
@@ -376,6 +400,44 @@ async def main() -> int:
           player_match.match(ari_rows, "Geraldo Perdomo", "AZ") is not None)
     check("querying with the uploader's own ARI still matches too",
           player_match.match(ari_rows, "Geraldo Perdomo", "ARI") is not None)
+
+    print("\nLineup watcher (catching scratches between polls)")
+    _scratch_poll = {"n": 0}
+
+    async def fake_lineups_scratch_scenario(game_pk, force=False):
+        _scratch_poll["n"] += 1
+        if _scratch_poll["n"] == 1:
+            return {"home": [101, 102], "away": [9002]}
+        # Poll 2 onward: "Big Righty Bat" (101) has dropped out of BOS's
+        # confirmed lineup -- everyone else is unchanged.
+        return {"home": [102], "away": [9002]}
+
+    mlb.get_lineups = fake_lineups_scratch_scenario
+
+    first_poll = await lineup_watch.poll_once(DAY)
+    check("first poll just establishes a baseline, no false-positive scratches",
+          first_poll == [], str(first_poll))
+
+    second_poll = await lineup_watch.poll_once(DAY)
+    check("second poll catches the player who dropped out",
+          len(second_poll) == 1 and second_poll[0]["player_id"] == 101,
+          str(second_poll))
+    check("scratch event carries the right name and team",
+          second_poll[0]["name"] == "Big Righty Bat" and second_poll[0]["team"] == "BOS",
+          str(second_poll))
+
+    third_poll = await lineup_watch.poll_once(DAY)
+    check("a poll with no further changes reports zero new events",
+          third_poll == [], str(third_poll))
+
+    mlb.get_lineups = fake_lineups  # restore before touching the slate again
+
+    rebuilt = await mlb_slate.build_slate(DAY)
+    rebuilt_home = rebuilt["games"][0]["home"]
+    check("a rebuilt slate surfaces the scratch on the right team",
+          rebuilt_home["scratches"] == second_poll, str(rebuilt_home["scratches"]))
+    check("the other side has no scratches",
+          rebuilt["games"][0]["away"]["scratches"] == [])
 
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",

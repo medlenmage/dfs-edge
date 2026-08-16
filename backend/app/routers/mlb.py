@@ -165,6 +165,21 @@ async def get_injuries(date: str | None = Query(None)) -> dict[str, Any]:
     return {"date": slate.get("date"), "injuries": rows}
 
 
+@router.get("/scratches")
+async def get_scratches(date: str | None = Query(None)) -> dict[str, Any]:
+    """Players the background lineup watcher has caught dropping out of a
+    confirmed lineup today -- see services/lineup_watch.py."""
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+
+    rows = []
+    for game in slate.get("games") or []:
+        for side in ("home", "away"):
+            rows.extend(game[side].get("scratches") or [])
+
+    return {"date": slate.get("date"), "scratches": rows}
+
+
 @router.post("/salaries")
 async def upload_salaries(
     date: str | None = Query(None, description="Slate date this CSV is for, defaults to today"),

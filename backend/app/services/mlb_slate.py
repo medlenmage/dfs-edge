@@ -23,6 +23,7 @@ from datetime import date as date_cls
 from datetime import datetime
 from typing import Any
 
+from app import cache
 from app.clients import mlb, odds, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
 from app.services import projections, salaries, scoring
@@ -148,7 +149,7 @@ async def build_slate(
         *[
             _build_game(
                 g, season, data, baselines, lines, include_hitters,
-                salary_lookup, projection_lookup,
+                salary_lookup, projection_lookup, day,
             )
             for g in games
         ],
@@ -188,6 +189,7 @@ async def _build_game(
     include_hitters: bool,
     salary_lookup: dict[tuple[str, str], dict[str, Any]],
     projection_lookup: dict[tuple[str, str], dict[str, Any]],
+    day: str,
 ) -> dict[str, Any]:
     game_pk = game.get("gamePk")
     teams = game.get("teams") or {}
@@ -310,6 +312,16 @@ async def _build_game(
     result["away"]["lineup_confirmed"] = bool(lineups.get("away"))
     result["home"]["injuries"] = home_injuries
     result["away"]["injuries"] = away_injuries
+
+    # Late scratches the lineup watcher has caught for this game today --
+    # see services/lineup_watch.py. Purely additive: this cache key is
+    # only ever populated by the background poller, never by a request.
+    day_scratches = cache.get(f"scratches:{day}") or []
+    game_scratches = [s for s in day_scratches if s.get("game_pk") == game_pk]
+    result["home"]["scratches"] = [s for s in game_scratches if s.get("team") == home_abbrev]
+    result["away"]["scratches"] = [
+        s for s in game_scratches if s.get("team") == (away_t.get("abbreviation") or "")
+    ]
 
     # Team-level stack score = average of the top 5 hitters' scores.
     result["home"]["stack_score"] = _stack_score(home_hitters)
