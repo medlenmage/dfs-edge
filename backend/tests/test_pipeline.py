@@ -23,6 +23,7 @@ from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     lineup_watch,
     mlb_slate,
+    optimizer,
     player_match,
     projections,
     salaries,
@@ -438,6 +439,80 @@ async def main() -> int:
           rebuilt_home["scratches"] == second_poll, str(rebuilt_home["scratches"]))
     check("the other side has no scratches",
           rebuilt["games"][0]["away"]["scratches"] == [])
+
+    print("\nLineup optimizer (DraftKings Classic MLB)")
+
+    def opt_hitter(pid, name, team, pos, salary, fpts):
+        return {
+            "id": pid, "name": name,
+            "salary": {"salary": salary, "position": pos, "avg_points": None, "value": None},
+            "projection": {"fpts": fpts, "ownership_pct": None},
+        }
+
+    def opt_pitcher(pid, name, salary, fpts):
+        return {
+            "id": pid, "name": name,
+            "salary": {"salary": salary, "position": "P", "avg_points": None, "value": None},
+            "projection": {"fpts": fpts, "ownership_pct": None},
+        }
+
+    # Deliberately more hitter depth than the shared fixture has, since a
+    # legal DK roster needs 8 hitters + 2 pitchers across 7 slot types --
+    # this stands alone rather than stretching FAKE_GAMES to cover it.
+    opt_home_hitters = [
+        opt_hitter(9101, "OC1", "OPT", "C", 3000, 8),
+        opt_hitter(9102, "O1B1", "OPT", "1B", 4000, 10),
+        opt_hitter(9103, "O2B1", "OPT", "2B", 3500, 9),
+        opt_hitter(9104, "O3B1", "OPT", "3B", 4500, 12),
+        opt_hitter(9105, "OSS1", "OPT", "SS", 3800, 9.5),
+        opt_hitter(9106, "OOF1-scratched", "OPT", "OF", 5000, 99),
+        opt_hitter(9107, "OOF2", "OPT", "OF", 4200, 11),
+        opt_hitter(9108, "OOF3", "OPT", "OF", 3900, 10.5),
+        opt_hitter(9109, "OOF4", "OPT", "OF", 3600, 9.8),
+    ]
+    opt_away_hitters = [opt_hitter(9110, "OC2", "OPP", "C", 2800, 7)]
+    opt_slate = {
+        "games": [
+            {
+                "home": {
+                    "abbrev": "OPT", "hitters": opt_home_hitters,
+                    "probable_pitcher": opt_pitcher(9200, "OP1", 9000, 18),
+                    "scratches": [{"player_id": 9106, "name": "OOF1-scratched"}],
+                },
+                "away": {
+                    "abbrev": "OPP", "hitters": opt_away_hitters,
+                    "probable_pitcher": opt_pitcher(9201, "OP2", 8500, 17),
+                    "scratches": [],
+                },
+            }
+        ]
+    }
+
+    lineup = optimizer.generate_lineup(opt_slate)
+    all_ids = [p["id"] for slot in lineup["slots"].values() for p in slot]
+    slot_counts = {slot: len(players) for slot, players in lineup["slots"].items()}
+    check("optimizer respects the salary cap",
+          lineup["salary_used"] <= optimizer.SALARY_CAP, str(lineup["salary_used"]))
+    check("optimizer fills every roster slot with the right counts",
+          slot_counts == optimizer.SLOT_REQUIREMENTS, str(slot_counts))
+    check("optimizer never rosters a scratched player, even a huge-projection one",
+          9106 not in all_ids, str(all_ids))
+
+    stacked = optimizer.generate_lineup(opt_slate, min_stack=5)
+    opt_hitter_count = sum(
+        1
+        for slot, players in stacked["slots"].items()
+        if slot != "P"
+        for p in players
+        if p["team"] == "OPT"
+    )
+    check("min_stack constraint is honored", opt_hitter_count >= 5, str(opt_hitter_count))
+
+    try:
+        optimizer.generate_lineup({"games": []})
+        check("optimizer raises OptimizerError on an empty pool", False)
+    except optimizer.OptimizerError:
+        check("optimizer raises OptimizerError on an empty pool", True)
 
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",
