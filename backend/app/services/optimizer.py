@@ -188,6 +188,7 @@ def _solve_one(
     stack_teams: list[str | None],
     excluded_ids: set[int],
     no_good_cuts: list[set[int]],
+    locked_ids: set[int],
 ) -> dict[str, Any] | None:
     """
     Solve a single lineup against `pool`, minus anyone in `excluded_ids`
@@ -198,6 +199,10 @@ def _solve_one(
     usable = [p for p in pool if p["id"] not in excluded_ids]
     if not usable:
         return None
+
+    usable_ids = {p["id"] for p in usable}
+    if not locked_ids <= usable_ids:
+        return None  # a locked player isn't available for this solve
 
     prob = pulp.LpProblem("dk_classic_mlb", pulp.LpMaximize)
 
@@ -215,7 +220,11 @@ def _solve_one(
     )
 
     for p in usable:
-        prob += pulp.lpSum(x[(p["id"], slot)] for slot in p["slots"]) <= 1
+        required = 1 if p["id"] in locked_ids else None
+        if required:
+            prob += pulp.lpSum(x[(p["id"], slot)] for slot in p["slots"]) == required
+        else:
+            prob += pulp.lpSum(x[(p["id"], slot)] for slot in p["slots"]) <= 1
 
     for slot, count in SLOT_REQUIREMENTS.items():
         eligible = [p for p in usable if slot in p["slots"]]
@@ -280,9 +289,19 @@ def generate_lineups(
     stack_groups: list[int] | None = None,
     stack_teams: list[str | None] | None = None,
     max_exposure_pct: float | None = None,
+    locked_ids: list[int] | None = None,
+    excluded_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     Generate up to `num_lineups` distinct legal lineups.
+
+    `locked_ids`, if given, are player ids that must appear in EVERY
+    generated lineup, exempt from the exposure cap (a lock is a
+    stronger, more explicit instruction than a general exposure limit).
+    `excluded_ids`, if given, are player ids removed from the pool
+    entirely before anything else runs -- distinct from the exposure
+    mechanism's own internal exclusion-once-capped bookkeeping, which
+    only ever applies to non-locked players.
 
     `stack_groups` is a list of minimum hitter-group sizes to force,
     largest first -- e.g. `[4, 2, 2]` for a "4-2-2" stack (at least 4
@@ -315,6 +334,30 @@ def generate_lineups(
         raise OptimizerError(
             "No optimizable players for this date -- upload both a "
             "DraftKings salary CSV and a RotoWire projections CSV first."
+        )
+
+    locked = set(locked_ids or [])
+    user_excluded = set(excluded_ids or [])
+    overlap = locked & user_excluded
+    if overlap:
+        raise OptimizerError(
+            f"Can't both lock and exclude the same player(s): {sorted(overlap)}."
+        )
+
+    pool = [p for p in pool if p["id"] not in user_excluded]
+    if not pool:
+        raise OptimizerError("Excluding those players leaves nobody left to build a lineup from.")
+
+    pool_ids = {p["id"] for p in pool}
+    missing_locks = locked - pool_ids
+    if missing_locks:
+        raise OptimizerError(
+            f"Locked player id(s) aren't in today's optimizable pool "
+            f"(scratched, or missing a salary/projection match): {sorted(missing_locks)}."
+        )
+    if len(locked) > ROSTER_SIZE:
+        raise OptimizerError(
+            f"Locked {len(locked)} players, but a lineup only has {ROSTER_SIZE} slots."
         )
 
     stack_groups = stack_groups or []
@@ -359,12 +402,14 @@ def generate_lineups(
             stack_teams=stack_teams,
             excluded_ids=excluded_ids,
             no_good_cuts=no_good_cuts,
+            locked_ids=locked,
         )
         if result is None:
             if i == 0:
                 raise OptimizerError(
                     "Couldn't build a legal lineup with the current player pool and "
-                    "constraints -- try loosening the stack requirement or exposure cap."
+                    "constraints -- try loosening the stack requirement, exposure cap, "
+                    "or locked players."
                 )
             break  # ran out of room for more unique/exposure-legal lineups
 
@@ -374,6 +419,11 @@ def generate_lineups(
 
         for pid in player_ids:
             exposure_count[pid] = exposure_count.get(pid, 0) + 1
+            # Locked players are exempt from the exposure cap -- a lock
+            # is a stronger, more explicit instruction than a general
+            # exposure limit, and they're guaranteed to reappear anyway.
+            if pid in locked:
+                continue
             if exposure_cap is not None and exposure_count[pid] >= exposure_cap:
                 excluded_ids.add(pid)
 

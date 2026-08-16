@@ -73,7 +73,14 @@ export const api = {
 
   generateLineups: (
     date,
-    { numLineups = 1, stackGroups = null, stackTeams = null, maxExposurePct = null } = {},
+    {
+      numLineups = 1,
+      stackGroups = null,
+      stackTeams = null,
+      maxExposurePct = null,
+      lockedIds = null,
+      excludedIds = null,
+    } = {},
   ) =>
     request('/api/mlb/lineups', {
       method: 'POST',
@@ -83,6 +90,8 @@ export const api = {
         stack_groups: stackGroups,
         stack_teams: stackTeams,
         max_exposure_pct: maxExposurePct,
+        locked_ids: lockedIds,
+        excluded_ids: excludedIds,
       }),
     }),
 

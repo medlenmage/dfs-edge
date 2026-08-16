@@ -287,6 +287,12 @@ async def generate_lineups(
     max_exposure_pct: float | None = Body(
         None, embed=True, description="Cap how often any one player appears across the set"
     ),
+    locked_ids: list[int] | None = Body(
+        None, embed=True, description="Player ids that must appear in every generated lineup"
+    ),
+    excluded_ids: list[int] | None = Body(
+        None, embed=True, description="Player ids removed from the pool entirely"
+    ),
 ) -> dict[str, Any]:
     """
     Up to `num_lineups` distinct, highest-projected DraftKings Classic
@@ -306,6 +312,8 @@ async def generate_lineups(
             stack_groups=stack_groups,
             stack_teams=stack_teams,
             max_exposure_pct=max_exposure_pct,
+            locked_ids=locked_ids,
+            excluded_ids=excluded_ids,
         )
     except optimizer.OptimizerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

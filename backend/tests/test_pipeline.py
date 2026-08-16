@@ -672,6 +672,47 @@ async def main() -> int:
     except optimizer.OptimizerError:
         check("stack shape rejects the same team assigned to two groups", True)
 
+    print("\nLineup optimizer: locked and excluded players")
+
+    LOCK_ID = 9301  # MC1 -- a cheap catcher that wouldn't normally get picked
+    EXCLUDE_ID = 9316  # MOF1 -- the single best-value outfielder in the fixture
+
+    locked_result = optimizer.generate_lineups(
+        mul_slate, num_lineups=3, max_exposure_pct=20, locked_ids=[LOCK_ID]
+    )
+    check("a locked player appears in every generated lineup, exempt from the exposure cap",
+          all(
+              LOCK_ID in {p["id"] for slot in lu["slots"].values() for p in slot}
+              for lu in locked_result["lineups"]
+          ),
+          str(len(locked_result["lineups"])))
+
+    excluded_result = optimizer.generate_lineups(mul_slate, excluded_ids=[EXCLUDE_ID])
+    excluded_ids_in_lineup = {
+        p["id"] for slot in excluded_result["lineups"][0]["slots"].values() for p in slot
+    }
+    check("an excluded player never appears, even the best-value one in the pool",
+          EXCLUDE_ID not in excluded_ids_in_lineup, str(excluded_ids_in_lineup))
+
+    try:
+        optimizer.generate_lineups(mul_slate, locked_ids=[LOCK_ID], excluded_ids=[LOCK_ID])
+        check("optimizer rejects locking and excluding the same player", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects locking and excluding the same player", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, locked_ids=[999999])
+        check("optimizer rejects a locked id that isn't in the pool", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects a locked id that isn't in the pool", True)
+
+    try:
+        too_many = list(range(9301, 9301 + optimizer.ROSTER_SIZE + 1))
+        optimizer.generate_lineups(mul_slate, locked_ids=too_many)
+        check("optimizer rejects locking more players than roster slots exist", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects locking more players than roster slots exist", True)
+
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",
           parks.get_park("NYY")["orientation_deg"] == 75,
