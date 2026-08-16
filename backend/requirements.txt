@@ -6,3 +6,4 @@ pydantic-settings==2.7.0
 python-dotenv==1.0.1
 anthropic==0.42.0
 python-multipart==0.0.20
+pulp==3.3.2

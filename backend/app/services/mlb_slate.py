@@ -392,6 +392,10 @@ def _salary_info(
         "salary": row["salary"],
         "avg_points": row["avg_points"],
         "value": salaries.value_score(edge_score, row["salary"]),
+        # DK's own position string (e.g. "1B/3B") -- distinct from the
+        # single MLB-primary-position on the player dict itself, and the
+        # one the lineup optimizer needs for roster-slot eligibility.
+        "position": row["position"],
     }
 
 

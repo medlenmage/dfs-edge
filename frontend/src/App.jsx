@@ -6,6 +6,7 @@ import { HitterTable } from './components/HitterTable'
 import { PitcherTable } from './components/PitcherTable'
 import { GameGrid } from './components/GameCard'
 import { AnalysisPanel } from './components/AnalysisPanel'
+import { LineupsPanel } from './components/LineupsPanel'
 import { ScoreLegend } from './components/ScoreMeter'
 
 const TABS = [
@@ -13,6 +14,7 @@ const TABS = [
   { id: 'hitters', label: 'Hitters' },
   { id: 'pitchers', label: 'Pitchers' },
   { id: 'games', label: 'Games' },
+  { id: 'lineups', label: 'Lineups' },
   { id: 'ai', label: 'AI analysis' },
 ]
 
@@ -252,6 +254,16 @@ export default function App() {
             <span className="hint">park, weather and the betting line</span>
           </div>
           <GameGrid slate={slate} />
+        </section>
+      )}
+
+      {slate && tab === 'lineups' && (
+        <section>
+          <div className="section-head">
+            <h2>Lineup optimizer</h2>
+            <span className="hint">DraftKings Classic MLB — one optimal lineup per click</span>
+          </div>
+          <LineupsPanel date={date} />
         </section>
       )}
 

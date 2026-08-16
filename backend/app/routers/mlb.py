@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
-from app.services import analysis, mlb_slate, projections, salaries
+from app.services import analysis, mlb_slate, optimizer, projections, salaries
 
 router = APIRouter(prefix="/api/mlb", tags=["mlb"])
 
@@ -272,3 +272,25 @@ async def ask(
     day = date or date_cls.today().isoformat()
     slate = await mlb_slate.build_slate(day)
     return await analysis.ask_about_slate(slate, question)
+
+
+@router.post("/lineups")
+async def generate_lineup(
+    date: str | None = Body(None, embed=True),
+    min_stack: int | None = Body(None, embed=True, description="Require this many hitters from one team"),
+) -> dict[str, Any]:
+    """
+    The single highest-projected DraftKings Classic MLB lineup, built
+    from whatever salary + projections CSVs are loaded for the date.
+
+    Requires both -- this app doesn't build its own FPTS projections
+    yet, so a RotoWire projections file is the objective function this
+    optimizes against.
+    """
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+    try:
+        lineup = optimizer.generate_lineup(slate, min_stack=min_stack)
+    except optimizer.OptimizerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"date": day, **lineup}
