@@ -221,15 +221,23 @@ def _team_count_constraints(
         prob += total_teams <= max_teams
 
 
-def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
+def build_player_pool(
+    slate: dict[str, Any], *, included_game_pks: set[int] | None = None
+) -> list[dict[str, Any]]:
     """
     Flatten every hitter and probable pitcher across the slate into one
     optimizable pool. Skips anyone missing a matched salary or
     projection, anyone with a DK position we can't map to a roster slot,
     and anyone the lineup watcher has flagged as scratched today.
+
+    `included_game_pks`, if given, restricts the pool to those specific
+    games -- e.g. to match a particular DK slate rather than every game
+    MLB's schedule returns for the date.
     """
     pool: list[dict[str, Any]] = []
     for game in slate.get("games") or []:
+        if included_game_pks is not None and game.get("game_pk") not in included_game_pks:
+            continue
         for side in ("home", "away"):
             team = game[side]
             abbrev = team.get("abbrev") or team.get("name") or ""
@@ -432,6 +440,7 @@ def generate_lineups(
     one_off_max_salary: int | None = None,
     min_ownership_pct: float | None = None,
     max_ownership_pct: float | None = None,
+    included_game_pks: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     Generate up to `num_lineups` distinct legal lineups.
@@ -506,6 +515,10 @@ def generate_lineups(
     measure of how "chalky" a build is. Players missing an ownership
     number (not every RotoWire export has one for everyone) count as 0.
 
+    `included_game_pks`, if given, restricts the pool to those specific
+    games -- e.g. to match a particular DK slate (a subset of the day's
+    full MLB schedule) rather than every game returned for the date.
+
     Returns `{"lineups": [...], "exposure": [...]}`. If the pool or
     constraints can't support the full count requested, returns as many
     as it could build rather than failing the whole request -- only an
@@ -516,8 +529,17 @@ def generate_lineups(
     if num_lineups > MAX_LINEUPS:
         raise OptimizerError(f"Generating more than {MAX_LINEUPS} lineups at once isn't supported.")
 
-    pool = build_player_pool(slate)
+    if included_game_pks is not None and not included_game_pks:
+        raise OptimizerError("included_game_pks can't be empty.")
+
+    pool = build_player_pool(
+        slate, included_game_pks=set(included_game_pks) if included_game_pks is not None else None
+    )
     if not pool:
+        if included_game_pks is not None:
+            raise OptimizerError(
+                "No optimizable players in the selected games -- try including more games."
+            )
         raise OptimizerError(
             "No optimizable players for this date -- upload both a "
             "DraftKings salary CSV and a RotoWire projections CSV first."

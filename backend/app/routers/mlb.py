@@ -326,6 +326,9 @@ async def generate_lineups(
     max_ownership_pct: float | None = Body(
         None, embed=True, description="Ceiling on a lineup's cumulative RotoWire ownership%"
     ),
+    included_game_pks: list[int] | None = Body(
+        None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
+    ),
 ) -> dict[str, Any]:
     """
     Up to `num_lineups` distinct, highest-projected DraftKings Classic
@@ -358,6 +361,7 @@ async def generate_lineups(
             one_off_max_salary=one_off_max_salary,
             min_ownership_pct=min_ownership_pct,
             max_ownership_pct=max_ownership_pct,
+            included_game_pks=included_game_pks,
         )
     except optimizer.OptimizerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
