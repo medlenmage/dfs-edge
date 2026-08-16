@@ -31,7 +31,7 @@ joint MILP.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import pulp
 
@@ -147,6 +147,51 @@ def _stack_constraints(
     return y
 
 
+def _one_off_constraints(
+    prob: pulp.LpProblem,
+    x: dict[tuple[int, str], pulp.LpVariable],
+    usable: list[dict[str, Any]],
+    stack_groups: list[int],
+    stack_teams: list[str | None],
+    stack_auto_y: dict[tuple[int, str], pulp.LpVariable],
+    banned_stack_teams: set[str],
+    one_off_eligible: Callable[[dict[str, Any]], bool],
+) -> None:
+    """
+    Restrict who can fill the "one-off" hitter slots -- the leftover
+    slots a partial stack shape (4-2, 3-3, ...) doesn't claim -- to
+    whichever pool `one_off_eligible(player)` allows.
+
+    A hitter whose team ends up assigned to a stack group is exempt no
+    matter what: their team's hitter count is already governed by the
+    `>=` stack constraint, so any of them landing in a roster slot is a
+    stack pick, not a one-off pick, even if that particular hitter isn't
+    one of the "minimum" ones. A hitter on a team that can never be
+    assigned to any group (not named manually, and not a candidate for
+    auto-assignment) who also fails the filter is barred outright --
+    there's no other way for them to end up in the lineup.
+    """
+    all_teams = sorted({p["team"] for p in usable})
+    manual_teams = {t for t in stack_teams if t is not None}
+    auto_teams = [t for t in all_teams if t not in manual_teams and t not in banned_stack_teams]
+    auto_group_idx = [i for i, t in enumerate(stack_teams) if t is None]
+
+    for p in usable:
+        if "P" in p["slots"] or one_off_eligible(p):
+            continue
+        t = p["team"]
+        if t in manual_teams:
+            continue  # this team's slot count is already forced by the stack constraint
+        picked = pulp.lpSum(x[(p["id"], slot)] for slot in p["slots"])
+        if t in auto_teams:
+            team_stacked = pulp.lpSum(
+                stack_auto_y[(i, t)] for i in auto_group_idx if (i, t) in stack_auto_y
+            )
+            prob += picked <= team_stacked
+        else:
+            prob += picked == 0
+
+
 def _team_count_constraints(
     prob: pulp.LpProblem,
     x: dict[tuple[int, str], pulp.LpVariable],
@@ -234,6 +279,7 @@ def _solve_one(
     min_unique_players: int = 1,
     min_teams_per_lineup: int | None = None,
     max_teams_per_lineup: int | None = None,
+    one_off_eligible: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any] | None:
     """
     Solve a single lineup against `pool`, minus anyone in `excluded_ids`
@@ -290,6 +336,11 @@ def _solve_one(
         stack_auto_y = _stack_constraints(
             prob, x, usable, stack_groups, stack_teams, banned_stack_teams
         )
+        if one_off_eligible is not None:
+            _one_off_constraints(
+                prob, x, usable, stack_groups, stack_teams, stack_auto_y,
+                banned_stack_teams, one_off_eligible,
+            )
 
     if min_teams_per_lineup is not None or max_teams_per_lineup is not None:
         _team_count_constraints(prob, x, usable, min_teams_per_lineup, max_teams_per_lineup)
@@ -360,6 +411,9 @@ def generate_lineups(
     min_unique_players: int = 1,
     min_teams_per_lineup: int | None = None,
     max_teams_per_lineup: int | None = None,
+    one_off_group_ids: list[int] | None = None,
+    one_off_min_salary: int | None = None,
+    one_off_max_salary: int | None = None,
 ) -> dict[str, Any]:
     """
     Generate up to `num_lineups` distinct legal lineups.
@@ -414,6 +468,19 @@ def generate_lineups(
 
     `min_teams_per_lineup` / `max_teams_per_lineup`, if given, bound how
     many distinct teams appear among a single lineup's 10 players.
+
+    `one_off_group_ids` / `one_off_min_salary` / `one_off_max_salary`,
+    if given, restrict who can fill the "one-off" hitter slots -- the
+    leftover slots a partial stack shape (4-2, 3-3, ...) doesn't claim.
+    A hitter whose team ends up assigned to a stack group is always
+    exempt (their team's count is already governed by the stack
+    constraint); a hitter on any other team must either be in
+    `one_off_group_ids` or fall within the salary range to be eligible
+    for one of those leftover slots. Use one or the other, not both --
+    a group whitelist and a salary range are two different ways to
+    answer the same question. Requires a partial `stack_groups` shape
+    (one summing to fewer than the 8 hitter slots); a full shape has no
+    leftover slots for this to apply to.
 
     Returns `{"lineups": [...], "exposure": [...]}`. If the pool or
     constraints can't support the full count requested, returns as many
@@ -514,6 +581,45 @@ def generate_lineups(
     ):
         raise OptimizerError("min_teams_per_lineup can't be more than max_teams_per_lineup.")
 
+    one_off_active = (
+        one_off_group_ids is not None
+        or one_off_min_salary is not None
+        or one_off_max_salary is not None
+    )
+    one_off_eligible: Callable[[dict[str, Any]], bool] | None = None
+    if one_off_active:
+        if not stack_groups:
+            raise OptimizerError("One-off slot restrictions require stack_groups to be set.")
+        if sum(stack_groups) >= MAX_HITTERS:
+            raise OptimizerError(
+                "One-off slot restrictions only apply to a partial stack shape "
+                f"(stack_groups summing to fewer than {MAX_HITTERS} hitters) -- "
+                "this shape already claims every hitter slot."
+            )
+        if one_off_group_ids is not None and (
+            one_off_min_salary is not None or one_off_max_salary is not None
+        ):
+            raise OptimizerError(
+                "Use either one_off_group_ids or a one-off salary range, not both."
+            )
+        if one_off_group_ids is not None:
+            if not one_off_group_ids:
+                raise OptimizerError("one_off_group_ids can't be empty.")
+            allowed_ids = set(one_off_group_ids)
+            one_off_eligible = lambda p: p["id"] in allowed_ids  # noqa: E731
+        else:
+            if (
+                one_off_min_salary is not None
+                and one_off_max_salary is not None
+                and one_off_min_salary > one_off_max_salary
+            ):
+                raise OptimizerError(
+                    "one_off_min_salary can't be more than one_off_max_salary."
+                )
+            lo = one_off_min_salary if one_off_min_salary is not None else 0
+            hi = one_off_max_salary if one_off_max_salary is not None else SALARY_CAP
+            one_off_eligible = lambda p: lo <= p["salary"] <= hi  # noqa: E731
+
     def _cap_to_count(pct: float) -> int:
         return max(1, round(pct / 100 * num_lineups))
 
@@ -537,6 +643,7 @@ def generate_lineups(
             min_unique_players=min_unique_players,
             min_teams_per_lineup=min_teams_per_lineup,
             max_teams_per_lineup=max_teams_per_lineup,
+            one_off_eligible=one_off_eligible,
         )
         if result is None:
             if i == 0:

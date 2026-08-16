@@ -871,6 +871,130 @@ async def main() -> int:
     except optimizer.OptimizerError:
         check("optimizer rejects a team-count bound above ROSTER_SIZE", True)
 
+    print("\nLineup optimizer: one-off slot restrictions on partial stacks")
+
+    # A dedicated fixture, not mul_slate: OA and OB get the "4-2" stack,
+    # and a third team OC (never named in the stack) has hitters that
+    # are a genuinely better value than anything on OA/OB at the same
+    # positions -- so an unconstrained solve picks OC for the leftover
+    # one-off slots. That's what proves a one-off restriction actually
+    # bites, rather than trivially passing because there was never a
+    # better outside option to begin with (mul_slate only has 2 hitting
+    # teams, so it can't demonstrate this).
+    oa_hitters = [
+        opt_hitter(9700, "OAC", "OA", "C", 3200, 8.5),
+        opt_hitter(9701, "OA1B", "OA", "1B", 4000, 10.0),
+        opt_hitter(9702, "OA2B", "OA", "2B", 3500, 9.0),
+        opt_hitter(9703, "OA3B", "OA", "3B", 4200, 10.5),
+        opt_hitter(9704, "OASS", "OA", "SS", 3700, 9.3),
+        opt_hitter(9705, "OAOF1", "OA", "OF", 4500, 12.0),
+        opt_hitter(9706, "OAOF2", "OA", "OF", 4300, 11.5),
+        opt_hitter(9707, "OAOF3", "OA", "OF", 4100, 11.0),
+    ]
+    ob_hitters = [
+        opt_hitter(9710, "OBC", "OB", "C", 3000, 7.5),
+        opt_hitter(9711, "OB1B", "OB", "1B", 3600, 9.0),
+        opt_hitter(9712, "OB2B", "OB", "2B", 3200, 8.0),
+        opt_hitter(9713, "OB3B", "OB", "3B", 3800, 9.5),
+        opt_hitter(9714, "OBSS", "OB", "SS", 3300, 8.2),
+        opt_hitter(9715, "OBOF1", "OB", "OF", 4000, 10.5),
+        opt_hitter(9716, "OBOF2", "OB", "OF", 3900, 10.2),
+        opt_hitter(9717, "OBOF3", "OB", "OF", 3700, 9.8),
+    ]
+    oc_hitters = [
+        opt_hitter(9720, "OCC", "OC", "C", 2600, 12.0),
+        opt_hitter(9721, "OC2B", "OC", "2B", 2600, 12.0),
+    ]
+    oneoff_slate = {
+        "games": [
+            {
+                "home": {"abbrev": "OA", "hitters": oa_hitters,
+                         "probable_pitcher": opt_pitcher(9750, "OAP", 9000, 18.0), "scratches": []},
+                "away": {"abbrev": "OB", "hitters": ob_hitters,
+                         "probable_pitcher": opt_pitcher(9751, "OBP", 8800, 17.5), "scratches": []},
+            },
+            {
+                "home": {"abbrev": "OC", "hitters": oc_hitters,
+                         "probable_pitcher": opt_pitcher(9752, "OCP", 8000, 15.0), "scratches": []},
+                "away": {"abbrev": "OD", "hitters": [],
+                         "probable_pitcher": opt_pitcher(9753, "ODP", 7800, 14.5), "scratches": []},
+            },
+        ]
+    }
+
+    def hitter_ids(lu):
+        return {p["id"] for slot, players in lu["slots"].items() if slot != "P" for p in players}
+
+    oc_ids = {9720, 9721}
+
+    oneoff_baseline = optimizer.generate_lineups(
+        oneoff_slate, stack_groups=[4, 2], stack_teams=["OA", "OB"]
+    )["lineups"][0]
+    check("one-off baseline: an unconstrained partial stack picks the better-value "
+          "unstacked team for the leftover slots",
+          bool(oc_ids & hitter_ids(oneoff_baseline)), str(hitter_ids(oneoff_baseline)))
+
+    range_restricted = optimizer.generate_lineups(
+        oneoff_slate, stack_groups=[4, 2], stack_teams=["OA", "OB"],
+        one_off_min_salary=3000,
+    )["lineups"][0]
+    check("one_off_min_salary excludes the unstacked team's below-floor hitters "
+          "from the leftover slots",
+          not (oc_ids & hitter_ids(range_restricted)), str(hitter_ids(range_restricted)))
+
+    allowed = {p["id"] for p in oa_hitters + ob_hitters}
+    group_restricted = optimizer.generate_lineups(
+        oneoff_slate, stack_groups=[4, 2], stack_teams=["OA", "OB"],
+        one_off_group_ids=list(allowed),
+    )["lineups"][0]
+    check("one_off_group_ids restricts the leftover slots to the named whitelist",
+          not (oc_ids & hitter_ids(group_restricted)), str(hitter_ids(group_restricted)))
+
+    group_allow_oc = optimizer.generate_lineups(
+        oneoff_slate, stack_groups=[4, 2], stack_teams=["OA", "OB"],
+        one_off_group_ids=[9720, 9721],
+    )["lineups"][0]
+    check("one_off_group_ids naming the unstacked team's own players allows them through",
+          bool(oc_ids & hitter_ids(group_allow_oc)), str(hitter_ids(group_allow_oc)))
+
+    try:
+        optimizer.generate_lineups(oneoff_slate, stack_groups=[4, 4], one_off_min_salary=3000)
+        check("one-off restriction rejects a full stack shape (no leftover slots)", False)
+    except optimizer.OptimizerError:
+        check("one-off restriction rejects a full stack shape (no leftover slots)", True)
+
+    try:
+        optimizer.generate_lineups(oneoff_slate, one_off_min_salary=3000)
+        check("one-off restriction rejects being used without stack_groups", False)
+    except optimizer.OptimizerError:
+        check("one-off restriction rejects being used without stack_groups", True)
+
+    try:
+        optimizer.generate_lineups(
+            oneoff_slate, stack_groups=[4, 2], stack_teams=["OA", "OB"],
+            one_off_group_ids=[9720], one_off_min_salary=3000,
+        )
+        check("one-off restriction rejects combining a group whitelist and a salary range", False)
+    except optimizer.OptimizerError:
+        check("one-off restriction rejects combining a group whitelist and a salary range", True)
+
+    try:
+        optimizer.generate_lineups(
+            oneoff_slate, stack_groups=[4, 2], stack_teams=["OA", "OB"], one_off_group_ids=[]
+        )
+        check("one-off restriction rejects an empty group whitelist", False)
+    except optimizer.OptimizerError:
+        check("one-off restriction rejects an empty group whitelist", True)
+
+    try:
+        optimizer.generate_lineups(
+            oneoff_slate, stack_groups=[4, 2], stack_teams=["OA", "OB"],
+            one_off_min_salary=4000, one_off_max_salary=3000,
+        )
+        check("one-off restriction rejects one_off_min_salary above one_off_max_salary", False)
+    except optimizer.OptimizerError:
+        check("one-off restriction rejects one_off_min_salary above one_off_max_salary", True)
+
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",
           parks.get_park("NYY")["orientation_deg"] == 75,

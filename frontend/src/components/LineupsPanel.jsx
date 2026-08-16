@@ -27,6 +27,7 @@ function teamsOnSlate(slate) {
 }
 
 const ROSTER_SLOTS = ['P', 'C', '1B', '2B', '3B', 'SS', 'OF']
+const MAX_HITTERS = 8
 
 /**
  * Generates one or many optimal DraftKings Classic MLB lineups from
@@ -51,9 +52,14 @@ export function LineupsPanel({ date, slate }) {
   const [minUniquePlayers, setMinUniquePlayers] = useState('')
   const [minTeams, setMinTeams] = useState('')
   const [maxTeams, setMaxTeams] = useState('')
+  const [oneOffMode, setOneOffMode] = useState('off') // 'off' | 'group' | 'range'
+  const [oneOff, setOneOff] = useState(new Set())
+  const [oneOffMinSalary, setOneOffMinSalary] = useState('')
+  const [oneOffMaxSalary, setOneOffMaxSalary] = useState('')
 
   const teams = useMemo(() => teamsOnSlate(slate), [slate])
   const groups = STACK_SHAPES[stackShape]
+  const isPartialStack = groups.length > 0 && groups.reduce((a, b) => a + b, 0) < MAX_HITTERS
 
   function setSlotCap(slot, value) {
     setSlotExposure((prev) => {
@@ -105,9 +111,18 @@ export function LineupsPanel({ date, slate }) {
     })
   }
 
+  function toggleOneOff(id) {
+    setOneOff((prev) => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
   function changeShape(shape) {
     setStackShape(shape)
     setStackTeams(new Array(STACK_SHAPES[shape].length).fill(''))
+    setOneOffMode('off')
   }
 
   function changeStackTeam(i, team) {
@@ -138,6 +153,15 @@ export function LineupsPanel({ date, slate }) {
         minUniquePlayers: minUniquePlayers.trim() ? Number(minUniquePlayers) : 1,
         minTeamsPerLineup: minTeams.trim() ? Number(minTeams) : null,
         maxTeamsPerLineup: maxTeams.trim() ? Number(maxTeams) : null,
+        oneOffGroupIds: isPartialStack && oneOffMode === 'group' && oneOff.size ? [...oneOff] : null,
+        oneOffMinSalary:
+          isPartialStack && oneOffMode === 'range' && oneOffMinSalary.trim()
+            ? Number(oneOffMinSalary)
+            : null,
+        oneOffMaxSalary:
+          isPartialStack && oneOffMode === 'range' && oneOffMaxSalary.trim()
+            ? Number(oneOffMaxSalary)
+            : null,
       })
       setSelected(0)
       setState({ status: 'ready', ...result })
@@ -268,6 +292,9 @@ export function LineupsPanel({ date, slate }) {
             excluded={excluded}
             onToggleLock={toggleLock}
             onToggleExclude={toggleExclude}
+            oneOff={oneOff}
+            onToggleOneOff={toggleOneOff}
+            showOneOff={isPartialStack && oneOffMode === 'group'}
           />
         </div>
       )}
@@ -359,6 +386,65 @@ export function LineupsPanel({ date, slate }) {
               </select>
             </label>
           ))}
+        </div>
+      )}
+
+      {isPartialStack && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="sub-line" style={{ marginBottom: 8 }}>
+            One-off slots — this shape leaves {MAX_HITTERS - groups.reduce((a, b) => a + b, 0)} hitter
+            slot{MAX_HITTERS - groups.reduce((a, b) => a + b, 0) > 1 ? 's' : ''} outside the stack;
+            restrict who can fill them
+          </div>
+          <div className="controls" style={{ marginBottom: oneOffMode !== 'off' ? 10 : 0, flexWrap: 'wrap' }}>
+            {['off', 'group', 'range'].map((mode) => (
+              <button
+                key={mode}
+                className={oneOffMode === mode ? 'primary' : ''}
+                onClick={() => setOneOffMode(mode)}
+              >
+                {mode === 'off' ? 'Unrestricted' : mode === 'group' ? 'By group' : 'By salary range'}
+              </button>
+            ))}
+          </div>
+          {oneOffMode === 'group' && (
+            <div className="sub-line">
+              {oneOff.size > 0
+                ? `${oneOff.size} player${oneOff.size > 1 ? 's' : ''} tagged one-off eligible`
+                : 'No players tagged yet'}
+              — open the player pool above and use the "one-off" pill to tag who's eligible.
+            </div>
+          )}
+          {oneOffMode === 'range' && (
+            <div className="controls" style={{ flexWrap: 'wrap' }}>
+              <label className="dim" style={{ fontSize: 13 }}>
+                Min salary{' '}
+                <input
+                  type="number"
+                  min="0"
+                  max={50000}
+                  step="500"
+                  placeholder="—"
+                  value={oneOffMinSalary}
+                  onChange={(e) => setOneOffMinSalary(e.target.value)}
+                  style={{ width: 80 }}
+                />
+              </label>
+              <label className="dim" style={{ fontSize: 13 }}>
+                Max salary{' '}
+                <input
+                  type="number"
+                  min="0"
+                  max={50000}
+                  step="500"
+                  placeholder="—"
+                  value={oneOffMaxSalary}
+                  onChange={(e) => setOneOffMaxSalary(e.target.value)}
+                  style={{ width: 80 }}
+                />
+              </label>
+            </div>
+          )}
         </div>
       )}
 
