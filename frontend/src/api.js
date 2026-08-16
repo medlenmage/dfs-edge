@@ -71,13 +71,17 @@ export const api = {
       body: JSON.stringify({ question, date }),
     }),
 
-  generateLineups: (date, { numLineups = 1, minStack = null, maxExposurePct = null } = {}) =>
+  generateLineups: (
+    date,
+    { numLineups = 1, stackGroups = null, stackTeams = null, maxExposurePct = null } = {},
+  ) =>
     request('/api/mlb/lineups', {
       method: 'POST',
       body: JSON.stringify({
         date,
         num_lineups: numLineups,
-        min_stack: minStack,
+        stack_groups: stackGroups,
+        stack_teams: stackTeams,
         max_exposure_pct: maxExposurePct,
       }),
     }),

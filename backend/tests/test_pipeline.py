@@ -498,15 +498,10 @@ async def main() -> int:
     check("optimizer never rosters a scratched player, even a huge-projection one",
           9106 not in all_ids, str(all_ids))
 
-    stacked = optimizer.generate_lineups(opt_slate, min_stack=5)["lineups"][0]
-    opt_hitter_count = sum(
-        1
-        for slot, players in stacked["slots"].items()
-        if slot != "P"
-        for p in players
-        if p["team"] == "OPT"
-    )
-    check("min_stack constraint is honored", opt_hitter_count >= 5, str(opt_hitter_count))
+    # Stack-shape behavior (manual/auto team assignment, partial shapes,
+    # validation) gets its own dedicated section below with a deeper
+    # fixture -- opt_slate's second team only has 1 hitter, not enough
+    # depth to prove an *exact* group-size constraint on its own.
 
     try:
         optimizer.generate_lineups({"games": []})
@@ -545,11 +540,17 @@ async def main() -> int:
         opt_hitter(9320, "MOF5", "MUL1", "OF", 4200, 12.0),
     ]
     mul_hitters_away = [
+        # Real positional spread, not just outfield -- a team with only
+        # OF-eligible hitters could never fill a 4-stack group on its
+        # own (there are only 3 OF slots on the whole roster).
         opt_hitter(9321, "MOF6", "MUL2", "OF", 4000, 11.5),
         opt_hitter(9322, "MOF7", "MUL2", "OF", 3900, 11.2),
         opt_hitter(9323, "MOF8", "MUL2", "OF", 3800, 10.9),
-        opt_hitter(9324, "MOF9", "MUL2", "OF", 3700, 10.6),
-        opt_hitter(9325, "MOF10", "MUL2", "OF", 3600, 10.3),
+        opt_hitter(9324, "MC4", "MUL2", "C", 3200, 8.0),
+        opt_hitter(9325, "M1B4", "MUL2", "1B", 3600, 9.5),
+        opt_hitter(9326, "M2B4", "MUL2", "2B", 3300, 8.6),
+        opt_hitter(9327, "M3B4", "MUL2", "3B", 3900, 10.8),
+        opt_hitter(9328, "MSS4", "MUL2", "SS", 3400, 8.8),
     ]
     mul_slate = {
         "games": [
@@ -605,6 +606,71 @@ async def main() -> int:
         check("optimizer rejects num_lineups above MAX_LINEUPS", False)
     except optimizer.OptimizerError:
         check("optimizer rejects num_lineups above MAX_LINEUPS", True)
+
+    print("\nLineup optimizer: named stack shapes")
+
+    def team_hitter_counts(lu):
+        counts = {}
+        for slot, players in lu["slots"].items():
+            if slot == "P":
+                continue
+            for p in players:
+                counts[p["team"]] = counts.get(p["team"], 0) + 1
+        return counts
+
+    manual_53 = optimizer.generate_lineups(
+        mul_slate, stack_groups=[5, 3], stack_teams=["MUL1", "MUL2"]
+    )["lineups"][0]
+    counts_53 = team_hitter_counts(manual_53)
+    check("manual 5-3 puts exactly 5 on the named team and 3 on the other",
+          counts_53.get("MUL1") == 5 and counts_53.get("MUL2") == 3, str(counts_53))
+
+    auto_44 = optimizer.generate_lineups(mul_slate, stack_groups=[4, 4])["lineups"][0]
+    counts_44 = team_hitter_counts(auto_44)
+    fours = [c for c in counts_44.values() if c == 4]
+    check("auto 4-4 produces exactly two teams with exactly 4 hitters each",
+          len(fours) == 2 and sum(counts_44.values()) == 8, str(counts_44))
+
+    partial_42 = optimizer.generate_lineups(mul_slate, stack_groups=[4, 2])["lineups"][0]
+    counts_42 = team_hitter_counts(partial_42)
+    check("partial 4-2 still totals 8 hitters, with the remaining 2 unconstrained",
+          sum(counts_42.values()) == 8, str(counts_42))
+    # A lower bound, not an exact count: the 2 leftover hitters are free
+    # to pad one of the named stacks further rather than being forced
+    # onto some uninvolved third team, so >= is the right check here,
+    # not equality (confirmed against real DK stacking conventions).
+    sorted_counts = sorted(counts_42.values(), reverse=True)
+    check("partial 4-2 has at least a 4-stack and, separately, at least a 2-stack",
+          len(sorted_counts) >= 2 and sorted_counts[0] >= 4 and sorted_counts[1] >= 2,
+          str(counts_42))
+
+    unconstrained = optimizer.generate_lineups(mul_slate)["lineups"][0]
+    check("no stack_groups reproduces the unconstrained behavior (any team split)",
+          sum(team_hitter_counts(unconstrained).values()) == 8)
+
+    try:
+        optimizer.generate_lineups(mul_slate, stack_groups=[5, 5])
+        check("stack shape rejects group sizes summing past 8 hitter slots", False)
+    except optimizer.OptimizerError:
+        check("stack shape rejects group sizes summing past 8 hitter slots", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, stack_groups=[4, 4], stack_teams=["MUL1"])
+        check("stack shape rejects a stack_teams length mismatch", False)
+    except optimizer.OptimizerError:
+        check("stack shape rejects a stack_teams length mismatch", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, stack_groups=[4, 4], stack_teams=["ZZZ", None])
+        check("stack shape rejects an unknown team name", False)
+    except optimizer.OptimizerError:
+        check("stack shape rejects an unknown team name", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, stack_groups=[4, 4], stack_teams=["MUL1", "MUL1"])
+        check("stack shape rejects the same team assigned to two groups", False)
+    except optimizer.OptimizerError:
+        check("stack shape rejects the same team assigned to two groups", True)
 
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",

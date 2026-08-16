@@ -263,7 +263,7 @@ export default function App() {
             <h2>Lineup optimizer</h2>
             <span className="hint">DraftKings Classic MLB — one optimal lineup per click</span>
           </div>
-          <LineupsPanel date={date} />
+          <LineupsPanel date={date} slate={slate} />
         </section>
       )}
 
