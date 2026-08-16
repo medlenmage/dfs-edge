@@ -7,7 +7,16 @@ import { useMemo, useState } from 'react'
  * optimizer.py's build_player_pool() so nothing shown here is a player
  * the backend would silently skip anyway.
  */
-export function PlayerPoolTable({ slate, locked, excluded, onToggleLock, onToggleExclude }) {
+export function PlayerPoolTable({
+  slate,
+  locked,
+  excluded,
+  onToggleLock,
+  onToggleExclude,
+  oneOff,
+  onToggleOneOff,
+  showOneOff = false,
+}) {
   const [sortKey, setSortKey] = useState('fpts')
   const [sortDir, setSortDir] = useState('desc')
   const [search, setSearch] = useState('')
@@ -82,6 +91,7 @@ export function PlayerPoolTable({ slate, locked, excluded, onToggleLock, onToggl
           {filtered.length} of {rows.length} players
           {locked.size > 0 && ` · ${locked.size} locked`}
           {excluded.size > 0 && ` · ${excluded.size} excluded`}
+          {showOneOff && oneOff.size > 0 && ` · ${oneOff.size} one-off eligible`}
         </span>
       </div>
 
@@ -89,7 +99,7 @@ export function PlayerPoolTable({ slate, locked, excluded, onToggleLock, onToggl
         <table>
           <thead>
             <tr>
-              <th>Lock / exclude</th>
+              <th>Lock / exclude{showOneOff ? ' / one-off' : ''}</th>
               <th className="sortable" onClick={() => toggleSort('name')}>
                 Player{sortKey === 'name' ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
               </th>
@@ -124,6 +134,14 @@ export function PlayerPoolTable({ slate, locked, excluded, onToggleLock, onToggl
                     >
                       {excluded.has(r.id) ? '✓ excluded' : 'exclude'}
                     </button>
+                    {showOneOff && (
+                      <button
+                        className={`pill-toggle lock${oneOff.has(r.id) ? ' active' : ''}`}
+                        onClick={() => onToggleOneOff(r.id)}
+                      >
+                        {oneOff.has(r.id) ? '✓ one-off' : 'one-off'}
+                      </button>
+                    )}
                   </div>
                 </td>
                 <td className="name">{r.name}</td>

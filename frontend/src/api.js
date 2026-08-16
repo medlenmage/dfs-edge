@@ -86,6 +86,9 @@ export const api = {
       minUniquePlayers = 1,
       minTeamsPerLineup = null,
       maxTeamsPerLineup = null,
+      oneOffGroupIds = null,
+      oneOffMinSalary = null,
+      oneOffMaxSalary = null,
     } = {},
   ) =>
     request('/api/mlb/lineups', {
@@ -104,6 +107,9 @@ export const api = {
         min_unique_players: minUniquePlayers,
         min_teams_per_lineup: minTeamsPerLineup,
         max_teams_per_lineup: maxTeamsPerLineup,
+        one_off_group_ids: oneOffGroupIds,
+        one_off_min_salary: oneOffMinSalary,
+        one_off_max_salary: oneOffMaxSalary,
       }),
     }),
 
