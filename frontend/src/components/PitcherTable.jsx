@@ -46,6 +46,7 @@ export function PitcherTable({ slate }) {
         parkHr: g.venue.park_factors.hr,
         roofClosed: g.venue.roof_closed,
         rain: g.weather?.precip_chance_pct,
+        wind: g.weather?.wind_effect,
       })
     }
   }
@@ -114,6 +115,11 @@ export function PitcherTable({ slate }) {
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 3 }}>
                   <span className="badge">{r.parkHr.toFixed(2)}× HR</span>
                   {r.roofClosed && <span className="badge">roof closed</span>}
+                  {r.wind?.label && r.wind.label !== 'unknown' && (
+                    <span className="badge">
+                      wind {r.wind.label} {r.wind.speed_mph}mph
+                    </span>
+                  )}
                   {r.rain >= 40 && <span className="badge risk">{r.rain}% rain</span>}
                 </div>
               </td>

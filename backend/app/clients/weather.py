@@ -119,7 +119,7 @@ def _closest_hour_index(times: list[str], target_iso: str) -> int | None:
 def wind_effect(
     wind_dir_deg: float | None,
     wind_mph: float | None,
-    park_orientation_deg: float = 0.0,
+    park_orientation_deg: float | None = None,
 ) -> dict[str, Any]:
     """
     Classify wind as helping or hurting home runs.
@@ -129,14 +129,20 @@ def wind_effect(
     to centre field. If the wind comes from behind home plate it pushes
     the ball out; if it comes from centre field it knocks balls down.
 
-    We default the orientation to 0 (north) when we don't know a park's
-    true alignment, and flag the result as low confidence in that case.
+    When a park's true alignment is unknown, pass None -- we fall back to
+    treating the wind as blowing along the 0 (north) axis for the sake of
+    computing *something*, but flag the result as low confidence rather
+    than pretending we know. A park truly oriented due north (a real,
+    common value -- see parks.py) still gets full "medium" confidence,
+    since that's an actual known orientation, not a missing one.
     """
     if wind_dir_deg is None or wind_mph is None:
         return {"label": "unknown", "hr_multiplier": 1.0, "confidence": "none"}
 
+    orientation = park_orientation_deg if park_orientation_deg is not None else 0.0
+
     # Angle between where the wind comes from and the home-plate-to-CF line.
-    relative = (wind_dir_deg - park_orientation_deg) % 360
+    relative = (wind_dir_deg - orientation) % 360
     if relative > 180:
         relative = 360 - relative
 
@@ -158,7 +164,7 @@ def wind_effect(
         "label": label,
         "speed_mph": round(wind_mph, 1),
         "hr_multiplier": round(multiplier, 3),
-        "confidence": "low" if park_orientation_deg == 0.0 else "medium",
+        "confidence": "medium" if park_orientation_deg is not None else "low",
     }
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.clients import mlb, odds, savant, weather  # noqa: E402
+from app.data import parks  # noqa: E402
 from app.services import mlb_slate, player_match, projections, salaries, scoring  # noqa: E402
 
 DAY = "2026-08-14"
@@ -317,6 +318,9 @@ async def main() -> int:
     check("hot weather boosts carry",
           game["weather"]["temperature_effect"]["hr_multiplier"] > 1.0,
           str(game["weather"]["temperature_effect"]))
+    check("Fenway's real orientation reaches wind_effect (medium confidence)",
+          game["weather"]["wind_effect"]["confidence"] == "medium",
+          str(game["weather"]["wind_effect"]))
 
     print("\nPitchers")
     check("home starter is left-handed",
@@ -372,6 +376,38 @@ async def main() -> int:
           player_match.match(ari_rows, "Geraldo Perdomo", "AZ") is not None)
     check("querying with the uploader's own ARI still matches too",
           player_match.match(ari_rows, "Geraldo Perdomo", "ARI") is not None)
+
+    print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
+    check("Yankee Stadium's real orientation is loaded",
+          parks.get_park("NYY")["orientation_deg"] == 75,
+          str(parks.get_park("NYY")["orientation_deg"]))
+    check("an unrecognised team falls back to unknown orientation, not a guess",
+          parks.get_park("ZZZ")["orientation_deg"] is None)
+
+    # Wind FROM the far side of centre field, blowing straight back toward
+    # home at Yankee Stadium (orientation 75). With the real orientation
+    # this is correctly "blowing out"; the old hardcoded 0-degree default
+    # would have called this a cross wind -- wrong direction entirely.
+    real_out = weather.wind_effect(255.0, 14.0, park_orientation_deg=75)
+    naive_out = weather.wind_effect(255.0, 14.0, park_orientation_deg=None)
+    check("real orientation correctly reads this as blowing out",
+          real_out["label"] == "blowing out", str(real_out))
+    check("the old no-orientation default got this one wrong (cross wind)",
+          naive_out["label"] == "cross wind", str(naive_out))
+
+    # Wind FROM behind home plate toward centre field at Yankee Stadium --
+    # correctly "blowing in" with real orientation, misread as a cross
+    # wind under the old default.
+    real_in = weather.wind_effect(80.0, 15.0, park_orientation_deg=75)
+    naive_in = weather.wind_effect(80.0, 15.0, park_orientation_deg=None)
+    check("real orientation correctly reads this as blowing in",
+          real_in["label"] == "blowing in", str(real_in))
+    check("the old no-orientation default got this one wrong too",
+          naive_in["label"] == "cross wind", str(naive_in))
+    check("known orientation is 'medium' confidence even when it's due north (0deg)",
+          weather.wind_effect(10.0, 10.0, park_orientation_deg=0)["confidence"] == "medium")
+    check("unknown orientation stays 'low' confidence rather than guessing",
+          naive_out["confidence"] == "low")
 
     print("\nPlatoon logic (Yankees facing a LHP)")
     yanks = {h["name"]: h for h in game["away"]["hitters"]}
