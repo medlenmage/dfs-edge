@@ -713,6 +713,52 @@ async def main() -> int:
     except optimizer.OptimizerError:
         check("optimizer rejects locking more players than roster slots exist", True)
 
+    print("\nLineup optimizer: per-position and per-team exposure caps")
+
+    slot_capped = optimizer.generate_lineups(
+        mul_slate, num_lineups=6, exposure_by_slot={"OF": 34}
+    )
+    of_counts: dict[int, int] = {}
+    c_counts: dict[int, int] = {}
+    for lu in slot_capped["lineups"]:
+        for p in lu["slots"]["OF"]:
+            of_counts[p["id"]] = of_counts.get(p["id"], 0) + 1
+        for p in lu["slots"]["C"]:
+            c_counts[p["id"]] = c_counts.get(p["id"], 0) + 1
+    check("a 34% OF exposure cap over 6 lineups holds (no OF appears more than 2x)",
+          max(of_counts.values(), default=0) <= 2, str(of_counts))
+    check("an uncapped slot (C) is free to exceed what the OF cap would have allowed",
+          max(c_counts.values(), default=0) > 2, str(c_counts))
+
+    team_capped = optimizer.generate_lineups(
+        mul_slate, num_lineups=6, stack_groups=[5, 3], team_exposure_cap={"MUL1": 34}
+    )
+    mul1_stack_count = next(
+        (e["count"] for e in team_capped["team_exposure"] if e["team"] == "MUL1"), 0
+    )
+    check("a 34% team stack-exposure cap over 6 lineups holds (MUL1 stacked no more than 2x)",
+          mul1_stack_count <= 2, str(team_capped["team_exposure"]))
+
+    try:
+        optimizer.generate_lineups(mul_slate, team_exposure_cap={"MUL1": 50})
+        check("team_exposure_cap without stack_groups is rejected", False)
+    except optimizer.OptimizerError:
+        check("team_exposure_cap without stack_groups is rejected", True)
+
+    try:
+        optimizer.generate_lineups(
+            mul_slate, stack_groups=[5, 3], team_exposure_cap={"ZZZ": 50}
+        )
+        check("team_exposure_cap rejects an unknown team", False)
+    except optimizer.OptimizerError:
+        check("team_exposure_cap rejects an unknown team", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, exposure_by_slot={"DH": 50})
+        check("exposure_by_slot rejects an unknown roster slot", False)
+    except optimizer.OptimizerError:
+        check("exposure_by_slot rejects an unknown roster slot", True)
+
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",
           parks.get_park("NYY")["orientation_deg"] == 75,
