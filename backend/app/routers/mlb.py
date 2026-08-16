@@ -299,6 +299,18 @@ async def generate_lineups(
     excluded_ids: list[int] | None = Body(
         None, embed=True, description="Player ids removed from the pool entirely"
     ),
+    min_salary: int | None = Body(
+        None, embed=True, description="Floor on total lineup salary, symmetric with the $50,000 cap"
+    ),
+    min_unique_players: int = Body(
+        1, embed=True, description="Minimum number of players that must differ between any two lineups"
+    ),
+    min_teams_per_lineup: int | None = Body(
+        None, embed=True, description="Minimum distinct teams among a single lineup's 10 players"
+    ),
+    max_teams_per_lineup: int | None = Body(
+        None, embed=True, description="Maximum distinct teams among a single lineup's 10 players"
+    ),
 ) -> dict[str, Any]:
     """
     Up to `num_lineups` distinct, highest-projected DraftKings Classic
@@ -322,6 +334,10 @@ async def generate_lineups(
             team_exposure_cap=team_exposure_cap,
             locked_ids=locked_ids,
             excluded_ids=excluded_ids,
+            min_salary=min_salary,
+            min_unique_players=min_unique_players,
+            min_teams_per_lineup=min_teams_per_lineup,
+            max_teams_per_lineup=max_teams_per_lineup,
         )
     except optimizer.OptimizerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

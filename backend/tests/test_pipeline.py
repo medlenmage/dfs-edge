@@ -759,6 +759,118 @@ async def main() -> int:
     except optimizer.OptimizerError:
         check("exposure_by_slot rejects an unknown roster slot", True)
 
+    print("\nLineup optimizer: salary floor, uniqueness, and team-count bounds")
+
+    # A pool where every slot has a cheap, high-fpts "value" option and an
+    # expensive, lower-fpts "chalk-avoidant" alternative -- unconstrained,
+    # the optimizer always prefers value (higher fpts AND cheaper), so
+    # salary_used naturally lands well under the cap. This is the only
+    # way to prove min_salary actually forces spending up rather than
+    # just trivially passing because the pool already spends to the cap
+    # (which mul_slate's fpts-scales-with-salary shape always does).
+    def vp(pid, name, pos, salary, fpts):
+        return opt_hitter(pid, name, "VAL", pos, salary, fpts) if pos != "P" else opt_pitcher(pid, name, salary, fpts)
+
+    value_slate = {
+        "games": [
+            {
+                "home": {
+                    "abbrev": "VAL",
+                    "hitters": [
+                        vp(9504, "CV", "C", 3000, 10), vp(9505, "CX", "C", 5000, 6),
+                        vp(9506, "1BV", "1B", 3000, 10), vp(9507, "1BX", "1B", 5000, 6),
+                        vp(9508, "2BV", "2B", 3000, 10), vp(9509, "2BX", "2B", 5000, 6),
+                        vp(9510, "3BV", "3B", 3000, 10), vp(9511, "3BX", "3B", 5000, 6),
+                        vp(9512, "SSV", "SS", 3000, 10), vp(9513, "SSX", "SS", 5000, 6),
+                        vp(9514, "OFV1", "OF", 3000, 10), vp(9515, "OFV2", "OF", 3000, 10),
+                        vp(9516, "OFV3", "OF", 3000, 10), vp(9517, "OFX1", "OF", 5000, 6),
+                        vp(9518, "OFX2", "OF", 5000, 6), vp(9519, "OFX3", "OF", 5000, 6),
+                    ],
+                    "probable_pitcher": vp(9500, "PV1", "P", 3000, 20),
+                    "scratches": [],
+                },
+                "away": {
+                    "abbrev": "VOP",
+                    "hitters": [],
+                    "probable_pitcher": vp(9502, "PV2", "P", 3000, 19),
+                    "scratches": [],
+                },
+            }
+        ]
+    }
+
+    value_baseline = optimizer.generate_lineups(value_slate)["lineups"][0]
+    check("salary floor baseline: unconstrained solve prefers the cheap, higher-fpts options",
+          value_baseline["salary_used"] < 35000, str(value_baseline["salary_used"]))
+
+    floored = optimizer.generate_lineups(value_slate, min_salary=40000)["lineups"][0]
+    check("min_salary forces total spend up to the floor even at a fpts cost",
+          floored["salary_used"] >= 40000, str(floored["salary_used"]))
+
+    try:
+        optimizer.generate_lineups(mul_slate, min_salary=optimizer.SALARY_CAP + 1)
+        check("optimizer rejects a min_salary above the salary cap", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects a min_salary above the salary cap", True)
+
+    unique_set = optimizer.generate_lineups(
+        mul_slate, num_lineups=3, min_unique_players=5, max_exposure_pct=100
+    )
+    unique_id_sets = [
+        frozenset(p["id"] for slot in lu["slots"].values() for p in slot)
+        for lu in unique_set["lineups"]
+    ]
+    min_diff = min(
+        len(unique_id_sets[i] - unique_id_sets[j])
+        for i in range(len(unique_id_sets))
+        for j in range(i + 1, len(unique_id_sets))
+    )
+    check("min_unique_players=5 forces every pair of lineups to differ by at least 5 players",
+          min_diff >= 5, str(min_diff))
+
+    try:
+        optimizer.generate_lineups(mul_slate, min_unique_players=0)
+        check("optimizer rejects min_unique_players below 1", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects min_unique_players below 1", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, min_unique_players=optimizer.ROSTER_SIZE + 1)
+        check("optimizer rejects min_unique_players above ROSTER_SIZE", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects min_unique_players above ROSTER_SIZE", True)
+
+    def lineup_teams(lu):
+        return {p["team"] for slot in lu["slots"].values() for p in slot}
+
+    default_teams = optimizer.generate_lineups(mul_slate)["lineups"][0]
+    check("without a team-count bound, the unconstrained solve naturally uses 2 teams",
+          len(lineup_teams(default_teams)) == 2, str(lineup_teams(default_teams)))
+
+    min3 = optimizer.generate_lineups(mul_slate, min_teams_per_lineup=3)["lineups"][0]
+    check("min_teams_per_lineup=3 forces a third team's pitcher into the lineup",
+          len(lineup_teams(min3)) >= 3, str(lineup_teams(min3)))
+
+    try:
+        optimizer.generate_lineups(mul_slate, max_teams_per_lineup=1)
+        check("max_teams_per_lineup=1 is infeasible with hitters split across 2 teams", False)
+    except optimizer.OptimizerError:
+        check("max_teams_per_lineup=1 is infeasible with hitters split across 2 teams", True)
+
+    try:
+        optimizer.generate_lineups(
+            mul_slate, min_teams_per_lineup=5, max_teams_per_lineup=3
+        )
+        check("optimizer rejects min_teams_per_lineup above max_teams_per_lineup", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects min_teams_per_lineup above max_teams_per_lineup", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, max_teams_per_lineup=optimizer.ROSTER_SIZE + 1)
+        check("optimizer rejects a team-count bound above ROSTER_SIZE", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects a team-count bound above ROSTER_SIZE", True)
+
     print("\nPark orientation and wind (real alignment vs the old 0-degree guess)")
     check("Yankee Stadium's real orientation is loaded",
           parks.get_park("NYY")["orientation_deg"] == 75,

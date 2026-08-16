@@ -43,9 +43,14 @@ export function LineupsPanel({ date, slate }) {
   const [excluded, setExcluded] = useState(new Set())
   const [showPool, setShowPool] = useState(false)
   const [showExposure, setShowExposure] = useState(false)
+  const [showRules, setShowRules] = useState(false)
   const [slotExposure, setSlotExposure] = useState({})
   const [teamExposure, setTeamExposure] = useState([])
   const [newTeamCap, setNewTeamCap] = useState({ team: '', pct: '' })
+  const [minSalary, setMinSalary] = useState('')
+  const [minUniquePlayers, setMinUniquePlayers] = useState('')
+  const [minTeams, setMinTeams] = useState('')
+  const [maxTeams, setMaxTeams] = useState('')
 
   const teams = useMemo(() => teamsOnSlate(slate), [slate])
   const groups = STACK_SHAPES[stackShape]
@@ -129,6 +134,10 @@ export function LineupsPanel({ date, slate }) {
           : null,
         lockedIds: locked.size ? [...locked] : null,
         excludedIds: excluded.size ? [...excluded] : null,
+        minSalary: minSalary.trim() ? Number(minSalary) : null,
+        minUniquePlayers: minUniquePlayers.trim() ? Number(minUniquePlayers) : 1,
+        minTeamsPerLineup: minTeams.trim() ? Number(minTeams) : null,
+        maxTeamsPerLineup: maxTeams.trim() ? Number(maxTeams) : null,
       })
       setSelected(0)
       setState({ status: 'ready', ...result })
@@ -187,7 +196,69 @@ export function LineupsPanel({ date, slate }) {
             ? ` (${Object.keys(slotExposure).length + teamExposure.length})`
             : ''}
         </button>
+        <button onClick={() => setShowRules((v) => !v)}>
+          {showRules ? 'Hide lineup rules' : 'Lineup rules'}
+          {[minSalary, minUniquePlayers, minTeams, maxTeams].filter((v) => v.trim()).length > 0
+            ? ` (${[minSalary, minUniquePlayers, minTeams, maxTeams].filter((v) => v.trim()).length})`
+            : ''}
+        </button>
       </div>
+
+      {showRules && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="controls" style={{ flexWrap: 'wrap' }}>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Min salary{' '}
+              <input
+                type="number"
+                min="0"
+                max={50000}
+                step="500"
+                placeholder="—"
+                value={minSalary}
+                onChange={(e) => setMinSalary(e.target.value)}
+                style={{ width: 80 }}
+              />
+            </label>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Min unique players between lineups{' '}
+              <input
+                type="number"
+                min="1"
+                max="10"
+                placeholder="1"
+                value={minUniquePlayers}
+                onChange={(e) => setMinUniquePlayers(e.target.value)}
+                style={{ width: 55 }}
+              />
+            </label>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Min teams per lineup{' '}
+              <input
+                type="number"
+                min="1"
+                max="10"
+                placeholder="—"
+                value={minTeams}
+                onChange={(e) => setMinTeams(e.target.value)}
+                style={{ width: 55 }}
+              />
+            </label>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Max teams per lineup{' '}
+              <input
+                type="number"
+                min="1"
+                max="10"
+                placeholder="—"
+                value={maxTeams}
+                onChange={(e) => setMaxTeams(e.target.value)}
+                style={{ width: 55 }}
+              />
+            </label>
+          </div>
+        </div>
+      )}
 
       {showPool && (
         <div style={{ marginBottom: 14 }}>
