@@ -5,8 +5,9 @@ betting lines, weather and batted-ball data, scores every hitter's and
 pitcher's matchup, and hands the whole slate to Claude for a written
 read.
 
-Built to run on your own machine for free (or close to it). NFL and NBA
-are designed for but not built yet — see [Roadmap](#roadmap).
+Built to run on your own machine for free (or close to it). NFL is now
+in too, alongside MLB — see [NFL](#nfl) below. NBA is designed for but
+not built yet — see [Roadmap](#roadmap).
 
 ![Stacks view](docs/screenshots/stacks.png)
 
@@ -268,20 +269,28 @@ dfs-edge/
 │   │   ├── cache.py          SQLite response cache
 │   │   ├── clients/          one file per external API
 │   │   │   ├── mlb.py        MLB Stats API (splits, rosters, injuries, bullpens)
+│   │   │   ├── nfl.py        nflverse schedule + betting-line CSV export
 │   │   │   ├── odds.py       The Odds API
 │   │   │   ├── savant.py     Baseball Savant batted-ball CSV export
 │   │   │   ├── weather.py    Open-Meteo + wind/temp effects
 │   │   │   └── http.py       shared HTTP client with retries
 │   │   ├── data/parks.py     park factors, coordinates, roofs, wind orientation
+│   │   ├── data/nfl_stadiums.py  stadium coordinates + timezones
 │   │   ├── services/
 │   │   │   ├── scoring.py    THE MODEL - all weights live here (hitter + pitcher)
-│   │   │   ├── mlb_slate.py  assembles the daily slate
+│   │   │   ├── nfl_scoring.py  the NFL matchup model
+│   │   │   ├── mlb_slate.py  assembles the daily MLB slate
+│   │   │   ├── nfl_slate.py  assembles the weekly NFL slate
+│   │   │   ├── optimizer.py  MLB DraftKings Classic lineup optimizer
+│   │   │   ├── nfl_optimizer.py  NFL DraftKings Classic lineup optimizer
 │   │   │   ├── analysis.py   Claude integration
-│   │   │   ├── salaries.py   DraftKings salary CSV upload
-│   │   │   ├── projections.py  RotoWire FPTS/ownership CSV upload
+│   │   │   ├── salaries.py   DraftKings salary CSV upload (MLB + NFL)
+│   │   │   ├── projections.py  RotoWire FPTS/ownership CSV upload (MLB + NFL)
 │   │   │   └── player_match.py  shared name/team matching for both uploads
-│   │   └── routers/          HTTP endpoints
-│   └── tests/test_pipeline.py  offline test, no API calls
+│   │   └── routers/          HTTP endpoints (mlb.py, nfl.py, system.py)
+│   └── tests/
+│       ├── test_pipeline.py      MLB offline test, no API calls
+│       └── test_nfl_pipeline.py  NFL offline test, no API calls
 │
 ├── frontend/src/
 │   ├── App.jsx               layout and tabs
@@ -338,6 +347,42 @@ vanishing from the doc:
   defaulted to "north" and flagged itself low-confidence — sometimes
   just wrong. `data/parks.py` now has real bearings for all 30 parks.
 
+## NFL
+
+Click **NFL** next to the app name to switch sports. It's a weekly
+slate, not a daily one — pick a season and week (defaults to whichever
+week's games haven't finished yet) instead of a date.
+
+**Data sources, all free, no key:**
+
+| Source | What it gives you |
+|---|---|
+| [nflverse](https://github.com/nflverse/nflverse-data) schedule export | every game, closing spread/total/moneylines, roof, surface |
+| Open-Meteo | same weather pull as MLB, for outdoor games |
+
+(`nfl_data_py`, the README's original plan for this, turned out to pin
+an old pandas that won't build on a current Python — fetching
+nflverse's own CSV releases directly sidesteps that and matches how
+`clients/savant.py` already does CSV-export data anyway.)
+
+**Matchups tab** shows each game with its Vegas-implied team totals,
+spread, and weather. **Lineups tab** is a DraftKings Classic NFL
+optimizer (QB, RB, RB, WR, WR, WR, TE, FLEX, DST) with multi-lineup
+generation, exposure caps, a salary floor, and QB stacking (force at
+least N of the rostered QB's own WR/TEs into the lineup — the standard
+NFL GPP correlation play, the same idea as MLB's hitter stacking).
+Upload a DraftKings salary CSV and a RotoWire projections CSV for the
+week the same way you would for MLB.
+
+**Deliberately smaller than the MLB model right now.** MLB's matchup
+score leans on a full season of granular per-player split data; NFL's
+here runs on what's genuinely knowable from free data today — Vegas
+implied team total, game script from the spread, home field, and
+weather. No position-vs-defense or pace component yet (there's no
+"this season's" defense data before a season has actually started) —
+see `services/nfl_scoring.py` for exactly what's in and why, and the
+Roadmap below for what's next.
+
 ## Improving it from here
 
 **1. Track your own results.** Log each night's scores and what actually
@@ -345,10 +390,9 @@ happened. After a month you can check whether your weights are any good,
 which is the only way to know. A `results` table in the same SQLite file
 is enough.
 
-**2. Then NFL.** The architecture already assumes it: add
-`clients/nfl.py` (nfl_data_py is excellent and free), `services/nfl_slate.py`,
-and a `routers/nfl.py`. The scoring module's component pattern carries
-over directly — position vs defense, pace, spread-implied game script.
+**2. NFL: pace and defense-vs-position.** Once there's real in-season
+data to compute them from, `services/nfl_scoring.py` is built the same
+extensible way `scoring.py` is — add a component, add a weight.
 
 ---
 
@@ -361,8 +405,10 @@ over directly — position vs defense, pace, spread-implied game script.
 - [x] Key injuries and game start times
 - [x] DraftKings salaries + value scores
 - [x] RotoWire FPTS/ownership projections
+- [x] Lineup optimizer (MLB and NFL), including a lineup-confirmation watcher for MLB
+- [x] NFL: weekly matchups + Classic lineup optimizer with QB stacking
 - [ ] Results tracking and weight backtesting
-- [ ] NFL
+- [ ] NFL: pace and defense-vs-position scoring components
 - [ ] NBA
 
 ---

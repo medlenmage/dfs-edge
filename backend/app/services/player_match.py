@@ -34,7 +34,8 @@ _WHITESPACE = re.compile(r"\s+")
 
 TEAM_ALIASES = {
     "ARI": "AZ",   # Diamondbacks -- MLB uses AZ, most DFS sites use ARI
-    "WAS": "WSH",  # Nationals -- some sites use WAS instead of WSH
+    "WAS": "WSH",  # Washington -- MLB Nationals and NFL nflverse both use WAS, DFS sites use WSH
+    "LAR": "LA",   # Rams -- DFS sites use LAR, nflverse's own code is LA
 }
 
 
