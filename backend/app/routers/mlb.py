@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
-from app.services import analysis, mlb_slate, salaries
+from app.services import analysis, mlb_slate, projections, salaries
 
 router = APIRouter(prefix="/api/mlb", tags=["mlb"])
 
@@ -198,6 +198,42 @@ async def get_salaries(date: str | None = Query(None)) -> dict[str, Any]:
     """Whatever salary data is currently loaded for a date."""
     day = date or date_cls.today().isoformat()
     rows = salaries.load(day)
+    return {"date": day, "loaded": bool(rows), "players": rows}
+
+
+@router.post("/projections")
+async def upload_projections(
+    date: str | None = Query(None, description="Slate date this CSV is for, defaults to today"),
+    file: UploadFile = File(..., description="RotoWire player-pool CSV export"),
+) -> dict[str, Any]:
+    """
+    Upload a RotoWire FPTS/ownership projections CSV for a slate.
+
+    Reference data only -- see services/projections.py for why this
+    isn't blended into the matchup score.
+    """
+    day = date or date_cls.today().isoformat()
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Couldn't read that as text: {exc}") from exc
+
+    rows = projections.parse_rotowire_csv(text)
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No players found in that file -- is it a RotoWire player-pool export?",
+        )
+    projections.store(day, rows)
+    return {"date": day, "players_loaded": len(rows)}
+
+
+@router.get("/projections")
+async def get_projections(date: str | None = Query(None)) -> dict[str, Any]:
+    """Whatever projections data is currently loaded for a date."""
+    day = date or date_cls.today().isoformat()
+    rows = projections.load(day)
     return {"date": day, "loaded": bool(rows), "players": rows}
 
 

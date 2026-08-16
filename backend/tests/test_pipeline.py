@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.clients import mlb, odds, savant, weather  # noqa: E402
-from app.services import mlb_slate, salaries, scoring  # noqa: E402
+from app.services import mlb_slate, player_match, projections, salaries, scoring  # noqa: E402
 
 DAY = "2026-08-14"
 
@@ -172,6 +172,22 @@ SALARIES = [
 ]
 
 
+def projection_row(name, team, fpts, ownership_pct):
+    return {
+        "name": name, "normalized_name": projections.normalize_name(name),
+        "team": team, "position": "", "fpts": fpts, "ownership_pct": ownership_pct,
+    }
+
+
+PROJECTIONS = [
+    projection_row("Big Righty Bat", "NYY", 12.4, 18.7),
+    projection_row("Lefty McLefterson", "BOS", 17.2, 25.3),
+    # "Punchless Lefty" absent here too, and "Boston Slugger" is
+    # deliberately absent from THIS list (but present in SALARIES) to
+    # prove the two uploads match independently of each other.
+]
+
+
 # --------------------------------------------------------------------------
 # Monkeypatch the clients
 # --------------------------------------------------------------------------
@@ -240,6 +256,10 @@ def fake_salary_load(day):
     return SALARIES
 
 
+def fake_projection_load(day):
+    return PROJECTIONS
+
+
 def patch() -> None:
     mlb.get_schedule = fake_schedule
     mlb.get_people = fake_people
@@ -255,6 +275,7 @@ def patch() -> None:
     savant.get_pitcher_batted_ball = fake_savant_pitch
     mlb.get_bullpen_stats = fake_bullpen
     salaries.load = fake_salary_load
+    projections.load = fake_projection_load
 
 
 # --------------------------------------------------------------------------
@@ -342,6 +363,16 @@ async def main() -> int:
     check("Yankees have no injuries in the fixture",
           game["away"]["injuries"] == [])
 
+    print("\nTeam abbreviation aliasing (uploads don't always match MLB's own code)")
+    ari_rows = player_match.build_lookup(
+        [{"name": "Geraldo Perdomo", "normalized_name": player_match.normalize_name("Geraldo Perdomo"),
+          "team": "ARI", "value": "example"}]
+    )
+    check("a row tagged ARI matches when queried with MLB's own AZ",
+          player_match.match(ari_rows, "Geraldo Perdomo", "AZ") is not None)
+    check("querying with the uploader's own ARI still matches too",
+          player_match.match(ari_rows, "Geraldo Perdomo", "ARI") is not None)
+
     print("\nPlatoon logic (Yankees facing a LHP)")
     yanks = {h["name"]: h for h in game["away"]["hitters"]}
     righty = yanks["Big Righty Bat"]
@@ -379,6 +410,20 @@ async def main() -> int:
           f"{righty['salary']['value']} vs expected {round(righty['edge']['score'] / 4.2, 2)}")
     check("hitter with no salary match returns None, not a crash",
           lefty["salary"] is None, str(lefty["salary"]))
+
+    check("hitter matched a projection by name + team",
+          righty["projection"] == {"fpts": 12.4, "ownership_pct": 18.7},
+          str(righty["projection"]))
+    check("hitter present in salaries but absent from projections gets None",
+          sox["Boston Slugger"]["projection"] is None,
+          str(sox["Boston Slugger"]["projection"]))
+    check("home starter matched a projection",
+          game["home"]["probable_pitcher"]["projection"] == {"fpts": 17.2, "ownership_pct": 25.3},
+          str(game["home"]["probable_pitcher"]["projection"]))
+    check("projection never leaks into the edge score components",
+          "fpts" not in righty["edge"]["components"]
+          and "ownership_pct" not in righty["edge"]["components"],
+          str(list(righty["edge"]["components"])))
 
     switch = yanks["Switch Hitter Sam"]
     check("switch hitter gets pitcher's vs-RHB split (bats right vs LHP)",

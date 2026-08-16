@@ -12,6 +12,8 @@ const COLUMNS = [
   { key: 'implied_runs', label: 'Team runs', sortable: true, num: true },
   { key: 'salary', label: 'Salary', sortable: true, num: true },
   { key: 'value', label: 'Value', sortable: true, num: true },
+  { key: 'fpts', label: 'Proj FPTS', sortable: true, num: true },
+  { key: 'ownershipPct', label: 'Own%', sortable: true, num: true },
   { key: 'why', label: 'Biggest factor', sortable: false },
 ]
 
@@ -63,6 +65,8 @@ export function HitterTable({ slate, limit = 50 }) {
             salary: h.salary?.salary ?? null,
             value: h.salary?.value ?? null,
             avgPoints: h.salary?.avg_points ?? null,
+            fpts: h.projection?.fpts ?? null,
+            ownershipPct: h.projection?.ownership_pct ?? null,
             confirmed: team.lineup_confirmed,
             platoonDetail: h.edge.components.platoon.detail,
           })
@@ -206,6 +210,12 @@ export function HitterTable({ slate, limit = 50 }) {
                 </td>
                 <td className="num">
                   {r.value != null ? r.value.toFixed(1) : '—'}
+                </td>
+                <td className="num">
+                  {r.fpts != null ? r.fpts.toFixed(1) : '—'}
+                </td>
+                <td className="num">
+                  {r.ownershipPct != null ? `${r.ownershipPct.toFixed(1)}%` : '—'}
                 </td>
                 <td className="sub-line">
                   {DRIVER_LABELS[r.driver] || r.driver || '—'}

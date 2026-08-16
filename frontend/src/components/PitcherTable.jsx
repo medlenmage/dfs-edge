@@ -40,6 +40,8 @@ export function PitcherTable({ slate }) {
         salary: p.salary?.salary ?? null,
         value: p.salary?.value ?? null,
         avgPoints: p.salary?.avg_points ?? null,
+        fpts: p.projection?.fpts ?? null,
+        ownershipPct: p.projection?.ownership_pct ?? null,
         venue: g.venue.name,
         parkHr: g.venue.park_factors.hr,
         roofClosed: g.venue.roof_closed,
@@ -65,6 +67,8 @@ export function PitcherTable({ slate }) {
             <th className="num">Runs against</th>
             <th className="num">Salary</th>
             <th className="num">Value</th>
+            <th className="num">Proj FPTS</th>
+            <th className="num">Own%</th>
             <th>Park / conditions</th>
             <th>Biggest factor</th>
           </tr>
@@ -98,6 +102,12 @@ export function PitcherTable({ slate }) {
               </td>
               <td className="num">
                 {r.value != null ? r.value.toFixed(1) : '—'}
+              </td>
+              <td className="num">
+                {r.fpts != null ? r.fpts.toFixed(1) : '—'}
+              </td>
+              <td className="num">
+                {r.ownershipPct != null ? `${r.ownershipPct.toFixed(1)}%` : '—'}
               </td>
               <td>
                 <div className="sub-line">{r.venue}</div>

@@ -25,6 +25,24 @@ async function request(path, options = {}) {
   return res.json()
 }
 
+// Not JSON -- multipart file upload, so this bypasses request()'s default
+// Content-Type (the browser sets the multipart boundary itself).
+async function uploadFile(path, file) {
+  const body = new FormData()
+  body.append('file', file)
+  const res = await fetch(`${BASE}${path}`, { method: 'POST', body })
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`
+    try {
+      detail = (await res.json()).detail || detail
+    } catch {
+      /* response wasn't JSON - keep the status code */
+    }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
 export const api = {
   health: () => request('/api/health'),
 
@@ -40,26 +58,9 @@ export const api = {
 
   injuries: (date) => request(`/api/mlb/injuries?date=${date}`),
 
-  // Not JSON -- multipart file upload, so this bypasses request()'s
-  // default Content-Type (the browser sets the multipart boundary itself).
-  uploadSalaries: async (date, file) => {
-    const body = new FormData()
-    body.append('file', file)
-    const res = await fetch(`${BASE}/api/mlb/salaries?date=${date}`, {
-      method: 'POST',
-      body,
-    })
-    if (!res.ok) {
-      let detail = `HTTP ${res.status}`
-      try {
-        detail = (await res.json()).detail || detail
-      } catch {
-        /* response wasn't JSON - keep the status code */
-      }
-      throw new Error(detail)
-    }
-    return res.json()
-  },
+  uploadSalaries: (date, file) => uploadFile(`/api/mlb/salaries?date=${date}`, file),
+
+  uploadProjections: (date, file) => uploadFile(`/api/mlb/projections?date=${date}`, file),
 
   analysis: (date, { refresh = false } = {}) =>
     request(`/api/mlb/analysis?date=${date}${refresh ? '&refresh=true' : ''}`),

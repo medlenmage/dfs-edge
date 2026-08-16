@@ -25,7 +25,7 @@ from typing import Any
 
 from app.clients import mlb, odds, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
-from app.services import salaries, scoring
+from app.services import projections, salaries, scoring
 
 log = logging.getLogger(__name__)
 
@@ -138,13 +138,18 @@ async def build_slate(
         "bullpen_era": scoring.league_average(data["bullpen"], "era", 0, "era"),
     }
 
-    # Salaries are a manual upload, not a fetch -- see services/salaries.py.
-    # Whatever's cached for this date (possibly nothing) gets matched in.
+    # Salaries and projections are manual uploads, not a fetch -- see
+    # services/salaries.py and services/projections.py. Whatever's
+    # cached for this date (possibly nothing) gets matched in.
     salary_lookup = salaries.build_lookup(salaries.load(day))
+    projection_lookup = projections.build_lookup(projections.load(day))
 
     built = await asyncio.gather(
         *[
-            _build_game(g, season, data, baselines, lines, include_hitters, salary_lookup)
+            _build_game(
+                g, season, data, baselines, lines, include_hitters,
+                salary_lookup, projection_lookup,
+            )
             for g in games
         ],
         return_exceptions=True,
@@ -182,6 +187,7 @@ async def _build_game(
     lines: list[dict[str, Any]],
     include_hitters: bool,
     salary_lookup: dict[tuple[str, str], dict[str, Any]],
+    projection_lookup: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
     game_pk = game.get("gamePk")
     teams = game.get("teams") or {}
@@ -280,6 +286,7 @@ async def _build_game(
             implied_runs=(line or {}).get("home_implied_runs"),
             confirmed=lineups.get("home") or [],
             team_abbrev=home_abbrev, salary_lookup=salary_lookup,
+            projection_lookup=projection_lookup,
         ),
         _team_hitters(
             away_t.get("id"), season, data, baselines, env,
@@ -288,6 +295,7 @@ async def _build_game(
             implied_runs=(line or {}).get("away_implied_runs"),
             confirmed=lineups.get("away") or [],
             team_abbrev=away_t.get("abbreviation") or "", salary_lookup=salary_lookup,
+            projection_lookup=projection_lookup,
         ),
         mlb.get_team_injuries(home_t.get("id"), season),
         mlb.get_team_injuries(away_t.get("id"), season),
@@ -319,13 +327,36 @@ async def _build_game(
         result["home"]["probable_pitcher"]["salary"] = _salary_info(
             salary_lookup, home_pitcher.get("name"), home_abbrev, home_edge["score"]
         )
+        result["home"]["probable_pitcher"]["projection"] = _projection_info(
+            projection_lookup, home_pitcher.get("name"), home_abbrev
+        )
     if away_edge:
         result["away"]["probable_pitcher"]["edge"] = away_edge
         result["away"]["probable_pitcher"]["salary"] = _salary_info(
             salary_lookup, away_pitcher.get("name"), away_t.get("abbreviation") or "", away_edge["score"]
         )
+        result["away"]["probable_pitcher"]["projection"] = _projection_info(
+            projection_lookup, away_pitcher.get("name"), away_t.get("abbreviation") or ""
+        )
 
     return result
+
+
+def _projection_info(
+    lookup: dict[tuple[str, str], dict[str, Any]],
+    name: str | None,
+    team_abbrev: str,
+) -> dict[str, Any] | None:
+    """RotoWire's FPTS/ownership projection for one player, or None if no
+    projections file is loaded for this date or nothing matched. Purely
+    informational -- see services/projections.py for why this never
+    touches the edge score."""
+    if not lookup or not name:
+        return None
+    row = projections.match(lookup, name, team_abbrev)
+    if not row:
+        return None
+    return {"fpts": row["fpts"], "ownership_pct": row["ownership_pct"]}
 
 
 def _salary_info(
@@ -452,6 +483,7 @@ async def _team_hitters(
     confirmed: list[int],
     team_abbrev: str = "",
     salary_lookup: dict[tuple[str, str], dict[str, Any]] | None = None,
+    projection_lookup: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if not team_id:
         return []
@@ -548,6 +580,7 @@ async def _team_hitters(
                 "vs_hand": split_stat,
                 "edge": {**edge, "components": components},
                 "salary": _salary_info(salary_lookup, bio.get("name"), team_abbrev, edge["score"]),
+                "projection": _projection_info(projection_lookup, bio.get("name"), team_abbrev),
             }
         )
 
