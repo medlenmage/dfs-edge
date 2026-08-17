@@ -53,6 +53,9 @@ import random
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
+
+from app.services import variance
 from app.services.optimizer import SALARY_CAP, SLOT_REQUIREMENTS, SLOT_TYPES, build_player_pool
 
 MAX_SAMPLE_SIZE = 5000
@@ -494,6 +497,104 @@ def _evaluate_batch_against_field(
     }
 
 
+async def evaluate_batch_simulated(
+    entries: list[dict[str, Any]],
+    field: list[dict[str, Any]],
+    contest: dict[str, Any],
+    *,
+    season: int,
+    num_trials: int = 2000,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """
+    Like `_evaluate_batch_against_field`, but ranks against
+    variance.simulate_batch()'s real Monte Carlo outcome distribution
+    instead of a single projected-points snapshot -- entries and field
+    are simulated TOGETHER, trial by trial, so a lineup's cash
+    probability is the fraction of trials where it actually lands in
+    the paid zone of that specific simulated reality, and its expected
+    payout is a genuine average (with a 10th/90th percentile range)
+    rather than one point estimate.
+
+    Two entries can never occupy the same paid rank within a single
+    trial -- same rule `_evaluate_batch_against_field` enforces for its
+    one deterministic ranking, just applied per trial here. The
+    sequential "bump forward just enough to stay distinct" walk that
+    function does with a Python loop is instead solved with a
+    cumulative maximum: for entries sorted best-to-worst within a
+    trial, distinct_rank_i = i + running_max_{j<=i}(percentile_rank_j -
+    j) is the closed form of that exact recurrence, vectorized across
+    every trial at once instead of looping trial by trial in Python.
+    """
+    if not entries:
+        raise ContestError("Need at least one entry to simulate.")
+    if not field:
+        raise ContestError("Need at least one field lineup to simulate against.")
+
+    field_size = contest["field_size"]
+    entry_fee = contest["entry_fee"]
+    paid_count = max(1, round(field_size * contest["payout_pct"]))
+    prize_pool = round(field_size * entry_fee * (1 - RAKE_PCT), 2)
+    payouts = np.array(_payout_curve(paid_count, prize_pool, contest["shape"]))
+
+    num_entries = len(entries)
+    sample_size = len(field)
+    player_pools = await variance.player_pools_for_entries(entries + field, season)
+    sim = variance.simulate_batch(entries + field, player_pools, num_trials=num_trials, seed=seed)
+    entry_sim, field_sim = sim[:num_entries], sim[num_entries:]
+
+    # Per trial, how many field lineups each entry beat -- searchsorted
+    # against that trial's sorted field column is far cheaper than a
+    # full entries x field x trials comparison.
+    field_sorted = np.sort(field_sim, axis=0)
+    beaten = np.empty((num_entries, num_trials), dtype=np.int64)
+    for t in range(num_trials):
+        beaten[:, t] = np.searchsorted(field_sorted[:, t], entry_sim[:, t], side="left")
+    percentile_rank = np.clip(np.round((1 - beaten / sample_size) * field_size), 1, field_size).astype(
+        np.int64
+    )
+
+    order = np.argsort(-entry_sim, axis=0)  # best-to-worst per trial
+    sorted_pct_rank = np.take_along_axis(percentile_rank, order, axis=0)
+    positions = np.arange(num_entries)[:, None]
+    distinct_rank_sorted = np.minimum(
+        np.maximum.accumulate(sorted_pct_rank - positions, axis=0) + positions, field_size
+    )
+    final_rank = np.empty_like(distinct_rank_sorted)
+    np.put_along_axis(final_rank, order, distinct_rank_sorted, axis=0)
+
+    in_the_money = final_rank <= paid_count
+    payout_index = np.clip(final_rank - 1, 0, paid_count - 1)
+    payout_per_trial = np.where(in_the_money, payouts[payout_index], 0.0)
+
+    results = []
+    for i in range(num_entries):
+        row = entry_sim[i]
+        payout_row = payout_per_trial[i]
+        results.append(
+            {
+                "lineup_index": i,
+                "cash_probability_pct": round(float(in_the_money[i].mean()) * 100, 1),
+                "expected_payout": round(float(payout_row.mean()), 2),
+                "payout_p10": round(float(np.percentile(payout_row, 10)), 2),
+                "payout_p90": round(float(np.percentile(payout_row, 90)), 2),
+                "simulated_points_mean": round(float(row.mean()), 2),
+                "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
+                "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
+            }
+        )
+
+    return {
+        "field_size": field_size,
+        "sample_size": sample_size,
+        "paid_count": paid_count,
+        "entry_fee": entry_fee,
+        "prize_pool": prize_pool,
+        "num_trials": num_trials,
+        "results": results,
+    }
+
+
 def build_contest_field(
     slate: dict[str, Any],
     contest_type: str,
@@ -546,29 +647,23 @@ def build_contest_field(
     }
 
 
-def build_contest_entries(
+def _build_entries_and_field(
     slate: dict[str, Any],
     contest_type: str,
     num_lineups: int,
     *,
-    max_exposure_pct: float | None = None,
-    field_size: int | None = None,
-    sample_size: int | None = None,
-    included_game_pks: list[int] | None = None,
-    seed: int | None = None,
-) -> dict[str, Any]:
+    max_exposure_pct: float | None,
+    field_size: int | None,
+    sample_size: int | None,
+    included_game_pks: list[int] | None,
+    seed: int | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """
-    The contest generator's main entry point for mass multi-entry: build
-    up to `num_lineups` (max MAX_USER_LINEUPS) of the user's own entries
-    for a named contest type -- each individually strong, genuinely
-    distinct from the rest of the batch -- then evaluate the whole batch
-    against a simulated opponent field for cash-rate/payout economics.
-
-    Unrelated to optimizer.py's exact single/small-batch MILP solver;
-    this is the fast, large-scale path, sacrificing per-lineup
-    optimality for the ability to build thousands of entries in one
-    request. `seed`, if given, offsets the opponent field's own seed by
-    one so the two random walks aren't identical.
+    Shared setup for build_contest_entries and
+    build_contest_entries_simulated: validate the contest type/size,
+    build the user's own entries, and sample an opponent field to rank
+    them against. `seed`, if given, offsets the opponent field's own
+    seed by one so the two random walks aren't identical.
     """
     if contest_type not in CONTEST_TYPES:
         raise ContestError(
@@ -607,6 +702,44 @@ def build_contest_entries(
         field_sample,
         included_game_pks=included_game_pks,
         seed=(seed + 1) if seed is not None else None,
+    )
+    return contest, entries, field
+
+
+def build_contest_entries(
+    slate: dict[str, Any],
+    contest_type: str,
+    num_lineups: int,
+    *,
+    max_exposure_pct: float | None = None,
+    field_size: int | None = None,
+    sample_size: int | None = None,
+    included_game_pks: list[int] | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """
+    The contest generator's main entry point for mass multi-entry: build
+    up to `num_lineups` (max MAX_USER_LINEUPS) of the user's own entries
+    for a named contest type -- each individually strong, genuinely
+    distinct from the rest of the batch -- then evaluate the whole batch
+    against a simulated opponent field for cash-rate/payout economics.
+
+    Unrelated to optimizer.py's exact single/small-batch MILP solver;
+    this is the fast, large-scale path, sacrificing per-lineup
+    optimality for the ability to build thousands of entries in one
+    request. Deterministic and fast, ranking against the field's
+    *projected* points -- see build_contest_entries_simulated() for the
+    real Monte Carlo alternative.
+    """
+    contest, entries, field = _build_entries_and_field(
+        slate,
+        contest_type,
+        num_lineups,
+        max_exposure_pct=max_exposure_pct,
+        field_size=field_size,
+        sample_size=sample_size,
+        included_game_pks=included_game_pks,
+        seed=seed,
     )
     evaluation = _evaluate_batch_against_field(entries, field, contest)
 
@@ -652,5 +785,80 @@ def build_contest_entries(
             "mutually distinct, not guaranteed optimal. Cash rate and payout are "
             "projected-points estimates against a sampled opponent field, not "
             "simulated real-world outcomes."
+        ),
+    }
+
+
+async def build_contest_entries_simulated(
+    slate: dict[str, Any],
+    contest_type: str,
+    num_lineups: int,
+    *,
+    season: int,
+    num_trials: int = 2000,
+    max_exposure_pct: float | None = None,
+    field_size: int | None = None,
+    sample_size: int | None = None,
+    included_game_pks: list[int] | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """
+    Like build_contest_entries, but ranks the batch against
+    evaluate_batch_simulated()'s real Monte Carlo cash probabilities and
+    payout distributions instead of a single projected-points snapshot
+    against the field. A separate function rather than a flag on
+    build_contest_entries -- simulation is real additional compute
+    (fetching every player's own outcome pool, then running num_trials
+    simulated realities) on top of an already-large mass-generation
+    call, and needs `season` to know which year's game logs to pull.
+    """
+    contest, entries, field = _build_entries_and_field(
+        slate,
+        contest_type,
+        num_lineups,
+        max_exposure_pct=max_exposure_pct,
+        field_size=field_size,
+        sample_size=sample_size,
+        included_game_pks=included_game_pks,
+        seed=seed,
+    )
+    evaluation = await evaluate_batch_simulated(
+        entries,
+        field,
+        contest,
+        season=season,
+        num_trials=num_trials,
+        seed=(seed + 2) if seed is not None else None,
+    )
+
+    cash_probs = [r["cash_probability_pct"] for r in evaluation["results"]]
+    expected_payouts = [r["expected_payout"] for r in evaluation["results"]]
+    total_cost = round(len(entries) * contest["entry_fee"], 2)
+    total_expected_payout = round(sum(expected_payouts), 2)
+
+    return {
+        "contest_type": contest_type,
+        "contest": contest,
+        "num_entries_requested": num_lineups,
+        "num_entries_built": len(entries),
+        "field_size": evaluation["field_size"],
+        "sample_size": evaluation["sample_size"],
+        "paid_count": evaluation["paid_count"],
+        "prize_pool": evaluation["prize_pool"],
+        "num_trials": evaluation["num_trials"],
+        "summary": {
+            "avg_cash_probability_pct": round(sum(cash_probs) / len(cash_probs), 1),
+            "total_entry_cost": total_cost,
+            "total_expected_payout": total_expected_payout,
+            "estimated_net_profit": round(total_expected_payout - total_cost, 2),
+        },
+        "exposure": field_exposure(entries, top_n=20),
+        "entries": entries,
+        "results": evaluation["results"],
+        "note": (
+            f"Cash probability and expected payout come from {evaluation['num_trials']:,} "
+            "real Monte Carlo simulated trials of each player's own historical outcome "
+            "pool, with team correlation for hitters -- a genuine probability, not a "
+            "single projected-points estimate against the field."
         ),
     }
