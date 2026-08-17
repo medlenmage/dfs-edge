@@ -25,15 +25,16 @@ from typing import Any
 # Weights -- these must sum to 1.0
 # --------------------------------------------------------------------------
 WEIGHTS = {
-    "platoon": 0.21,          # how the hitter performs vs this pitcher's hand
-    "pitcher": 0.16,          # how vulnerable this pitcher is to this hand
-    "team_total": 0.19,       # Vegas implied runs for his team
-    "contact_quality": 0.15,  # Statcast barrel/hard-hit/xwOBA vs league average
-    "bullpen": 0.08,          # opposing team's relief corps, for the innings after the starter leaves
-    "park": 0.10,             # ballpark HR factor for his handedness
+    "platoon": 0.19,          # how the hitter performs vs this pitcher's hand
+    "team_total": 0.18,       # Vegas implied runs for his team
+    "pitcher": 0.15,          # how vulnerable this pitcher is to this hand
+    "contact_quality": 0.14,  # Statcast barrel/hard-hit/xwOBA vs league average
+    "stolen_base": 0.08,      # his own season-long stolen-base rate vs league average
+    "park": 0.09,             # ballpark HR factor for his handedness
+    "bullpen": 0.07,          # opposing team's relief corps, for the innings after the starter leaves
     "weather": 0.06,          # temperature + wind
     "form": 0.03,             # last 15 games vs season baseline
-    "home_road": 0.02,        # his own home/road split
+    "home_road": 0.01,        # his own home/road split
 }
 
 # Baselines used when a component is missing entirely.
@@ -45,6 +46,11 @@ LEAGUE_IMPLIED_RUNS = 4.4
 # Minimum plate appearances before we trust a split at face value.
 MIN_PA_FULL_TRUST = 120
 MIN_BF_FULL_TRUST = 150
+# Stolen-base attempts are a much rarer event than a plate appearance,
+# and depend as much on a manager's green light as raw speed -- a
+# 120-PA sample that's enough to trust an OPS split isn't enough to
+# call someone a burner (or rule it out). Needs roughly half a season.
+MIN_PA_FULL_TRUST_SB = 300
 
 
 def _shrink(value: float, sample: float, full_trust: float) -> float:
@@ -92,6 +98,48 @@ def platoon_component(
         "k_pct": split_stat.get("k_pct"),
         "sample": pa,
         "detail": f"{split_stat['ops']:.3f} OPS in {pa} PA",
+    }
+
+
+def stolen_base_component(
+    season_stat: dict[str, Any] | None,
+    league_avg_sb_per_pa: float | None,
+) -> dict[str, Any]:
+    """
+    Stolen-base upside. DraftKings pays +5 for a steal -- the same as a
+    double -- but nothing else in this model measures it: a low-power,
+    high-average burner used to score purely on OPS/contact-quality/
+    platoon and get no credit for an entire category of his real DK
+    value, while a slow slugger with an identical OPS looked identical
+    on paper despite having zero access to that category at all.
+
+    Season-long rate, not a platoon or recent-form split. Base-stealing
+    is a stable player skill (and as much a manager's green light) that
+    doesn't swing by pitcher handedness or a hot couple of weeks the
+    way batting outcomes do, so the season total is the right baseline
+    rather than something split-specific.
+
+    Wider than the +-45% most components cap at -- true talent gaps in
+    stolen-base rate run proportionally much larger than an OPS split
+    does, and squeezing them into that same band would erase most of
+    the signal this exists to add -- but not so wide that one 8%-weight
+    component can swamp the other nine; +-60% keeps a burner and a
+    zero-steal player roughly +-10 points apart on an otherwise-neutral
+    matchup, a real but not dominant swing.
+    """
+    if not season_stat or season_stat.get("sb_per_pa") is None:
+        return {"value": NEUTRAL, "detail": "no stolen-base data", "sample": 0}
+
+    pa = season_stat.get("pa") or 0
+    raw = _ratio(season_stat["sb_per_pa"], league_avg_sb_per_pa, cap=0.6)
+    value = _shrink(raw, pa, MIN_PA_FULL_TRUST_SB)
+
+    return {
+        "value": round(value, 3),
+        "sb": season_stat.get("sb"),
+        "sb_per_pa": season_stat["sb_per_pa"],
+        "sample": pa,
+        "detail": f"{season_stat.get('sb')} SB in {pa} PA this season",
     }
 
 

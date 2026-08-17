@@ -26,19 +26,20 @@ not built yet — see [Roadmap](#roadmap).
 | Anthropic API | the written slate analysis | pay per use, ~2-5¢ a run |
 
 **Turns it into one number per hitter.** Every hitter gets a 0-100
-matchup score where 50 is a league-average spot. Nine things feed it:
+matchup score where 50 is a league-average spot. Ten things feed it:
 
 | Component | Weight | What it asks |
 |---|---|---|
-| Platoon split | 21% | How does he hit pitchers of this hand? |
-| Vegas implied runs | 19% | How many runs is his team expected to score? |
-| Pitcher vulnerability | 16% | How does this pitcher do against batters of his hand? |
-| Contact quality | 15% | What do his Statcast barrel rate, hard-hit rate and xwOBA say, independent of luck? |
-| Park factor | 10% | Does this park help home runs *for his handedness*? |
-| Bullpen quality | 8% | How shaky is the relief corps he'll face after the starter leaves? |
+| Platoon split | 19% | How does he hit pitchers of this hand? |
+| Vegas implied runs | 18% | How many runs is his team expected to score? |
+| Pitcher vulnerability | 15% | How does this pitcher do against batters of his hand? |
+| Contact quality | 14% | What do his Statcast barrel rate, hard-hit rate and xwOBA say, independent of luck? |
+| Stolen-base rate | 8% | Is he actually going to run — DraftKings pays +5 for a steal, same as a double, and nothing else here measures it |
+| Park factor | 9% | Does this park help home runs *for his handedness*? |
+| Bullpen quality | 7% | How shaky is the relief corps he'll face after the starter leaves? |
 | Weather | 6% | Is the ball carrying? Is the wind helping — for real, using the park's actual orientation? |
 | Recent form | 3% | Hot or cold over the last 15 games? |
-| Home/road split | 2% | Does he travel well? |
+| Home/road split | 1% | Does he travel well? |
 
 Nothing is hidden. Click into any player in the API response and you see
 each component's value, its sample size, and a plain-English reason.
@@ -346,6 +347,12 @@ vanishing from the doc:
   park orientation but nothing passed one in, so every wind read
   defaulted to "north" and flagged itself low-confidence — sometimes
   just wrong. `data/parks.py` now has real bearings for all 30 parks.
+- **Stolen-base rate.** DraftKings pays +5 for a steal, the same as a
+  double, but every prior version of the model was purely OPS- and
+  contact-quality-based — a low-power, high-steal hitter got zero
+  credit for an entire category of his real DK value. `stolen_base`
+  compares season-long SB rate against the league average, regressed
+  by sample size the same way every other split-based component is.
 
 ## NFL
 

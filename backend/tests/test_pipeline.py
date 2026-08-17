@@ -68,12 +68,13 @@ FAKE_PEOPLE = {
 ROSTERS = {147: [101, 102, 103, 9002], 111: [201, 202, 9001]}
 
 
-def hit(pa, ops, avg=0.260, slg=0.440, hr=15):
+def hit(pa, ops, avg=0.260, slg=0.440, hr=15, sb=3):
     return {
         "pa": pa, "ab": int(pa * 0.9), "avg": avg, "obp": ops - slg, "slg": slg,
-        "ops": ops, "hr": hr, "rbi": 50, "runs": 50, "sb": 3, "hits": 100,
+        "ops": ops, "hr": hr, "rbi": 50, "runs": 50, "sb": sb, "hits": 100,
         "doubles": 20, "triples": 1, "iso": round(slg - avg, 3),
         "k_pct": 0.22, "bb_pct": 0.09, "hr_per_pa": round(hr / pa, 4),
+        "sb_per_pa": round(sb / pa, 4) if pa else None,
     }
 
 
@@ -109,11 +110,16 @@ SPLITS = {
 
 SEASON = {
     "hitting": {
-        101: hit(580, 0.850, 0.275, 0.500, 30),
-        102: hit(520, 0.810, 0.270, 0.450, 21),
-        103: hit(530, 0.790, 0.268, 0.450, 20),
-        201: hit(575, 0.780, 0.262, 0.445, 25),
-        202: hit(480, 0.790, 0.275, 0.440, 13),
+        # 103 and 202 are deliberately given the same season OPS (0.790)
+        # so a stolen-base-component test can isolate speed as the only
+        # real difference between them -- a burner (103, 35 SB) versus a
+        # near-zero-steal hitter (202, 1 SB) who'd have looked identical
+        # before this component existed.
+        101: hit(580, 0.850, 0.275, 0.500, 30, sb=10),
+        102: hit(520, 0.810, 0.270, 0.450, 21, sb=5),
+        103: hit(530, 0.790, 0.268, 0.450, 20, sb=35),
+        201: hit(575, 0.780, 0.262, 0.445, 25, sb=8),
+        202: hit(480, 0.790, 0.275, 0.440, 13, sb=1),
     },
     "pitching": {9001: pitch(620, 0.760, 3.10), 9002: pitch(580, 0.790, 4.90)},
 }
@@ -1233,12 +1239,47 @@ async def main() -> int:
           str(switch["edge"]["components"]["pitcher"].get("ops_against")))
 
     print("\nScoring internals")
-    check("all nine components present",
-          len(righty["edge"]["components"]) == 9,
+    check("all ten components present",
+          len(righty["edge"]["components"]) == 10,
           str(sorted(righty["edge"]["components"])))
     check("weights sum to 1.0",
           abs(sum(scoring.WEIGHTS.values()) - 1.0) < 1e-9,
           str(sum(scoring.WEIGHTS.values())))
+
+    print("\nStolen-base component (DraftKings pays +5/SB, same as a double -- "
+          "previously invisible to the model)")
+    burner = scoring.stolen_base_component({"sb": 35, "pa": 550, "sb_per_pa": 0.0636}, 0.012)
+    grinder = scoring.stolen_base_component({"sb": 1, "pa": 550, "sb_per_pa": 0.0018}, 0.012)
+    check("a burner (well above league-average SB rate) scores above neutral",
+          burner["value"] > 1.0, str(burner))
+    check("a near-zero-steal hitter, same sample size, scores below neutral",
+          grinder["value"] < 1.0, str(grinder))
+    check("the burner clearly outscores the zero-speed hitter on this component alone",
+          burner["value"] > grinder["value"] + 0.5, str((burner["value"], grinder["value"])))
+    small_sample = scoring.stolen_base_component({"sb": 3, "pa": 80, "sb_per_pa": 0.0375}, 0.012)
+    check("a hot start in a small sample regresses well short of the full-sample burner value",
+          1.0 < small_sample["value"] < burner["value"], str(small_sample))
+    check("no season stat at all is neutral, not a crash",
+          scoring.stolen_base_component(None, 0.012)["value"] == 1.0)
+    check("a missing league baseline is neutral rather than dividing by nothing",
+          scoring.stolen_base_component({"sb": 10, "pa": 400, "sb_per_pa": 0.025}, None)["value"] == 1.0)
+
+    contact = sox["Boston Contact"]
+    check("wired end-to-end: a real 35-SB fixture hitter scores above neutral on stolen_base",
+          switch["edge"]["components"]["stolen_base"]["value"] > 1.0,
+          str(switch["edge"]["components"]["stolen_base"]))
+    check("wired end-to-end: a real 1-SB fixture hitter, same season OPS, scores below neutral",
+          contact["edge"]["components"]["stolen_base"]["value"] < 1.0,
+          str(contact["edge"]["components"]["stolen_base"]))
+    check("the burner clearly outscores the grinder on this component despite identical OPS",
+          switch["edge"]["components"]["stolen_base"]["value"]
+          > contact["edge"]["components"]["stolen_base"]["value"],
+          str((switch["edge"]["components"]["stolen_base"]["value"],
+               contact["edge"]["components"]["stolen_base"]["value"])))
+    check("raw SB count is still exposed on the season stat line, unaffected by the new component",
+          switch["season"]["sb"] == 35 and contact["season"]["sb"] == 1,
+          str((switch["season"]["sb"], contact["season"]["sb"])))
+
     check("scores stay within 0-100",
           all(0 <= h["edge"]["score"] <= 100
               for side in ("home", "away")
