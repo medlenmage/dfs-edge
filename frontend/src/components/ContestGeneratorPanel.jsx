@@ -8,14 +8,18 @@ import { localTime } from '../format'
  * time). This builds up to 10,000 of your own entries in one shot by
  * fast randomized construction weighted toward projected points, then
  * ranks the whole batch against a simulated opponent field for
- * cash-rate/payout economics. Not a lineup simulator -- see the
- * caveat rendered next to the economics numbers below.
+ * cash-rate/payout economics -- by default against the field's
+ * projected points (fast), or via the "Simulate" toggle against a real
+ * Monte Carlo outcome distribution (slower, genuine cash probabilities).
+ * See the caveat rendered next to the economics numbers below.
  */
 export function ContestGeneratorPanel({ date, slate }) {
   const [contestTypes, setContestTypes] = useState(null)
   const [contestType, setContestType] = useState('gpp_large')
   const [numLineups, setNumLineups] = useState(500)
   const [maxExposure, setMaxExposure] = useState('')
+  const [simulate, setSimulate] = useState(false)
+  const [numTrials, setNumTrials] = useState(1000)
   const [showSlateGames, setShowSlateGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
   const [state, setState] = useState({ status: 'idle' })
@@ -61,12 +65,15 @@ export function ContestGeneratorPanel({ date, slate }) {
   async function run() {
     setState({ status: 'loading' })
     try {
-      const result = await api.buildContestEntries(date, contestType, numLineups, {
+      const opts = {
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
-      })
-      setState({ status: 'ready', ...result })
+      }
+      const result = simulate
+        ? await api.buildContestEntriesSimulated(date, contestType, numLineups, { ...opts, numTrials })
+        : await api.buildContestEntries(date, contestType, numLineups, opts)
+      setState({ status: 'ready', simulated: simulate, ...result })
     } catch (err) {
       setState({ status: 'error', message: err.message })
     }
@@ -108,6 +115,26 @@ export function ContestGeneratorPanel({ date, slate }) {
             ))}
           </select>
         </label>
+        <label
+          className="dim"
+          style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}
+          title="Rank entries against real Monte Carlo simulated outcomes (each player's own historical game log, resampled) instead of projected points -- slower, but gives a genuine cash probability and payout range."
+        >
+          <input type="checkbox" checked={simulate} onChange={(e) => setSimulate(e.target.checked)} />
+          Simulate
+        </label>
+        {simulate && (
+          <label className="dim" style={{ fontSize: 13 }}>
+            Trials{' '}
+            <select value={numTrials} onChange={(e) => setNumTrials(Number(e.target.value))}>
+              {[500, 1000, 2000, 5000].map((n) => (
+                <option key={n} value={n}>
+                  {n.toLocaleString()}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {slateGames.length > 0 && (
           <button onClick={() => setShowSlateGames((v) => !v)}>
             {showSlateGames ? 'Hide slate games' : 'Slate games'} ({includedGames.size} of{' '}
@@ -115,7 +142,11 @@ export function ContestGeneratorPanel({ date, slate }) {
           </button>
         )}
         <button className="primary" onClick={run} disabled={state.status === 'loading'}>
-          {state.status === 'loading' ? 'Building…' : `Build ${numLineups.toLocaleString()} entries`}
+          {state.status === 'loading'
+            ? simulate
+              ? 'Simulating…'
+              : 'Building…'
+            : `${simulate ? 'Simulate' : 'Build'} ${numLineups.toLocaleString()} entries`}
         </button>
       </div>
 
@@ -201,6 +232,9 @@ export function ContestGeneratorPanel({ date, slate }) {
             <span className="badge">${state.contest.entry_fee.toLocaleString()} entry</span>
             <span className="badge">{state.paid_count.toLocaleString()} paid</span>
             <span className="badge">${state.prize_pool.toLocaleString()} prize pool</span>
+            {state.simulated && (
+              <span className="badge">{state.num_trials.toLocaleString()} sim trials</span>
+            )}
             <a
               href={api.contestEntriesCsvUrl(state.batch_id)}
               title={`Download all ${state.num_entries_built.toLocaleString()} entries as a CSV -- for handing off to an external simulator`}
@@ -211,28 +245,56 @@ export function ContestGeneratorPanel({ date, slate }) {
 
           <div className="card" style={{ marginBottom: 14 }}>
             <div className="sub-line" style={{ marginBottom: 8 }}>
-              Estimated economics — <strong>not a prediction.</strong> There's no player-outcome
-              variance model yet: this is your batch's projected points ranked against a
-              projected-points model of the field, not simulated real-world results.
+              {state.simulated ? (
+                <>
+                  Simulated economics — {state.num_trials.toLocaleString()} Monte Carlo trials of
+                  each player's own real historical outcomes, with team correlation for hitters.
+                  Cash probability and payout are genuine simulated results, not a single
+                  projected-points estimate against the field.
+                </>
+              ) : (
+                <>
+                  Estimated economics — <strong>not a prediction.</strong> This is your batch's
+                  projected points ranked against a projected-points model of the field, not
+                  simulated real-world results. Toggle "Simulate" above for real Monte Carlo cash
+                  probabilities.
+                </>
+              )}
             </div>
-            <div className="controls" style={{ flexWrap: 'wrap' }}>
-              <span className="badge">
-                {state.summary.cashing_count.toLocaleString()} cashing ({state.summary.cashing_pct}%)
-              </span>
-              <span className="badge">${state.summary.total_entry_cost.toLocaleString()} cost</span>
-              <span className="badge">
-                ${state.summary.total_estimated_payout.toLocaleString()} est. payout
-              </span>
-              <span className={`badge ${state.summary.estimated_net_profit >= 0 ? 'ok' : 'risk'}`}>
-                {state.summary.estimated_net_profit >= 0 ? '+' : ''}$
-                {state.summary.estimated_net_profit.toLocaleString()} est. net
-              </span>
-              <span className="badge">{state.summary.avg_projected_points.toFixed(1)} avg proj FPTS</span>
-              <span className="badge">
-                {state.summary.min_projected_points.toFixed(1)}–{state.summary.max_projected_points.toFixed(1)} range
-              </span>
-              <span className="badge">{state.summary.avg_total_ownership_pct.toFixed(1)}% avg ownership</span>
-            </div>
+            {state.simulated ? (
+              <div className="controls" style={{ flexWrap: 'wrap' }}>
+                <span className="badge">
+                  {state.summary.avg_cash_probability_pct}% avg cash probability
+                </span>
+                <span className="badge">${state.summary.total_entry_cost.toLocaleString()} cost</span>
+                <span className="badge">
+                  ${state.summary.total_expected_payout.toLocaleString()} expected payout
+                </span>
+                <span className={`badge ${state.summary.estimated_net_profit >= 0 ? 'ok' : 'risk'}`}>
+                  {state.summary.estimated_net_profit >= 0 ? '+' : ''}$
+                  {state.summary.estimated_net_profit.toLocaleString()} est. net
+                </span>
+              </div>
+            ) : (
+              <div className="controls" style={{ flexWrap: 'wrap' }}>
+                <span className="badge">
+                  {state.summary.cashing_count.toLocaleString()} cashing ({state.summary.cashing_pct}%)
+                </span>
+                <span className="badge">${state.summary.total_entry_cost.toLocaleString()} cost</span>
+                <span className="badge">
+                  ${state.summary.total_estimated_payout.toLocaleString()} est. payout
+                </span>
+                <span className={`badge ${state.summary.estimated_net_profit >= 0 ? 'ok' : 'risk'}`}>
+                  {state.summary.estimated_net_profit >= 0 ? '+' : ''}$
+                  {state.summary.estimated_net_profit.toLocaleString()} est. net
+                </span>
+                <span className="badge">{state.summary.avg_projected_points.toFixed(1)} avg proj FPTS</span>
+                <span className="badge">
+                  {state.summary.min_projected_points.toFixed(1)}–{state.summary.max_projected_points.toFixed(1)} range
+                </span>
+                <span className="badge">{state.summary.avg_total_ownership_pct.toFixed(1)}% avg ownership</span>
+              </div>
+            )}
           </div>
 
           {state.exposure.length > 0 && (
@@ -275,9 +337,23 @@ export function ContestGeneratorPanel({ date, slate }) {
                     <th className="num">#</th>
                     <th className="num">Salary</th>
                     <th className="num">Proj FPTS</th>
+                    {state.simulated && (
+                      <th className="num" title="10th-90th percentile simulated points across every trial">
+                        Sim floor–ceiling
+                      </th>
+                    )}
                     <th className="num">Own%</th>
-                    <th className="num">Rank</th>
-                    <th>Cashing?</th>
+                    {state.simulated ? (
+                      <>
+                        <th className="num">Cash %</th>
+                        <th className="num">Exp. payout</th>
+                      </>
+                    ) : (
+                      <>
+                        <th className="num">Rank</th>
+                        <th>Cashing?</th>
+                      </>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -288,19 +364,35 @@ export function ContestGeneratorPanel({ date, slate }) {
                         <td className="num">{i + 1}</td>
                         <td className="num">${e.salary_used.toLocaleString()}</td>
                         <td className="num">{e.projected_points.toFixed(1)}</td>
+                        {state.simulated && (
+                          <td className="num dim" style={{ fontSize: 12 }}>
+                            {r
+                              ? `${r.simulated_points_p10.toFixed(0)}–${r.simulated_points_p90.toFixed(0)}`
+                              : '—'}
+                          </td>
+                        )}
                         <td className="num">{e.total_ownership_pct.toFixed(1)}%</td>
-                        <td className="num">{r ? r.estimated_rank.toLocaleString() : '—'}</td>
-                        <td>
-                          {r ? (
-                            r.in_the_money ? (
-                              <span className="badge ok">cashes</span>
-                            ) : (
-                              <span className="badge risk">misses</span>
-                            )
-                          ) : (
-                            '—'
-                          )}
-                        </td>
+                        {state.simulated ? (
+                          <>
+                            <td className="num">{r ? `${r.cash_probability_pct}%` : '—'}</td>
+                            <td className="num">{r ? `$${r.expected_payout.toFixed(2)}` : '—'}</td>
+                          </>
+                        ) : (
+                          <>
+                            <td className="num">{r ? r.estimated_rank.toLocaleString() : '—'}</td>
+                            <td>
+                              {r ? (
+                                r.in_the_money ? (
+                                  <span className="badge ok">cashes</span>
+                                ) : (
+                                  <span className="badge risk">misses</span>
+                                )
+                              ) : (
+                                '—'
+                              )}
+                            </td>
+                          </>
+                        )}
                       </tr>
                     )
                   })}

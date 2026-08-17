@@ -168,6 +168,32 @@ export const api = {
   // as a link's href, no JS-side blob handling needed.
   contestEntriesCsvUrl: (batchId) => `${BASE}/api/mlb/contest-entries/${batchId}/csv`,
 
+  buildContestEntriesSimulated: (
+    date,
+    contestType,
+    numLineups,
+    {
+      numTrials = 1000,
+      maxExposurePct = null,
+      fieldSize = null,
+      sampleSize = null,
+      includedGamePks = null,
+    } = {},
+  ) =>
+    request('/api/mlb/contest-entries-simulated', {
+      method: 'POST',
+      body: JSON.stringify({
+        date,
+        contest_type: contestType,
+        num_lineups: numLineups,
+        num_trials: numTrials,
+        max_exposure_pct: maxExposurePct,
+        field_size: fieldSize,
+        sample_size: sampleSize,
+        included_game_pks: includedGamePks,
+      }),
+    }),
+
   nflSlate: (season, week) => {
     const params = new URLSearchParams()
     if (season) params.set('season', season)
