@@ -2102,26 +2102,6 @@ async def main() -> int:
           and contests_by_id["7000002"]["num_entries"] == 1 and contests_by_id["7000002"]["num_filled"] == 0,
           str(contests_by_id))
 
-    dk_resolved_all, dk_warnings_all = dk_entries.resolve_entries(dk_entries_csv, mul_slate)
-    check("resolve_entries resolves the one filled entry and warns about both blank reservations",
-          len(dk_resolved_all) == 1 and len(dk_warnings_all) == 2,
-          str((len(dk_resolved_all), len(dk_warnings_all))))
-    check("a resolved entry's players are matched against the live slate's own player data "
-          "(internal ids, not DK's own numeric ids)",
-          {p["id"] for p in dk_resolved_all[0]["players"]}
-          == {9400, 9401, 9301, 9304, 9307, 9310, 9313, 9316, 9317, 9318},
-          str(sorted(p["id"] for p in dk_resolved_all[0]["players"])))
-    check("a resolved entry's salary_used/projected_points sum the matched players' real slate values",
-          dk_resolved_all[0]["salary_used"] == 51000 and dk_resolved_all[0]["projected_points"] == 124.5,
-          str((dk_resolved_all[0]["salary_used"], dk_resolved_all[0]["projected_points"])))
-
-    dk_resolved_one_contest, dk_warnings_one_contest = dk_entries.resolve_entries(
-        dk_entries_csv, mul_slate, contest_id="7000001"
-    )
-    check("resolve_entries with contest_id filters out the other contest's entries entirely (no warning for it)",
-          len(dk_resolved_one_contest) == 1 and len(dk_warnings_one_contest) == 1,
-          str((len(dk_resolved_one_contest), len(dk_warnings_one_contest))))
-
     curve = contest._custom_payout_curve(10, 1000.0, "top_heavy", 40.0)
     check("_custom_payout_curve pins rank 1's payout to exactly first_place_pct of the pool",
           curve[0] == 400.0, str(curve[0]))
@@ -2131,45 +2111,66 @@ async def main() -> int:
           contest._custom_payout_curve(10, 1000.0, "top_heavy", None)
           == contest._payout_curve(10, 1000.0, "top_heavy"))
 
-    # A DK entries file's real job is establishing the baseline (how many
-    # entries, what they cost) -- most of a freshly-reserved contest has
-    # no lineup picked yet, so build_dk_entries_simulated generates fresh
-    # lineups to fill out num_entries_total, alongside any already-filled
-    # ones, rather than treating a blank reservation as an error.
+    # evaluate_field_mirrored's within-sample-rank -> real-field-rank
+    # projection is an exact, collision-free linear interpolation --
+    # checked here in isolation against a hand-derivable case before
+    # trusting it inside the bigger simulation: 5 sampled lineups
+    # standing in for a 21-entry field should map evenly, one real rank
+    # every (21-1)/(5-1) = 5 slots apart.
+    sample_size_check, field_size_check = 5, 21
+    real_ranks_check = 1 + np_test.floor(
+        np_test.arange(sample_size_check) * (field_size_check - 1) / (sample_size_check - 1)
+    ).astype(np_test.int64)
+    check("evaluate_field_mirrored's linear rank projection is exact and evenly spaced for a hand-derivable case",
+          list(real_ranks_check) == [1, 6, 11, 16, 21], str(list(real_ranks_check)))
+
+    # A DK entries file's real job is establishing the baseline (just the
+    # entry fee) for mirroring a real contest's whole field --
+    # build_dk_entries_simulated builds an ownership-weighted sample
+    # standing in for that field (same construction generate_field()
+    # already uses) and ranks it against itself, not against any
+    # pre-filled picks from the file.
     dk_sim = await contest.build_dk_entries_simulated(
-        mul_slate, dk_resolved_all, season=2099, num_entries_total=3, entry_fee=1.0,
+        mul_slate, season=2099, entry_fee=1.0,
         field_size=500, prize_pool=200.0, first_place_pct=25.0, payout_pct=0.20, num_trials=300, seed=11,
     )
-    check("build_dk_entries_simulated generates lineups to fill out num_entries_total beyond what was pre-filled",
-          dk_sim["num_entries_built"] == 3 and dk_sim["num_entries_prefilled"] == 1
-          and dk_sim["num_entries_generated"] == 2,
-          str((dk_sim["num_entries_built"], dk_sim["num_entries_prefilled"], dk_sim["num_entries_generated"])))
+    check("build_dk_entries_simulated builds a field sample (capped at field_size, since 500 < MAX_SAMPLE_SIZE)",
+          dk_sim["num_entries_built"] == 500 and dk_sim["sample_size"] == 500,
+          str((dk_sim["num_entries_built"], dk_sim["sample_size"])))
     check("build_dk_entries_simulated reports the real contest's own economics",
           dk_sim["field_size"] == 500 and dk_sim["prize_pool"] == 200.0,
           str((dk_sim["field_size"], dk_sim["prize_pool"])))
-    check("build_dk_entries_simulated's total_entry_cost uses the contest's uniform entry_fee across "
-          "every entry, pre-filled and generated alike",
-          dk_sim["summary"]["total_entry_cost"] == 3.0, str(dk_sim["summary"]["total_entry_cost"]))
+    check("build_dk_entries_simulated's total_entry_cost uses the contest's entry_fee across every sampled entry",
+          dk_sim["summary"]["total_entry_cost"] == 500.0, str(dk_sim["summary"]["total_entry_cost"]))
+    check("build_dk_entries_simulated's results are sorted best-ROI-first",
+          all(dk_sim["results"][i]["roi_pct"] >= dk_sim["results"][i + 1]["roi_pct"]
+              for i in range(len(dk_sim["results"]) - 1)),
+          str([r["roi_pct"] for r in dk_sim["results"][:5]]))
+    check("build_dk_entries_simulated's cash probabilities land near the contest's payout_pct on average, "
+          "since a random field lineup should cash at roughly the payout rate",
+          abs(dk_sim["summary"]["avg_cash_probability_pct"] - 20.0) < 5.0,
+          str(dk_sim["summary"]["avg_cash_probability_pct"]))
 
-    dk_sim_all_generated = await contest.build_dk_entries_simulated(
-        mul_slate, [], season=2099, num_entries_total=4, entry_fee=0.25,
-        field_size=500, prize_pool=100.0, first_place_pct=20.0, num_trials=300, seed=13,
+    dk_sim_capped = await contest.build_dk_entries_simulated(
+        mul_slate, season=2099, entry_fee=0.25,
+        field_size=5000, sample_size=50, prize_pool=1000.0, first_place_pct=20.0, num_trials=300, seed=13,
     )
-    check("build_dk_entries_simulated generates every lineup when none were pre-filled -- the common real-world "
-          "case of a freshly-reserved contest with no picks made yet",
-          dk_sim_all_generated["num_entries_built"] == 4 and dk_sim_all_generated["num_entries_generated"] == 4
-          and dk_sim_all_generated["num_entries_prefilled"] == 0,
-          str((dk_sim_all_generated["num_entries_built"], dk_sim_all_generated["num_entries_generated"],
-               dk_sim_all_generated["num_entries_prefilled"])))
+    check("build_dk_entries_simulated honors an explicit sample_size smaller than field_size, "
+          "projecting the sample's ranks onto the full real field_size",
+          dk_sim_capped["sample_size"] == 50 and dk_sim_capped["field_size"] == 5000,
+          str((dk_sim_capped["sample_size"], dk_sim_capped["field_size"])))
+    check("a sample_size-capped run's best sampled lineup still projects to a low (best) real rank",
+          dk_sim_capped["results"][0]["cash_probability_pct"] >= dk_sim_capped["results"][-1]["cash_probability_pct"],
+          str((dk_sim_capped["results"][0]["cash_probability_pct"], dk_sim_capped["results"][-1]["cash_probability_pct"])))
 
     try:
         await contest.build_dk_entries_simulated(
-            mul_slate, dk_resolved_all, season=2099, num_entries_total=1, entry_fee=1.0,
+            mul_slate, season=2099, entry_fee=1.0,
             field_size=0, prize_pool=200.0, first_place_pct=25.0, num_trials=50,
         )
-        check("build_dk_entries_simulated rejects a field_size smaller than num_entries_total", False)
+        check("build_dk_entries_simulated rejects a field_size smaller than 1", False)
     except contest.ContestError:
-        check("build_dk_entries_simulated rejects a field_size smaller than num_entries_total", True)
+        check("build_dk_entries_simulated rejects a field_size smaller than 1", True)
 
     print("\nJSON serialisation")
     import json

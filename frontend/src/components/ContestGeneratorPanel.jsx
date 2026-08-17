@@ -31,7 +31,6 @@ export function ContestGeneratorPanel({ date, slate }) {
   const [dkFieldSize, setDkFieldSize] = useState(1000)
   const [dkPrizePool, setDkPrizePool] = useState(1000)
   const [dkFirstPlacePct, setDkFirstPlacePct] = useState(20)
-  const [dkMaxExposure, setDkMaxExposure] = useState('')
 
   function switchMode(m) {
     setMode(m)
@@ -117,7 +116,6 @@ export function ContestGeneratorPanel({ date, slate }) {
         fieldSize: dkFieldSize,
         prizePool: dkPrizePool,
         firstPlacePct: dkFirstPlacePct,
-        maxExposurePct: dkMaxExposure.trim() ? Number(dkMaxExposure) : null,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
       })
@@ -214,13 +212,13 @@ export function ContestGeneratorPanel({ date, slate }) {
             <label
               className="dim"
               style={{ fontSize: 13 }}
-              title="However many are still blank reservations get a lineup generated for them"
+              title="Only the entry fee is read from the file -- field size, prize pool, and 1st place % below describe the real contest and are hand-entered"
             >
               Contest{' '}
               <select value={dkContestId} onChange={(e) => setDkContestId(e.target.value)}>
                 {dkContests.map((c) => (
                   <option key={c.contest_id} value={c.contest_id}>
-                    {c.contest_name} ({c.num_entries} entries, {c.num_entries - c.num_filled} to generate)
+                    {c.contest_name} (${c.entry_fee?.toFixed(2)} entry, {c.num_entries} of your own entries reserved)
                   </option>
                 ))}
               </select>
@@ -263,23 +261,12 @@ export function ContestGeneratorPanel({ date, slate }) {
                 style={{ width: 70 }}
               />
             </label>
-            <label className="dim" style={{ fontSize: 13 }}>
-              Max exposure{' '}
-              <select value={dkMaxExposure} onChange={(e) => setDkMaxExposure(e.target.value)}>
-                <option value="">none</option>
-                {[20, 30, 40, 50, 75].map((n) => (
-                  <option key={n} value={n}>
-                    {n}%
-                  </option>
-                ))}
-              </select>
-            </label>
             <button
               className="primary"
               onClick={runDkEntries}
               disabled={state.status === 'loading' || !dkContestId}
             >
-              {state.status === 'loading' ? 'Simulating…' : 'Generate & simulate my entries'}
+              {state.status === 'loading' ? 'Simulating…' : 'Mirror & simulate contest'}
             </button>
           </>
         )}
@@ -340,13 +327,16 @@ export function ContestGeneratorPanel({ date, slate }) {
       {state.status === 'idle' && mode === 'dk-entries' && (
         <p style={{ marginTop: 0, color: 'var(--text-secondary)' }}>
           Upload the entries CSV DraftKings gives you (the same "bulk entries" export/upload file
-          from their site) to use as the baseline for a real contest you've reserved entries into --
-          entry fee and how many entries you have come straight from the file. Any entry that's
-          still a blank reservation gets a lineup generated for it (the same fast, strong
-          construction "Generate entries" mode uses); any you'd already built yourself are
-          simulated as-is. Total contest entries, prize pool, and 1st-place % are hand-entered
-          since a bulk entries export has no payout-table data at all. A file can span more than
-          one contest -- pick which one once it's uploaded.
+          from their site) so this can read the entry fee for a real contest you've reserved
+          entries into -- that's the file's only real job here. This then builds an
+          ownership-weighted sample standing in for that contest's <em>entire field</em> (the same
+          construction "Generate entries" mode uses to model what real public rosters look like)
+          and simulates it as one self-contained population -- every lineup ranked against every
+          other lineup, not against a separate "your entries" batch. Browse the results below to
+          see which archetypes actually perform, then pick whichever ones you want to submit
+          yourself on DraftKings. Total contest entries, prize pool, and 1st-place % are
+          hand-entered since a bulk entries export has no payout-table data or true field size at
+          all. A file can span more than one contest -- pick which one once it's uploaded.
         </p>
       )}
 
@@ -377,27 +367,14 @@ export function ContestGeneratorPanel({ date, slate }) {
             </div>
           )}
 
-          {state.warnings?.length > 0 && (
-            <div className="notice" style={{ marginBottom: 12 }}>
-              {state.warnings.length} of your entries couldn't be simulated:
-              <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
-                {state.warnings.slice(0, 10).map((w, i) => (
-                  <li key={i}>{w}</li>
-                ))}
-              </ul>
-              {state.warnings.length > 10 && <div>…and {state.warnings.length - 10} more.</div>}
-            </div>
-          )}
-
           <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
             <span className="badge ok">{state.num_entries_built.toLocaleString()} entries built</span>
             {state.mode === 'dk-entries' && (
               <span
                 className="badge"
-                title="Blank reservations from the file that got a lineup generated for them, vs. lineups you'd already built yourself"
+                title="How many field lineups were actually simulated, standing in for the real contest's full field_size above"
               >
-                {state.num_entries_generated.toLocaleString()} generated,{' '}
-                {state.num_entries_prefilled.toLocaleString()} from your file
+                {state.sample_size.toLocaleString()}-lineup sample
               </span>
             )}
             <span className="badge">{state.field_size.toLocaleString()}-entry contest</span>
