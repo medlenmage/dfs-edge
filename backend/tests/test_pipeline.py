@@ -2047,6 +2047,15 @@ async def main() -> int:
               for r in sim_batch["results"]
           ),
           str([(r["payout_p10"], r["expected_payout"], r["payout_p90"]) for r in sim_batch["results"]]))
+    check("every entry's simulated_points_floor/ceiling are the true min/max across all trials, "
+          "so floor <= p10 <= mean <= p90 <= ceiling for every entry",
+          all(
+              r["simulated_points_floor"] <= r["simulated_points_p10"] <= r["simulated_points_mean"]
+              <= r["simulated_points_p90"] <= r["simulated_points_ceiling"]
+              for r in sim_batch["results"]
+          ),
+          str([(r["simulated_points_floor"], r["simulated_points_p10"], r["simulated_points_mean"],
+                r["simulated_points_p90"], r["simulated_points_ceiling"]) for r in sim_batch["results"][:2]]))
     check("build_contest_entries_simulated's avg_cash_probability_pct matches its own per-entry results",
           abs(sim_batch["summary"]["avg_cash_probability_pct"] - sum(cash_pcts) / len(cash_pcts)) < 0.15,
           str((sim_batch["summary"]["avg_cash_probability_pct"], round(sum(cash_pcts) / len(cash_pcts), 1))))
@@ -2197,6 +2206,14 @@ async def main() -> int:
           all(dk_sim["results"][i]["roi_pct"] >= dk_sim["results"][i + 1]["roi_pct"]
               for i in range(len(dk_sim["results"]) - 1)),
           str([r["roi_pct"] for r in dk_sim["results"][:5]]))
+    check("build_dk_entries_simulated's simulated_points_floor/ceiling are the true min/max across "
+          "all trials, so floor <= p10 <= mean <= p90 <= ceiling for every sampled lineup",
+          all(
+              r["simulated_points_floor"] <= r["simulated_points_p10"] <= r["simulated_points_mean"]
+              <= r["simulated_points_p90"] <= r["simulated_points_ceiling"]
+              for r in dk_sim["results"]
+          ),
+          str((dk_sim["results"][0]["simulated_points_floor"], dk_sim["results"][0]["simulated_points_ceiling"])))
     check("build_dk_entries_simulated's cash probabilities land near the contest's payout_pct on average, "
           "since a random field lineup should cash at roughly the payout rate",
           abs(dk_sim["summary"]["avg_cash_probability_pct"] - 20.0) < 5.0,

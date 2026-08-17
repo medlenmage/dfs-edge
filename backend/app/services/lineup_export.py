@@ -102,6 +102,8 @@ _SIMULATED_RESULT_FIELDS = [
     "simulated_points_mean",
     "simulated_points_p10",
     "simulated_points_p90",
+    "simulated_points_floor",
+    "simulated_points_ceiling",
 ]
 
 
