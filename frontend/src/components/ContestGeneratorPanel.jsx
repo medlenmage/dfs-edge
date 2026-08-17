@@ -134,6 +134,12 @@ export function ContestGeneratorPanel({ date, slate }) {
         <button className={mode === 'dk-entries' ? 'primary' : ''} onClick={() => switchMode('dk-entries')}>
           My DK entries
         </button>
+        {slateGames.length > 0 && (
+          <button onClick={() => setShowSlateGames((v) => !v)}>
+            {showSlateGames ? 'Hide slate games' : 'Slate games'} ({includedGames.size} of{' '}
+            {slateGames.length})
+          </button>
+        )}
       </div>
 
       {mode === 'generate' && (
@@ -179,12 +185,6 @@ export function ContestGeneratorPanel({ date, slate }) {
           <input type="checkbox" checked={simulate} onChange={(e) => setSimulate(e.target.checked)} />
           Simulate
         </label>
-        {slateGames.length > 0 && (
-          <button onClick={() => setShowSlateGames((v) => !v)}>
-            {showSlateGames ? 'Hide slate games' : 'Slate games'} ({includedGames.size} of{' '}
-            {slateGames.length})
-          </button>
-        )}
         <button className="primary" onClick={run} disabled={state.status === 'loading'}>
           {state.status === 'loading'
             ? simulate
