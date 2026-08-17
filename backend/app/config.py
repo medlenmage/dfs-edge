@@ -67,6 +67,13 @@ class Settings:
         self.ttl_odds: int = _int("CACHE_TTL_ODDS", 600)
         self.ttl_weather: int = _int("CACHE_TTL_WEATHER", 1_800)
         self.ttl_injuries: int = _int("CACHE_TTL_INJURIES", 3_600)
+        # A played game's box score doesn't change -- this could be
+        # cached far longer than ttl_stats, but matching its cadence
+        # keeps one predictable daily-refresh rhythm across every stat
+        # fetch in this app rather than a separate "basically forever"
+        # special case (which would be wrong anyway for a season still
+        # in progress, where new games keep appending).
+        self.ttl_game_logs: int = _int("CACHE_TTL_GAME_LOGS", 21_600)
 
         # --- Background lineup watcher ---
         # How often to re-check confirmed lineups for scratches, in

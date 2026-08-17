@@ -284,6 +284,7 @@ dfs-edge/
 │   │   │   ├── nfl_slate.py  assembles the weekly NFL slate
 │   │   │   ├── optimizer.py  MLB DraftKings Classic lineup optimizer
 │   │   │   ├── contest.py    MLB contest generator: opponent field + mass multi-entry
+│   │   │   ├── mlb_dk_points.py  raw DK points from one game's box score (variance model, in progress)
 │   │   │   ├── nfl_optimizer.py  NFL DraftKings Classic lineup optimizer
 │   │   │   ├── analysis.py   Claude integration
 │   │   │   ├── salaries.py   DraftKings salary CSV upload (MLB + NFL)
@@ -521,7 +522,7 @@ defense-vs-position and pace pipeline doesn't otherwise change.
 - [x] NFL: pace and defense-vs-position scoring components (prior-season prior)
 - [x] MLB: contest field generator (ownership-weighted synthetic field, ranked by projected points)
 - [x] MLB: standalone Contest Generator tab for mass multi-entry (up to 10,000 of your own entries, points-weighted, ranked against the field for cash/payout economics)
-- [ ] MLB: lineup simulator (player-outcome variance model + Monte Carlo contest simulation) -- the harder follow-up to both contest-generator features above; needs a real per-player variance model, not just a point estimate, before it's worth building
+- [ ] MLB: lineup simulator (player-outcome variance model + Monte Carlo contest simulation) -- in progress, phased (see `.claude/plans/` for the full roadmap). Phase 1 shipped: `clients/mlb.get_player_game_log()` (a per-game stat fetcher nothing else in this app had) and `services/mlb_dk_points.py` (raw DK points from one game's box score) -- the real-data building block everything else builds on. Phases 2-6 (outcome distributions, team correlation, the numpy-vectorized Monte Carlo engine, wiring into the contest generator, and frontend surfacing) are still ahead.
 - [ ] Results tracking and weight backtesting
 - [ ] NBA
 

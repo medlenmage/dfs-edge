@@ -24,6 +24,7 @@ from app.services import (  # noqa: E402
     contest,
     lineup_export,
     lineup_watch,
+    mlb_dk_points,
     mlb_slate,
     optimizer,
     player_match,
@@ -1663,6 +1664,55 @@ async def main() -> int:
     no_results_csv = lineup_export.lineups_to_csv([opt_lineup])
     check("lineups_to_csv omits the rank/cash/payout columns when no results are given",
           "estimated_rank" not in list(csv_module.DictReader(io_module.StringIO(no_results_csv)))[0])
+
+    print("\nDK points from a single game's box score (mlb_dk_points.py)")
+
+    # Real rows, fetched live from MLB Stats API's gameLog endpoint
+    # (Shohei Ohtani, 2024-03-20; Gerrit Cole, 2024-06-19) -- hand
+    # totaled against DK's own scoring rules, not synthetic numbers,
+    # so this proves the formula against a real box score's actual
+    # field shape, not just arithmetic in isolation.
+    ohtani_game = {
+        "hits": 2, "doubles": 0, "triples": 0, "home_runs": 0,
+        "rbi": 1, "runs": 0, "walks": 0, "hit_by_pitch": 0, "stolen_bases": 1,
+    }
+    check("hitter_game_points matches a real box score (2 singles, 1 RBI, 1 SB)",
+          mlb_dk_points.hitter_game_points(ohtani_game) == 13.0,
+          str(mlb_dk_points.hitter_game_points(ohtani_game)))
+
+    cole_game = {
+        "outs": 12, "strikeouts": 5, "wins": 0, "earned_runs": 2,
+        "hits_against": 3, "walks_against": 1, "hit_batsmen": 0,
+        "complete_games": 0, "shutouts": 0,
+    }
+    check("pitcher_game_points matches a real box score (4.0 IP, 5 K, 2 ER)",
+          mlb_dk_points.pitcher_game_points(cole_game) == 12.6,
+          str(mlb_dk_points.pitcher_game_points(cole_game)))
+
+    hr_game = {
+        "hits": 4, "doubles": 1, "triples": 0, "home_runs": 1,
+        "rbi": 4, "runs": 2, "walks": 1, "hit_by_pitch": 0, "stolen_bases": 0,
+    }
+    # 2 singles(6) + 1 double(5) + 1 HR(10) + 4 RBI(8) + 2 R(4) + 1 BB(2) = 35
+    check("hitter_game_points derives singles by subtraction (hits - 2b - 3b - HR)",
+          mlb_dk_points.hitter_game_points(hr_game) == 35.0,
+          str(mlb_dk_points.hitter_game_points(hr_game)))
+
+    no_hitter_game = {
+        "outs": 27, "strikeouts": 10, "wins": 1, "earned_runs": 0,
+        "hits_against": 0, "walks_against": 1, "hit_batsmen": 0,
+        "complete_games": 1, "shutouts": 1,
+    }
+    # 27*0.75(20.25) + 10K(20) + 1W(4) - 1BB(0.6) + CG(2.5) + CGSO(2.5) + no-hitter(5) = 53.65
+    check("pitcher_game_points stacks CG + CGSO + no-hitter bonuses correctly",
+          mlb_dk_points.pitcher_game_points(no_hitter_game) == 53.65,
+          str(mlb_dk_points.pitcher_game_points(no_hitter_game)))
+
+    routine_start = dict(no_hitter_game, hits_against=6, complete_games=0, shutouts=0)
+    check("no CG/CGSO/no-hitter bonus for a routine (non-complete-game) start",
+          mlb_dk_points.pitcher_game_points(routine_start)
+          == round(27 * 0.75 + 10 * 2 + 1 * 4 - 0 * 2 - 6 * 0.6 - 1 * 0.6 - 0 * 0.6, 2),
+          str(mlb_dk_points.pitcher_game_points(routine_start)))
 
     print("\nJSON serialisation")
     import json
