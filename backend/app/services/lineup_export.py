@@ -51,6 +51,28 @@ def players_in_slot_order(lineup: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+# Two shapes `results` can come in, detected by which key is present on
+# the first row -- contest.py's deterministic field-evaluation
+# (_evaluate_batch_against_field/evaluate_field) versus its Monte Carlo
+# simulation (evaluate_batch_simulated). Distinct column sets since
+# they're answering different questions (a single projected-points
+# rank/payout estimate vs. a real distribution of simulated outcomes).
+_DETERMINISTIC_RESULT_FIELDS = ["estimated_rank", "in_the_money", "estimated_payout"]
+_SIMULATED_RESULT_FIELDS = [
+    "cash_probability_pct",
+    "first_place_pct",
+    "top_1pct_pct",
+    "top_10pct_pct",
+    "expected_payout",
+    "payout_p10",
+    "payout_p90",
+    "roi_pct",
+    "simulated_points_mean",
+    "simulated_points_p10",
+    "simulated_points_p90",
+]
+
+
 def lineups_to_csv(
     lineups: list[dict[str, Any]],
     *,
@@ -60,16 +82,22 @@ def lineups_to_csv(
     Serialize a batch of lineups/entries to CSV text, one row each.
 
     `results`, if given, must be the same length as `lineups` and
-    index-aligned (as returned by contest.py's field-evaluation
-    functions) -- adds estimated_rank/in_the_money/estimated_payout
-    columns from testing the batch against a simulated contest field.
+    index-aligned. Auto-detects which shape it's in: contest.py's
+    deterministic field-evaluation (adds
+    estimated_rank/in_the_money/estimated_payout) or its Monte Carlo
+    simulation (adds cash probability, 1st/top-1%/top-10% rates,
+    payout range, ROI%, and simulated points range) -- either way, the
+    row order here is whatever order `lineups`/`results` are already
+    in, so a caller that wants a particular sort (e.g. highest ROI
+    first) should sort before calling this.
     """
     buf = io.StringIO()
     fieldnames = ["lineup_index", "salary_used", "projected_points", "total_ownership_pct"]
     for label in SLOT_LABELS:
         fieldnames += [f"{label}_name", f"{label}_team", f"{label}_salary", f"{label}_proj_fpts", f"{label}_own_pct"]
+    simulated = bool(results) and "cash_probability_pct" in results[0]
     if results is not None:
-        fieldnames += ["estimated_rank", "in_the_money", "estimated_payout"]
+        fieldnames += _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS
 
     writer = csv.DictWriter(buf, fieldnames=fieldnames)
     writer.writeheader()
@@ -90,9 +118,8 @@ def lineups_to_csv(
             row[f"{label}_own_pct"] = p.get("ownership_pct")
         if results is not None:
             r = results[i]
-            row["estimated_rank"] = r.get("estimated_rank")
-            row["in_the_money"] = r.get("in_the_money")
-            row["estimated_payout"] = r.get("estimated_payout")
+            for field in _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS:
+                row[field] = r.get(field)
         writer.writerow(row)
 
     return buf.getvalue()

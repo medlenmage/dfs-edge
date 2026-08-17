@@ -847,6 +847,22 @@ async def build_contest_entries_simulated(
         seed=(seed + 2) if seed is not None else None,
     )
 
+    # Highest simulated ROI first -- the whole point of running the
+    # simulation is finding which of your own entries actually pays
+    # off, so that should lead the results rather than whatever
+    # arbitrary order generate_entries() built them in. entries and
+    # results are re-ordered together (same permutation) so every
+    # downstream consumer -- the JSON response, the sample-entries
+    # preview, and the cached batch behind the CSV download -- gets
+    # the sorted order for free, with no separate sort step anywhere
+    # else.
+    order = sorted(range(len(entries)), key=lambda i: -evaluation["results"][i]["roi_pct"])
+    entries = [entries[i] for i in order]
+    evaluation = {
+        **evaluation,
+        "results": [{**evaluation["results"][i], "lineup_index": new_i} for new_i, i in enumerate(order)],
+    }
+
     cash_probs = [r["cash_probability_pct"] for r in evaluation["results"]]
     first_place_pcts = [r["first_place_pct"] for r in evaluation["results"]]
     top_1pct_pcts = [r["top_1pct_pct"] for r in evaluation["results"]]
