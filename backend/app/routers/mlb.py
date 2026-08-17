@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
-from app.services import analysis, mlb_slate, optimizer, projections, salaries
+from app.services import analysis, contest, mlb_slate, optimizer, projections, salaries
 
 router = APIRouter(prefix="/api/mlb", tags=["mlb"])
 
@@ -364,5 +364,53 @@ async def generate_lineups(
             included_game_pks=included_game_pks,
         )
     except optimizer.OptimizerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"date": day, **result}
+
+
+@router.get("/contest-types")
+async def get_contest_types() -> dict[str, Any]:
+    """Named contest presets the field generator can build against."""
+    return {"contest_types": contest.CONTEST_TYPES}
+
+
+@router.post("/contest-field")
+async def build_contest_field(
+    date: str | None = Body(None, embed=True),
+    contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
+    lineups: list[dict[str, Any]] = Body(
+        ..., embed=True, description="Lineup objects as returned by POST /lineups' 'lineups' array"
+    ),
+    field_size: int | None = Body(
+        None, embed=True, description="Override the preset's real contest size (entries)"
+    ),
+    sample_size: int | None = Body(
+        None, embed=True, description="How many synthetic field lineups to actually build (capped)"
+    ),
+    included_game_pks: list[int] | None = Body(
+        None, embed=True, description="Restrict the field's player pool to these games -- pass the same selection used to build `lineups`"
+    ),
+) -> dict[str, Any]:
+    """
+    Build a synthetic public field for a named contest type, sampled by
+    RotoWire ownership%, and rank the given lineup(s) against it.
+
+    Not a lineup simulator -- there's no player-outcome variance model
+    yet, so this ranks by projected points against the field's
+    projected points, not a distribution of real-world outcomes. Still
+    useful for chalk exposure and roughly where a build would land.
+    """
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+    try:
+        result = contest.build_contest_field(
+            slate,
+            contest_type,
+            lineups,
+            field_size=field_size,
+            sample_size=sample_size,
+            included_game_pks=included_game_pks,
+        )
+    except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"date": day, **result}

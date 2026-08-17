@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { localTime } from '../format'
+import { ContestFieldPanel } from './ContestFieldPanel'
 import { LineupsTable } from './LineupsTable'
 import { PlayerPoolTable } from './PlayerPoolTable'
 
@@ -80,6 +81,13 @@ export function LineupsPanel({ date, slate }) {
     [slate],
   )
   const slateDetected = slateGames.some((g) => g.inSlate != null)
+
+  // Whichever games are actually selected right now, in the exact shape
+  // the backend expects -- shared between the optimizer call and the
+  // contest field generator so the field is always drawn from the same
+  // slate the lineups were built against, never a mismatched selection.
+  const includedGamePksParam =
+    slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null
 
   // Re-derive the default selection whenever the slate's own set of
   // games changes (a new date, a refresh) -- default to whatever the
@@ -202,8 +210,7 @@ export function LineupsPanel({ date, slate }) {
             : null,
         minOwnershipPct: minOwnership.trim() ? Number(minOwnership) : null,
         maxOwnershipPct: maxOwnership.trim() ? Number(maxOwnership) : null,
-        includedGamePks:
-          slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
+        includedGamePks: includedGamePksParam,
       })
       setSelected(0)
       setState({ status: 'ready', ...result })
@@ -683,6 +690,12 @@ export function LineupsPanel({ date, slate }) {
           <button style={{ marginTop: 12 }} onClick={run}>
             Regenerate
           </button>
+
+          <ContestFieldPanel
+            date={date}
+            lineups={state.lineups}
+            includedGamePks={includedGamePksParam}
+          />
         </>
       )}
     </div>

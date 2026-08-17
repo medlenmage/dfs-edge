@@ -21,6 +21,7 @@ from app import cache  # noqa: E402
 from app.clients import mlb, odds, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
+    contest,
     lineup_watch,
     mlb_slate,
     optimizer,
@@ -1344,6 +1345,134 @@ async def main() -> int:
               >= game["away"]["hitters"][i + 1]["edge"]["score"]
               for i in range(len(game["away"]["hitters"]) - 1)
           ))
+
+    print("\nContest field generator: ownership-weighted sampling")
+
+    field = contest.generate_field(mul_slate, 60, seed=7)
+    check("generate_field builds the requested sample size against a deep-enough pool",
+          len(field) == 60, str(len(field)))
+    check("every field lineup respects the salary cap",
+          all(lu["salary_used"] <= optimizer.SALARY_CAP for lu in field),
+          str(max(lu["salary_used"] for lu in field)))
+    check("every field lineup has exactly ROSTER_SIZE distinct players",
+          all(len({p["id"] for p in lu["players"]}) == optimizer.ROSTER_SIZE for lu in field))
+
+    field_again = contest.generate_field(mul_slate, 60, seed=7)
+    same_ids = [frozenset(p["id"] for p in lu["players"]) for lu in field]
+    again_ids = [frozenset(p["id"] for p in lu["players"]) for lu in field_again]
+    check("the same seed reproduces the same field",
+          same_ids == again_ids)
+
+    field_other_seed = contest.generate_field(mul_slate, 60, seed=99)
+    other_ids = [frozenset(p["id"] for p in lu["players"]) for lu in field_other_seed]
+    check("a different seed produces a different field",
+          same_ids != other_ids)
+
+    exposure = contest.field_exposure(field, top_n=5)
+    check("field_exposure is sorted descending by count",
+          all(exposure[i]["count"] >= exposure[i + 1]["count"] for i in range(len(exposure) - 1)),
+          str(exposure))
+    check("field_exposure percentages are computed against the sample size",
+          exposure[0]["pct"] == round(100 * exposure[0]["count"] / len(field), 1))
+
+    restricted = contest.generate_field(mul_slate, 30, included_game_pks=[88001], seed=3)
+    restricted_teams = {p["team"] for lu in restricted for p in lu["players"]}
+    check("included_game_pks restricts the field to only that game's teams",
+          restricted_teams <= {"MUL1", "MUL2"}, str(restricted_teams))
+
+    try:
+        contest.generate_field(mul_slate, 0)
+        check("generate_field rejects sample_size < 1", False)
+    except contest.ContestError:
+        check("generate_field rejects sample_size < 1", True)
+
+    try:
+        contest.generate_field(mul_slate, contest.MAX_SAMPLE_SIZE + 1)
+        check("generate_field rejects sample_size above MAX_SAMPLE_SIZE", False)
+    except contest.ContestError:
+        check("generate_field rejects sample_size above MAX_SAMPLE_SIZE", True)
+
+    try:
+        contest.generate_field({"games": []}, 10)
+        check("generate_field raises ContestError on an empty pool", False)
+    except contest.ContestError:
+        check("generate_field raises ContestError on an empty pool", True)
+
+    try:
+        # Both games here have zero hitters (pitcher-only fixtures) --
+        # every hitter slot type has nobody eligible.
+        contest.generate_field(mul_slate, 10, included_game_pks=[88002])
+        check("generate_field raises ContestError when a hitter slot has no candidates", False)
+    except contest.ContestError:
+        check("generate_field raises ContestError when a hitter slot has no candidates", True)
+
+    print("\nContest field generator: ranking and payout curve")
+
+    synthetic_field = [
+        {"projected_points": p, "total_ownership_pct": 50.0, "players": []}
+        for p in [100, 95, 90, 85, 80, 75, 70, 65, 60, 55]
+    ]
+    flat_contest = {"field_size": 10, "entry_fee": 10.0, "payout_pct": 0.4, "shape": "flat"}
+    flat_eval = contest.evaluate_field(synthetic_field, [{"projected_points": 92}], flat_contest)
+    check("evaluate_field computes paid_count and prize_pool from field_size/entry_fee/rake",
+          flat_eval["paid_count"] == 4 and flat_eval["prize_pool"] == 85.0,
+          str((flat_eval["paid_count"], flat_eval["prize_pool"])))
+    r = flat_eval["results"][0]
+    check("evaluate_field ranks a lineup by how many field entries it beats on projected points",
+          r["percentile"] == 80.0 and r["estimated_rank"] == 2, str(r))
+    check("a flat-shape contest pays every cashing rank the same amount",
+          r["in_the_money"] and r["estimated_payout"] == round(85.0 / 4, 2), str(r))
+
+    top_heavy_contest = {"field_size": 10, "entry_fee": 10.0, "payout_pct": 0.4, "shape": "top_heavy"}
+    best_lineup = contest.evaluate_field(synthetic_field, [{"projected_points": 999}], top_heavy_contest)
+    worst_cashing_lineup = contest.evaluate_field(
+        synthetic_field, [{"projected_points": 81}], top_heavy_contest
+    )
+    check("a top-heavy contest pays 1st place meaningfully more than the min-cash line",
+          best_lineup["results"][0]["estimated_payout"] > worst_cashing_lineup["results"][0]["estimated_payout"],
+          str((best_lineup["results"][0], worst_cashing_lineup["results"][0])))
+
+    last_place_eval = contest.evaluate_field(synthetic_field, [{"projected_points": 1.0}], flat_contest)
+    check("a lineup that beats nobody in the sample misses the cash line",
+          not last_place_eval["results"][0]["in_the_money"]
+          and last_place_eval["results"][0]["estimated_payout"] == 0.0,
+          str(last_place_eval["results"][0]))
+
+    try:
+        contest.evaluate_field(synthetic_field, [], flat_contest)
+        check("evaluate_field rejects an empty list of user lineups", False)
+    except contest.ContestError:
+        check("evaluate_field rejects an empty list of user lineups", True)
+
+    try:
+        contest.evaluate_field(synthetic_field, [{"salary_used": 50000}], flat_contest)
+        check("evaluate_field rejects a lineup missing projected_points", False)
+    except contest.ContestError:
+        check("evaluate_field rejects a lineup missing projected_points", True)
+
+    try:
+        contest.build_contest_field(mul_slate, "not_a_real_contest", [{"projected_points": 100}])
+        check("build_contest_field rejects an unknown contest_type", False)
+    except contest.ContestError:
+        check("build_contest_field rejects an unknown contest_type", True)
+
+    print("\nContest field generator: end-to-end against the optimizer")
+
+    opt_lineups = optimizer.generate_lineups(mul_slate, num_lineups=2)["lineups"]
+    full = contest.build_contest_field(mul_slate, "gpp_small", opt_lineups, sample_size=100, seed=11)
+    check("build_contest_field returns one result per submitted lineup",
+          len(full["results"]) == len(opt_lineups), str(len(full["results"])))
+    check("build_contest_field reports field ownership and exposure summaries",
+          "avg_total_ownership_pct" in full["field_ownership"] and len(full["field_exposure"]) > 0,
+          str(full["field_ownership"]))
+    check("build_contest_field's note discloses this is projected-points ranking, not simulated outcomes",
+          "not simulated" in full["note"], full["note"])
+
+    try:
+        contest.build_contest_field(mul_slate, "gpp_small", opt_lineups, field_size=contest.MAX_FIELD_SIZE + 1)
+        check("build_contest_field rejects a field_size override above MAX_FIELD_SIZE", False)
+    except contest.ContestError:
+        check("build_contest_field rejects a field_size override above MAX_FIELD_SIZE", True)
 
     print("\nJSON serialisation")
     import json
