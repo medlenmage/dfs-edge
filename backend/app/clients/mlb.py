@@ -458,6 +458,7 @@ def _normalise_stat(stat: dict[str, Any], group: str) -> dict[str, Any]:
     k = _i(stat.get("strikeOuts"))
     bb = _i(stat.get("baseOnBalls"))
     hr = _i(stat.get("homeRuns"))
+    sb = _i(stat.get("stolenBases"))
     return {
         "pa": pa,
         "ab": ab,
@@ -468,7 +469,7 @@ def _normalise_stat(stat: dict[str, Any], group: str) -> dict[str, Any]:
         "hr": hr,
         "rbi": _i(stat.get("rbi")),
         "runs": _i(stat.get("runs")),
-        "sb": _i(stat.get("stolenBases")),
+        "sb": sb,
         "hits": _i(stat.get("hits")),
         "doubles": _i(stat.get("doubles")),
         "triples": _i(stat.get("triples")),
@@ -477,4 +478,5 @@ def _normalise_stat(stat: dict[str, Any], group: str) -> dict[str, Any]:
         "k_pct": round(k / pa, 4) if pa else None,
         "bb_pct": round(bb / pa, 4) if pa else None,
         "hr_per_pa": round(hr / pa, 4) if pa else None,
+        "sb_per_pa": round(sb / pa, 4) if pa and sb is not None else None,
     }

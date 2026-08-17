@@ -126,6 +126,7 @@ async def build_slate(
         "pitcher_era": scoring.league_average(data["pit_season"], "era", 20, "ip"),
         "pitcher_k9": scoring.league_average(data["pit_season"], "k_per_9", 20, "ip"),
         "hitter_k_pct": scoring.league_average(data["hit_season"], "k_pct", 80, "pa"),
+        "hitter_sb_per_pa": scoring.league_average(data["hit_season"], "sb_per_pa", 100, "pa"),
         # Savant's leaderboard is already filtered to a minimum sample
         # (see clients/savant.py), so no further sample-size gate here.
         "hitter_barrel": scoring.league_average(data["savant_hit"], "barrel_pct", 0, "barrel_pct"),
@@ -592,6 +593,9 @@ async def _team_hitters(
                 baselines["hitter_barrel"],
                 baselines["hitter_hard_hit"],
                 baselines["hitter_xwoba"],
+            ),
+            "stolen_base": scoring.stolen_base_component(
+                season_stat, baselines["hitter_sb_per_pa"]
             ),
             "bullpen": scoring.bullpen_component(opp_bullpen, baselines["bullpen_era"]),
             "park": scoring.park_component(

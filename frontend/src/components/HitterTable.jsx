@@ -8,6 +8,7 @@ const COLUMNS = [
   { key: 'opposing_pitcher', label: 'vs Pitcher', sortable: false },
   { key: 'vs_hand_ops', label: 'OPS vs hand', sortable: true, num: true },
   { key: 'season_ops', label: 'Season OPS', sortable: true, num: true },
+  { key: 'sb', label: 'SB', sortable: true, num: true },
   { key: 'xwoba', label: 'xwOBA', sortable: true, num: true },
   { key: 'implied_runs', label: 'Team runs', sortable: true, num: true },
   { key: 'salary', label: 'Salary', sortable: true, num: true },
@@ -22,6 +23,7 @@ const DRIVER_LABELS = {
   pitcher: 'the pitcher',
   team_total: 'Vegas total',
   contact_quality: 'his contact quality',
+  stolen_base: 'his stolen-base rate',
   bullpen: 'the opposing bullpen',
   park: 'the ballpark',
   weather: 'weather',
@@ -57,6 +59,7 @@ export function HitterTable({ slate, limit = 50 }) {
             pitcher_hand: opp.probable_pitcher?.throws,
             season_ops: h.season?.ops ?? null,
             season_pa: h.season?.pa ?? null,
+            sb: h.season?.sb ?? null,
             vs_hand_ops: h.vs_hand?.ops ?? null,
             vs_hand_pa: h.vs_hand?.pa ?? null,
             xwoba: h.edge.components.contact_quality?.xwoba ?? null,
@@ -193,6 +196,7 @@ export function HitterTable({ slate, limit = 50 }) {
                     <div className="sub-line">{r.season_pa} PA</div>
                   )}
                 </td>
+                <td className="num">{r.sb ?? '—'}</td>
                 <td className="num">
                   {r.xwoba != null ? r.xwoba.toFixed(3) : '—'}
                   {r.barrel_pct != null && (
