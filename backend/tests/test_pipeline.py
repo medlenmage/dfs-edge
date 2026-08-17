@@ -22,6 +22,7 @@ from app.clients import mlb, odds, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     contest,
+    lineup_export,
     lineup_watch,
     mlb_slate,
     optimizer,
@@ -1614,6 +1615,54 @@ async def main() -> int:
         check("build_contest_entries rejects num_lineups < 1", False)
     except contest.ContestError:
         check("build_contest_entries rejects num_lineups < 1", True)
+
+    print("\nContest generator: per-player projected_fpts/ownership_pct on each entry")
+
+    enriched = contest.generate_entries(mul_slate, 5, seed=17)
+    check("each entry's players carry their own projected_fpts and ownership_pct",
+          all("projected_fpts" in p and "ownership_pct" in p for lu in enriched for p in lu["players"]),
+          str(enriched[0]["players"][0]))
+
+    print("\nLineup CSV export (for handing a batch off to an external simulator)")
+
+    import csv as csv_module
+    import io as io_module
+
+    opt_lineup = optimizer.generate_lineups(mul_slate)["lineups"][0]
+    opt_csv = lineup_export.lineups_to_csv([opt_lineup])
+    opt_csv_rows = list(csv_module.DictReader(io_module.StringIO(opt_csv)))
+    check("lineups_to_csv produces one data row per optimizer lineup",
+          len(opt_csv_rows) == 1, str(len(opt_csv_rows)))
+    check("lineups_to_csv has a column-group per DK roster slot (P1/P2/C/1B/2B/3B/SS/OF1/OF2/OF3)",
+          all(f"{label}_name" in opt_csv_rows[0] for label in lineup_export.SLOT_LABELS),
+          str(sorted(opt_csv_rows[0].keys())))
+    p1_name_in_csv = opt_csv_rows[0]["P1_name"]
+    p1_name_in_lineup = opt_lineup["slots"]["P"][0]["name"]
+    check("the optimizer's grouped `slots` shape flattens into the CSV in the right roster order",
+          p1_name_in_csv == p1_name_in_lineup, str((p1_name_in_csv, p1_name_in_lineup)))
+    check("lineup-level totals (salary_used, projected_points) are carried into the CSV row",
+          float(opt_csv_rows[0]["salary_used"]) == opt_lineup["salary_used"], opt_csv_rows[0]["salary_used"])
+
+    batch_for_csv = contest.build_contest_entries(mul_slate, "gpp_small", 5, sample_size=50, seed=23)
+    entries_csv = lineup_export.lineups_to_csv(batch_for_csv["entries"], results=batch_for_csv["results"])
+    entries_csv_rows = list(csv_module.DictReader(io_module.StringIO(entries_csv)))
+    check("lineups_to_csv produces one data row per contest-generator entry",
+          len(entries_csv_rows) == 5, str(len(entries_csv_rows)))
+    check("the contest generator's flat `players` shape is already in roster order, no reordering needed",
+          entries_csv_rows[0]["P1_name"] == batch_for_csv["entries"][0]["players"][0]["name"])
+    check("per-player proj_fpts/own_pct columns are populated for contest-generator entries",
+          entries_csv_rows[0]["P1_proj_fpts"] != '' and entries_csv_rows[0]["P1_own_pct"] != '',
+          str(entries_csv_rows[0]))
+    check("results (rank/cash/payout), when given, are appended as extra columns",
+          "estimated_rank" in entries_csv_rows[0] and "in_the_money" in entries_csv_rows[0]
+          and "estimated_payout" in entries_csv_rows[0],
+          str(entries_csv_rows[0]))
+    check("estimated_rank in the CSV matches the JSON response's own results list",
+          int(entries_csv_rows[0]["estimated_rank"]) == batch_for_csv["results"][0]["estimated_rank"])
+
+    no_results_csv = lineup_export.lineups_to_csv([opt_lineup])
+    check("lineups_to_csv omits the rank/cash/payout columns when no results are given",
+          "estimated_rank" not in list(csv_module.DictReader(io_module.StringIO(no_results_csv)))[0])
 
     print("\nJSON serialisation")
     import json

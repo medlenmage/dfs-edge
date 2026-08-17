@@ -423,6 +423,22 @@ vanishing from the doc:
   auto-detection, `dk_id` for NFL's optimizer) are handled by leaving
   them empty rather than guessed at, and this is MLB-only for exactly
   the `dk_id` reason.
+- **CSV export, for handing lineups off to something outside this app.**
+  Both the optimizer's Lineups tab and the mass Contest Generator now
+  have a "Download CSV" button -- one row per lineup, one column-group
+  per DK roster slot (name, team, salary, projected points,
+  ownership%), plus the estimated rank/cash/payout when the batch was
+  ranked against a contest field. Meant for a Monte Carlo simulator, a
+  spreadsheet, or another Claude session working from the file, not for
+  DK's own bulk-upload format (that needs a contest-specific template
+  with entry/contest IDs this app has no way to get). The optimizer's
+  export is client-side (its lineups, capped at 150, are already fully
+  loaded in the browser); the Contest Generator's is server-side --
+  `GET /api/mlb/contest-entries/{batch_id}/csv` downloads the *entire*
+  generated batch (up to 10,000 rows), not just the 200-row preview the
+  JSON response caps itself at, and the batch is cached under that id
+  for an hour so the CSV always matches exactly what was reviewed on
+  screen rather than silently re-rolling a different random batch.
 
 ## NFL
 

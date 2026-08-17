@@ -201,6 +201,12 @@ export function ContestGeneratorPanel({ date, slate }) {
             <span className="badge">${state.contest.entry_fee.toLocaleString()} entry</span>
             <span className="badge">{state.paid_count.toLocaleString()} paid</span>
             <span className="badge">${state.prize_pool.toLocaleString()} prize pool</span>
+            <a
+              href={api.contestEntriesCsvUrl(state.batch_id)}
+              title={`Download all ${state.num_entries_built.toLocaleString()} entries as a CSV -- for handing off to an external simulator`}
+            >
+              <button>Download full batch (CSV)</button>
+            </a>
           </div>
 
           <div className="card" style={{ marginBottom: 14 }}>

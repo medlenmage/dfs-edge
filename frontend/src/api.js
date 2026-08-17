@@ -163,6 +163,11 @@ export const api = {
       }),
     }),
 
+  // A plain URL, not a fetch() call -- the browser handles the
+  // Content-Disposition: attachment download itself when this is set
+  // as a link's href, no JS-side blob handling needed.
+  contestEntriesCsvUrl: (batchId) => `${BASE}/api/mlb/contest-entries/${batchId}/csv`,
+
   nflSlate: (season, week) => {
     const params = new URLSearchParams()
     if (season) params.set('season', season)
