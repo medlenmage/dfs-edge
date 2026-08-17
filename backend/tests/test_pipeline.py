@@ -428,6 +428,43 @@ async def main() -> int:
     check("slate_games skips rows with unparseable Game Info rather than raising",
           salaries.slate_games([salary_row("A", "NYY", 4000, 8.0, game_info="")]) == [])
 
+    print("\nDK salary CSV: header-row detection (two real export shapes)")
+
+    flat_csv = (
+        "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame\n"
+        "SP,Chris Sale (43854626),Chris Sale,43854626,P,10300,ATL@MIN 08/17/2026 07:40PM ET,ATL,23.26\n"
+    )
+    flat_rows = salaries.parse_dk_csv(flat_csv)
+    check("the flat player-pool export (header on row 1) still parses",
+          len(flat_rows) == 1 and flat_rows[0]["name"] == "Chris Sale", str(flat_rows))
+
+    # The lineup-builder page's "Export to CSV" button ships a wider
+    # file: an empty roster-slot template occupies the first several
+    # rows/columns, and the real player-table header is embedded well
+    # past row 1 -- this is the exact shape that silently produced zero
+    # players before _find_dk_header_row existed (csv.DictReader took
+    # the roster-template row as the header, so every expected column
+    # name -- Name, Salary, TeamAbbrev -- was simply missing).
+    wide_csv = (
+        "P,P,C,1B,2B,3B,SS,OF,OF,OF,,Instructions\n"
+        ",,,,,,,,,,,1. Locate the player you want to select in the list below\n"
+        ",,,,,,,,,,,Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame\n"
+        ",,,,,,,,,,,SP,Chris Sale (43854626),Chris Sale,43854626,P,10300,ATL@MIN 08/17/2026 07:40PM ET,ATL,23.26\n"
+        ",,,,,,,,,,,SP,Tarik Skubal (43854627),Tarik Skubal,43854627,P,10000,LAD@COL 08/17/2026 08:40PM ET,LAD,21.76\n"
+    )
+    wide_rows = salaries.parse_dk_csv(wide_csv)
+    check("the lineup-builder export (header embedded mid-file, offset past column 0) now parses",
+          len(wide_rows) == 2, str(wide_rows))
+    check("wide-export rows are parsed correctly despite the leading empty columns",
+          wide_rows[0] == {
+              "name": "Chris Sale", "normalized_name": "chris sale", "team": "ATL",
+              "position": "SP", "salary": 10300, "avg_points": 23.26,
+              "game_info": "ATL@MIN 08/17/2026 07:40PM ET", "dk_id": "43854626",
+          }, str(wide_rows[0]))
+
+    check("a CSV with no recognizable DK header returns no players rather than raising",
+          salaries.parse_dk_csv("just,some,random,csv\n1,2,3,4\n") == [])
+
     def fake_salary_load_in_slate(day):
         return [salary_row("Big Righty Bat", "NYY", 4200, 9.5, game_info="NYY@BOS 08/14/2026 07:10PM ET")]
 
