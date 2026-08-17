@@ -398,7 +398,16 @@ export function ContestGeneratorPanel({ date, slate }) {
                             <td className="num">{r ? `${r.top_1pct_pct}%` : '—'}</td>
                             <td className="num">{r ? `${r.top_10pct_pct}%` : '—'}</td>
                             <td className="num">{r ? `$${r.expected_payout.toFixed(2)}` : '—'}</td>
-                            <td className="num">{r ? `${r.roi_pct >= 0 ? '+' : ''}${r.roi_pct}%` : '—'}</td>
+                            <td className="num">
+                              {r ? (
+                                <span className={`badge ${r.roi_pct >= 0 ? 'ok' : 'risk'}`}>
+                                  {r.roi_pct >= 0 ? '+' : ''}
+                                  {r.roi_pct}%
+                                </span>
+                              ) : (
+                                '—'
+                              )}
+                            </td>
                           </>
                         ) : (
                           <>

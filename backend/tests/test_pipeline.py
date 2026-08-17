@@ -2022,6 +2022,25 @@ async def main() -> int:
           ),
           str(sim_batch["summary"]))
 
+    sim_roi_order = [r["roi_pct"] for r in sim_batch["results"]]
+    check("build_contest_entries_simulated returns results sorted by roi_pct, highest first",
+          sim_roi_order == sorted(sim_roi_order, reverse=True), str(sim_roi_order))
+    check("build_contest_entries_simulated's entries/results stay index-aligned after sorting "
+          "(each result's lineup_index matches its position)",
+          [r["lineup_index"] for r in sim_batch["results"]] == list(range(len(sim_batch["results"]))),
+          str([r["lineup_index"] for r in sim_batch["results"]]))
+
+    sim_csv = lineup_export.lineups_to_csv(sim_batch["entries"], results=sim_batch["results"])
+    sim_csv_rows = list(csv_module.DictReader(io_module.StringIO(sim_csv)))
+    check("lineups_to_csv includes the simulated result columns (not the deterministic rank/cashing ones) "
+          "when given simulated results",
+          "roi_pct" in sim_csv_rows[0] and "cash_probability_pct" in sim_csv_rows[0]
+          and "estimated_rank" not in sim_csv_rows[0],
+          str(sorted(sim_csv_rows[0].keys())))
+    check("the simulated CSV's roi_pct column matches the JSON response, in the same (sorted) row order",
+          [row["roi_pct"] for row in sim_csv_rows] == [str(r["roi_pct"]) for r in sim_batch["results"]],
+          str(([row["roi_pct"] for row in sim_csv_rows], [r["roi_pct"] for r in sim_batch["results"]])))
+
     print("\nJSON serialisation")
     import json
 
