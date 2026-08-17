@@ -16,6 +16,13 @@ from app.services import analysis, contest, lineup_export, mlb_slate, optimizer,
 # download," short enough not to pile up disk cache forever.
 _CONTEST_BATCH_TTL = 3600
 
+# A Monte Carlo trial is real compute (every player's own outcome pool,
+# resampled num_trials times) on top of an already-large mass-generation
+# call -- capped well below contest.MAX_USER_LINEUPS' scale so a single
+# request can't hang the server.
+_MAX_SIM_TRIALS = 5000
+_DEFAULT_SIM_TRIALS = 1000
+
 router = APIRouter(prefix="/api/mlb", tags=["mlb"])
 
 
@@ -502,6 +509,73 @@ async def build_contest_entries(
 
     result["batch_id"] = batch_id
     result["results"] = full_results[:200]  # ...but only preview it here
+    result["sample_entries"] = full_entries[:200]
+    return {"date": day, **result}
+
+
+@router.post("/contest-entries-simulated")
+async def build_contest_entries_simulated(
+    date: str | None = Body(None, embed=True),
+    contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
+    num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {contest.MAX_USER_LINEUPS:,}"),
+    num_trials: int = Body(
+        _DEFAULT_SIM_TRIALS, embed=True, description=f"Monte Carlo trials to run, up to {_MAX_SIM_TRIALS:,}"
+    ),
+    max_exposure_pct: float | None = Body(
+        None, embed=True, description="Cap how often any one player appears across the whole batch"
+    ),
+    field_size: int | None = Body(
+        None, embed=True, description="Override the preset's real contest size (entries) -- must be >= num_lineups"
+    ),
+    sample_size: int | None = Body(
+        None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
+    ),
+    included_game_pks: list[int] | None = Body(
+        None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
+    ),
+) -> dict[str, Any]:
+    """
+    Like POST /contest-entries, but ranks the batch against a genuine
+    Monte Carlo simulation (contest.build_contest_entries_simulated())
+    instead of a single projected-points snapshot against the field --
+    each entry's cash_probability_pct is the real fraction of simulated
+    trials it lands in the paid zone, with an expected_payout range
+    (10th/90th percentile), not a point estimate. Slower than
+    /contest-entries (fetches every player's own real outcome pool, then
+    runs num_trials simulated realities), so this is a separate opt-in
+    endpoint rather than a flag on the fast deterministic default.
+    """
+    if not (1 <= num_trials <= _MAX_SIM_TRIALS):
+        raise HTTPException(status_code=400, detail=f"num_trials must be between 1 and {_MAX_SIM_TRIALS:,}.")
+    day = date or date_cls.today().isoformat()
+    season = int(day[:4])
+    slate = await mlb_slate.build_slate(day)
+    try:
+        result = await contest.build_contest_entries_simulated(
+            slate,
+            contest_type,
+            num_lineups,
+            season=season,
+            num_trials=num_trials,
+            max_exposure_pct=max_exposure_pct,
+            field_size=field_size,
+            sample_size=sample_size,
+            included_game_pks=included_game_pks,
+        )
+    except contest.ContestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    full_entries = result.pop("entries")
+    full_results = result["results"]
+    batch_id = uuid4().hex
+    cache.put(
+        f"contest_batch:{batch_id}",
+        {"entries": full_entries, "results": full_results},
+        _CONTEST_BATCH_TTL,
+    )
+
+    result["batch_id"] = batch_id
+    result["results"] = full_results[:200]
     result["sample_entries"] = full_entries[:200]
     return {"date": day, **result}
 
