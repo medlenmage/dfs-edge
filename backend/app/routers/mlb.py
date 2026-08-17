@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from datetime import date as date_cls
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile
 
-from app.services import analysis, contest, mlb_slate, optimizer, projections, salaries
+from app import cache
+from app.services import analysis, contest, lineup_export, mlb_slate, optimizer, projections, salaries
+
+# How long a generated contest-entries batch stays downloadable as CSV
+# after the fact -- long enough to cover "generate, look it over, then
+# download," short enough not to pile up disk cache forever.
+_CONTEST_BATCH_TTL = 3600
 
 router = APIRouter(prefix="/api/mlb", tags=["mlb"])
 
@@ -463,6 +470,11 @@ async def build_contest_entries(
     distinct rather than provably optimal. Requires both a DraftKings
     salary CSV and a RotoWire projections CSV loaded for the date, same
     as the optimizer.
+
+    The full batch is cached under a `batch_id` returned in the
+    response -- GET /contest-entries/{batch_id}/csv downloads all of
+    it (not just the `sample_entries`/`results` preview capped at 200
+    below), e.g. to hand off to an external simulator.
     """
     day = date or date_cls.today().isoformat()
     slate = await mlb_slate.build_slate(day)
@@ -478,4 +490,43 @@ async def build_contest_entries(
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    full_entries = result.pop("entries")
+    full_results = result["results"]  # keep the full list cached...
+    batch_id = uuid4().hex
+    cache.put(
+        f"contest_batch:{batch_id}",
+        {"entries": full_entries, "results": full_results},
+        _CONTEST_BATCH_TTL,
+    )
+
+    result["batch_id"] = batch_id
+    result["results"] = full_results[:200]  # ...but only preview it here
+    result["sample_entries"] = full_entries[:200]
     return {"date": day, **result}
+
+
+@router.get("/contest-entries/{batch_id}/csv")
+async def download_contest_entries_csv(batch_id: str) -> Response:
+    """
+    The full batch from a POST /contest-entries call, as a CSV: one row
+    per entry, one column-group per DK roster slot (name, team, salary,
+    projected points, ownership%), plus the rank/cash/payout estimate
+    from that batch's field evaluation. Meant for handing off to
+    something outside this app -- a Monte Carlo simulator, a
+    spreadsheet, another Claude session working from the file -- since
+    the JSON response only ever previews the first 200 of what can be
+    a 10,000-entry batch.
+    """
+    cached = cache.get(f"contest_batch:{batch_id}")
+    if not cached:
+        raise HTTPException(
+            status_code=404,
+            detail="That batch has expired or doesn't exist -- generate a new one and download again.",
+        )
+    csv_text = lineup_export.lineups_to_csv(cached["entries"], results=cached["results"])
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="contest-entries-{batch_id}.csv"'},
+    )

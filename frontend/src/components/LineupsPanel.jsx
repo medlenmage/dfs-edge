@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { downloadCsv, lineupsToCsv } from '../csv'
 import { localTime } from '../format'
 import { ContestFieldPanel } from './ContestFieldPanel'
 import { LineupsTable } from './LineupsTable'
@@ -689,6 +690,13 @@ export function LineupsPanel({ date, slate }) {
 
           <button style={{ marginTop: 12 }} onClick={run}>
             Regenerate
+          </button>
+          <button
+            style={{ marginTop: 12, marginLeft: 8 }}
+            onClick={() => downloadCsv(`lineups-${date}.csv`, lineupsToCsv(state.lineups))}
+            title="Download all generated lineups as a CSV -- for handing off to an external simulator"
+          >
+            Download CSV
           </button>
 
           <ContestFieldPanel

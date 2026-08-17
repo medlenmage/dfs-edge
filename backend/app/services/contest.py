@@ -179,7 +179,14 @@ def _sample_one_lineup(
         "projected_points": round(sum(p["projected_fpts"] for p in picks), 2),
         "total_ownership_pct": round(sum(p["ownership_pct"] for p in picks), 1),
         "players": [
-            {"id": p["id"], "name": p["name"], "team": p["team"], "salary": p["salary"]}
+            {
+                "id": p["id"],
+                "name": p["name"],
+                "team": p["team"],
+                "salary": p["salary"],
+                "projected_fpts": p["projected_fpts"],
+                "ownership_pct": p["ownership_pct"],
+            }
             for p in picks
         ],
         "player_ids": frozenset(used_ids),
@@ -632,11 +639,13 @@ def build_contest_entries(
             ),
         },
         "exposure": field_exposure(entries, top_n=20),
-        # The aggregate `summary` above already covers the whole batch;
-        # per-lineup detail is only useful for spot-checking, so it's
-        # capped rather than shipping up to 10,000 rows in one response.
-        "results": evaluation["results"][:200],
-        "sample_entries": entries[:200],
+        # Full batch, deliberately not capped here -- routers/mlb.py
+        # decides how much of this goes into the JSON response (the
+        # aggregate `summary` above already covers the whole batch, so
+        # per-lineup detail there is only for spot-checking and gets
+        # capped) versus a CSV download, which needs everything.
+        "entries": entries,
+        "results": evaluation["results"],
         "note": (
             "Entries are built by fast randomized construction weighted toward "
             "projected points, not an exact solve -- individually strong and "
