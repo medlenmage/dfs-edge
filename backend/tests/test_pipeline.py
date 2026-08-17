@@ -1474,6 +1474,85 @@ async def main() -> int:
     except contest.ContestError:
         check("build_contest_field rejects a field_size override above MAX_FIELD_SIZE", True)
 
+    print("\nContest generator: mass multi-entry (generate_entries)")
+
+    entries = contest.generate_entries(mul_slate, 40, seed=13)
+    check("generate_entries builds the requested count against a deep-enough pool",
+          len(entries) == 40, str(len(entries)))
+    check("every entry respects the salary cap and has ROSTER_SIZE distinct players",
+          all(
+              lu["salary_used"] <= optimizer.SALARY_CAP
+              and len({p["id"] for p in lu["players"]}) == optimizer.ROSTER_SIZE
+              for lu in entries
+          ))
+    signatures = [frozenset(p["id"] for p in lu["players"]) for lu in entries]
+    check("every entry in the batch is genuinely distinct (no exact duplicates)",
+          len(signatures) == len(set(signatures)), str(len(set(signatures))))
+
+    unweighted_field = contest.generate_field(mul_slate, 40, seed=13)
+    avg_entry_points = sum(lu["projected_points"] for lu in entries) / len(entries)
+    avg_field_points = sum(lu["projected_points"] for lu in unweighted_field) / len(unweighted_field)
+    check("entries (points-weighted) score meaningfully higher on average than the ownership-weighted field",
+          avg_entry_points > avg_field_points, str((avg_entry_points, avg_field_points)))
+
+    # The cap is enforced against the REQUESTED count (20), not
+    # however many entries the batch actually ends up with -- a tight
+    # cap can legitimately return fewer than requested once enough
+    # players are excluded to starve a thin position (same "return
+    # what we could build" pattern as optimizer.generate_lineups).
+    capped = contest.generate_entries(mul_slate, 20, max_exposure_pct=30, seed=4)
+    capped_counts: dict[int, int] = {}
+    for lu in capped:
+        for p in lu["players"]:
+            capped_counts[p["id"]] = capped_counts.get(p["id"], 0) + 1
+    check("max_exposure_pct caps how often any one player appears, relative to the requested count",
+          max(capped_counts.values()) <= max(1, round(0.30 * 20)),
+          str((max(capped_counts.values()), len(capped))))
+
+    try:
+        contest.generate_entries(mul_slate, 0)
+        check("generate_entries rejects num_lineups < 1", False)
+    except contest.ContestError:
+        check("generate_entries rejects num_lineups < 1", True)
+
+    try:
+        contest.generate_entries(mul_slate, contest.MAX_USER_LINEUPS + 1)
+        check("generate_entries rejects num_lineups above MAX_USER_LINEUPS", False)
+    except contest.ContestError:
+        check("generate_entries rejects num_lineups above MAX_USER_LINEUPS", True)
+
+    print("\nContest generator: mass multi-entry economics (build_contest_entries)")
+
+    # Regression fixture for the double/triple-counting bug: ranking a
+    # large batch of individually-strong entries independently against
+    # the field (instead of against each other too) let each one claim
+    # the same top payout, summing to many times the real prize pool.
+    batch = contest.build_contest_entries(mul_slate, "gpp_small", 30, sample_size=100, seed=21)
+    check("build_contest_entries builds the requested number of entries",
+          batch["num_entries_built"] == 30, str(batch["num_entries_built"]))
+    check("no two entries in the batch share the same estimated rank",
+          len({r["estimated_rank"] for r in batch["results"]}) == len(batch["results"]),
+          str(len(batch["results"])))
+    check("total estimated payout across the batch never exceeds the real prize pool",
+          batch["summary"]["total_estimated_payout"] <= batch["prize_pool"] + 0.01,
+          str((batch["summary"]["total_estimated_payout"], batch["prize_pool"])))
+    check("cashing count never exceeds paid_count",
+          batch["summary"]["cashing_count"] <= batch["paid_count"], str(batch["summary"]))
+    check("build_contest_entries reports exposure across the batch",
+          len(batch["exposure"]) > 0, str(batch["exposure"][:1]))
+
+    try:
+        contest.build_contest_entries(mul_slate, "double_up", 200)
+        check("build_contest_entries rejects num_lineups above the contest's field_size", False)
+    except contest.ContestError:
+        check("build_contest_entries rejects num_lineups above the contest's field_size", True)
+
+    try:
+        contest.build_contest_entries(mul_slate, "gpp_small", 0)
+        check("build_contest_entries rejects num_lineups < 1", False)
+    except contest.ContestError:
+        check("build_contest_entries rejects num_lineups < 1", True)
+
     print("\nJSON serialisation")
     import json
 

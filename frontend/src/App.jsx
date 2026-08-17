@@ -7,6 +7,7 @@ import { PitcherTable } from './components/PitcherTable'
 import { GameGrid } from './components/GameCard'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { LineupsPanel } from './components/LineupsPanel'
+import { ContestGeneratorPanel } from './components/ContestGeneratorPanel'
 import { NflPanel } from './components/NflPanel'
 import { ScoreLegend } from './components/ScoreMeter'
 
@@ -16,6 +17,7 @@ const TABS = [
   { id: 'pitchers', label: 'Pitchers' },
   { id: 'games', label: 'Games' },
   { id: 'lineups', label: 'Lineups' },
+  { id: 'contest', label: 'Contest Generator' },
   { id: 'ai', label: 'AI analysis' },
 ]
 
@@ -281,6 +283,16 @@ export default function App() {
             <span className="hint">DraftKings Classic MLB — one optimal lineup per click</span>
           </div>
           <LineupsPanel date={date} slate={slate} />
+        </section>
+      )}
+
+      {slate && tab === 'contest' && (
+        <section>
+          <div className="section-head">
+            <h2>Contest generator</h2>
+            <span className="hint">mass multi-entry — up to 10,000 of your own entries per contest</span>
+          </div>
+          <ContestGeneratorPanel date={date} slate={slate} />
         </section>
       )}
 

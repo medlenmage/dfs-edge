@@ -414,3 +414,53 @@ async def build_contest_field(
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"date": day, **result}
+
+
+@router.post("/contest-entries")
+async def build_contest_entries(
+    date: str | None = Body(None, embed=True),
+    contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
+    num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {contest.MAX_USER_LINEUPS:,}"),
+    max_exposure_pct: float | None = Body(
+        None, embed=True, description="Cap how often any one player appears across the whole batch"
+    ),
+    field_size: int | None = Body(
+        None, embed=True, description="Override the preset's real contest size (entries) -- must be >= num_lineups"
+    ),
+    sample_size: int | None = Body(
+        None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
+    ),
+    included_game_pks: list[int] | None = Body(
+        None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
+    ),
+) -> dict[str, Any]:
+    """
+    The mass multi-entry contest generator: build up to MAX_USER_LINEUPS
+    of your own entries for a named contest type in one request, then
+    rank the whole batch against a simulated opponent field for
+    cash-rate and payout economics.
+
+    Separate from both the small/exact optimizer (POST /lineups, MILP,
+    capped at 150) and the single-lineup field test (POST
+    /contest-field) -- this is the fast, large-scale path: entries are
+    built by randomized construction weighted toward projected points,
+    not an exact solve, so they're individually strong and mutually
+    distinct rather than provably optimal. Requires both a DraftKings
+    salary CSV and a RotoWire projections CSV loaded for the date, same
+    as the optimizer.
+    """
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day)
+    try:
+        result = contest.build_contest_entries(
+            slate,
+            contest_type,
+            num_lineups,
+            max_exposure_pct=max_exposure_pct,
+            field_size=field_size,
+            sample_size=sample_size,
+            included_game_pks=included_game_pks,
+        )
+    except contest.ContestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"date": day, **result}
