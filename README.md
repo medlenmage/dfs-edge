@@ -283,7 +283,7 @@ dfs-edge/
 │   │   │   ├── mlb_slate.py  assembles the daily MLB slate
 │   │   │   ├── nfl_slate.py  assembles the weekly NFL slate
 │   │   │   ├── optimizer.py  MLB DraftKings Classic lineup optimizer
-│   │   │   ├── contest.py    MLB synthetic contest field generator
+│   │   │   ├── contest.py    MLB contest generator: opponent field + mass multi-entry
 │   │   │   ├── nfl_optimizer.py  NFL DraftKings Classic lineup optimizer
 │   │   │   ├── analysis.py   Claude integration
 │   │   │   ├── salaries.py   DraftKings salary CSV upload (MLB + NFL)
@@ -378,6 +378,29 @@ vanishing from the doc:
   deliberately simple, clearly-labeled approximation (flat for
   double-ups, a smooth top-heavy decay for GPPs), not a scraped or
   hardcoded real payout table.
+- **Contest Generator: mass multi-entry.** The field generator above
+  models *opponents*. This is the other half: a standalone "Contest
+  Generator" tab (separate from the Lineups tab's exact optimizer) that
+  builds up to 10,000 of *your own* entries in one request via
+  `contest.generate_entries()` -- fast randomized construction weighted
+  toward projected points (not ownership%), deduplicated so no two
+  entries in a batch are identical. The exact MILP optimizer is the
+  right tool for a handful of provably-best lineups (capped at 150),
+  the wrong one for mass entry: solving a fresh MILP thousands of times
+  is both too slow for one request and not what a real GPP portfolio
+  wants anyway (many individually-strong, genuinely different builds,
+  not the same "best" lineup re-solved with weaker and weaker no-good
+  cuts). The batch gets ranked against a simulated opponent field for
+  cash-rate/payout economics, same presets as the field generator.
+  Caught and fixed a real bug during this build: ranking each entry of
+  a large batch *independently* against the field let thousands of
+  individually-strong entries each claim the same top payout, summing
+  to many times the real prize pool (one test case: $2.5M "profit"
+  against a $42,500 pool). `_evaluate_batch_against_field()` fixes this
+  by ranking the whole batch against the field *and against each
+  other* for the same limited paid ranks -- and `num_lineups` is now
+  validated against the contest's real `field_size` up front (your
+  entries are part of the field, not additional to it).
 
 ## NFL
 
@@ -459,7 +482,8 @@ defense-vs-position and pace pipeline doesn't otherwise change.
 - [x] NFL: weekly matchups + Classic lineup optimizer with QB stacking
 - [x] NFL: pace and defense-vs-position scoring components (prior-season prior)
 - [x] MLB: contest field generator (ownership-weighted synthetic field, ranked by projected points)
-- [ ] MLB: lineup simulator (player-outcome variance model + Monte Carlo contest simulation) -- the harder follow-up to the field generator above; needs a real per-player variance model, not just a point estimate, before it's worth building
+- [x] MLB: standalone Contest Generator tab for mass multi-entry (up to 10,000 of your own entries, points-weighted, ranked against the field for cash/payout economics)
+- [ ] MLB: lineup simulator (player-outcome variance model + Monte Carlo contest simulation) -- the harder follow-up to both contest-generator features above; needs a real per-player variance model, not just a point estimate, before it's worth building
 - [ ] Results tracking and weight backtesting
 - [ ] NBA
 

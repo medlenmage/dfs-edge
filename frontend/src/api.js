@@ -144,6 +144,25 @@ export const api = {
       }),
     }),
 
+  buildContestEntries: (
+    date,
+    contestType,
+    numLineups,
+    { maxExposurePct = null, fieldSize = null, sampleSize = null, includedGamePks = null } = {},
+  ) =>
+    request('/api/mlb/contest-entries', {
+      method: 'POST',
+      body: JSON.stringify({
+        date,
+        contest_type: contestType,
+        num_lineups: numLineups,
+        max_exposure_pct: maxExposurePct,
+        field_size: fieldSize,
+        sample_size: sampleSize,
+        included_game_pks: includedGamePks,
+      }),
+    }),
+
   nflSlate: (season, week) => {
     const params = new URLSearchParams()
     if (season) params.set('season', season)
