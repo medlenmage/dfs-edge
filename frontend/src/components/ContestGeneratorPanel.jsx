@@ -496,9 +496,14 @@ export function ContestGeneratorPanel({ date, slate }) {
                     <th title="Teams in the stack, largest group first (primary, secondary, tertiary...)">Teams</th>
                     <th className="num">Proj FPTS</th>
                     {state.simulated && (
-                      <th className="num" title="10th-90th percentile simulated points across every trial">
-                        Sim floor–ceiling
-                      </th>
+                      <>
+                        <th className="num" title="The lowest this lineup scored in any simulated trial">
+                          Floor
+                        </th>
+                        <th className="num" title="The highest this lineup scored in any simulated trial">
+                          Ceiling
+                        </th>
+                      </>
                     )}
                     <th className="num">Own%</th>
                     {state.simulated ? (
@@ -537,11 +542,10 @@ export function ContestGeneratorPanel({ date, slate }) {
                         <td>{e.stack || <span className="dim">—</span>}</td>
                         <td className="num">{e.projected_points.toFixed(1)}</td>
                         {state.simulated && (
-                          <td className="num dim" style={{ fontSize: 12 }}>
-                            {r
-                              ? `${r.simulated_points_p10.toFixed(0)}–${r.simulated_points_p90.toFixed(0)}`
-                              : '—'}
-                          </td>
+                          <>
+                            <td className="num dim">{r ? r.simulated_points_floor.toFixed(1) : '—'}</td>
+                            <td className="num dim">{r ? r.simulated_points_ceiling.toFixed(1) : '—'}</td>
+                          </>
                         )}
                         <td className="num">{e.total_ownership_pct.toFixed(1)}%</td>
                         {state.simulated ? (

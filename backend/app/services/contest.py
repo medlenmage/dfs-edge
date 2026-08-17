@@ -639,6 +639,8 @@ async def evaluate_batch_simulated(
                 "simulated_points_mean": round(float(row.mean()), 2),
                 "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
                 "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
+                "simulated_points_floor": round(float(row.min()), 2),
+                "simulated_points_ceiling": round(float(row.max()), 2),
             }
         )
 
@@ -1034,6 +1036,8 @@ async def evaluate_field_mirrored(
                 "simulated_points_mean": round(float(row.mean()), 2),
                 "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
                 "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
+                "simulated_points_floor": round(float(row.min()), 2),
+                "simulated_points_ceiling": round(float(row.max()), 2),
             }
         )
 
