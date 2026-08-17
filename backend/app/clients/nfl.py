@@ -30,6 +30,20 @@ from app.clients.http import get_text
 from app.config import get_settings
 
 GAMES_URL = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
+PLAYER_STATS_URL_TEMPLATE = (
+    "https://github.com/nflverse/nflverse-data/releases/download/player_stats/player_stats_{season}.csv"
+)
+
+# The most recent season nflverse's player_stats release actually has
+# full data for. This should track "current season - 1" once a season
+# is under way, but nflverse hadn't published 2025 stats yet as of when
+# this was built -- a 404 on a bumped year just means "not yet," bump
+# it back down until they catch up.
+PRIOR_SEASON = 2024
+
+# The only position_group values DK's Classic roster scores individually
+# (DST is scored as a team, not from these per-player rows).
+_DK_RELEVANT_POSITIONS = {"QB", "RB", "WR", "TE"}
 
 
 def _f(value: Any) -> float | None:
@@ -151,3 +165,119 @@ def implied_team_totals(game: dict[str, Any]) -> dict[str, float | None]:
     if home_ml < 0:  # home team favored
         return {"home": round(half_total + half_spread, 1), "away": round(half_total - half_spread, 1)}
     return {"home": round(half_total - half_spread, 1), "away": round(half_total + half_spread, 1)}
+
+
+def _dk_fantasy_points(row: dict[str, Any]) -> float:
+    """
+    DraftKings Classic NFL scoring computed from raw nflverse per-game
+    counting stats. Deliberately not the row's own `fantasy_points_ppr`
+    column -- that's generic PPR scoring, not DK's: it skips DK's
+    300/100-yard bonuses and uses different interception/fumble
+    penalties.
+    """
+    pts = 0.0
+    py = _f(row.get("passing_yards")) or 0.0
+    pts += py * 0.04 + (_f(row.get("passing_tds")) or 0.0) * 4 - (_f(row.get("interceptions")) or 0.0)
+    if py >= 300:
+        pts += 3
+    ry = _f(row.get("rushing_yards")) or 0.0
+    pts += ry * 0.1 + (_f(row.get("rushing_tds")) or 0.0) * 6
+    if ry >= 100:
+        pts += 3
+    rey = _f(row.get("receiving_yards")) or 0.0
+    pts += (_f(row.get("receptions")) or 0.0) + rey * 0.1 + (_f(row.get("receiving_tds")) or 0.0) * 6
+    if rey >= 100:
+        pts += 3
+    fumbles_lost = (
+        (_f(row.get("sack_fumbles_lost")) or 0.0)
+        + (_f(row.get("rushing_fumbles_lost")) or 0.0)
+        + (_f(row.get("receiving_fumbles_lost")) or 0.0)
+    )
+    pts -= fumbles_lost
+    two_pt = (
+        (_f(row.get("passing_2pt_conversions")) or 0.0)
+        + (_f(row.get("rushing_2pt_conversions")) or 0.0)
+        + (_f(row.get("receiving_2pt_conversions")) or 0.0)
+    )
+    pts += two_pt * 2
+    pts += (_f(row.get("special_teams_tds")) or 0.0) * 6
+    return pts
+
+
+async def _load_player_stats_csv(season: int) -> str:
+    settings = get_settings()
+
+    async def _load() -> str:
+        url = PLAYER_STATS_URL_TEMPLATE.format(season=season)
+        return await get_text(url, source="nflverse player stats")
+
+    # A completed season's box scores never change -- cache far longer
+    # than the in-season TTLs above.
+    return await cached(f"nfl:player_stats:{season}:raw", settings.ttl_stats * 4, _load)
+
+
+async def get_prior_season_context(season: int = PRIOR_SEASON) -> dict[str, Any]:
+    """
+    Defense-vs-position and pace, computed from one full completed
+    season of real box scores -- the same "how has this defense
+    performed against this position" and "how many plays does this
+    offense run" checks a DFS player does by hand, automated. Used as a
+    static prior until the current season has played enough games of
+    its own to trust in-season sampling (nothing else in this model has
+    that yet either -- see nfl_scoring.py's module docstring).
+
+    Team codes here are nflverse's own, matching `get_schedule()`'s
+    `home_team`/`away_team` directly -- no DK-alias translation needed,
+    since both come from the same source.
+    """
+
+    async def _load() -> dict[str, Any]:
+        text = await _load_player_stats_csv(season)
+
+        # allowed[def_team][position_group][week] = DK pts allowed that game
+        allowed: dict[str, dict[str, dict[int, float]]] = {}
+        # plays[team][week] = offensive plays run that game
+        plays: dict[str, dict[int, float]] = {}
+
+        for row in csv.DictReader(io.StringIO(text)):
+            if row.get("season_type") != "REG":
+                continue
+            week = _i(row.get("week"))
+            if week is None:
+                continue
+
+            team = row.get("recent_team") or ""
+            if team:
+                team_plays = plays.setdefault(team, {})
+                snaps = (_f(row.get("attempts")) or 0.0) + (_f(row.get("carries")) or 0.0)
+                team_plays[week] = team_plays.get(week, 0.0) + snaps
+
+            pos_group = row.get("position_group") or ""
+            opp = row.get("opponent_team") or ""
+            if opp and pos_group in _DK_RELEVANT_POSITIONS:
+                pos_allowed = allowed.setdefault(opp, {}).setdefault(pos_group, {})
+                pos_allowed[week] = pos_allowed.get(week, 0.0) + _dk_fantasy_points(row)
+
+        defense_vs_position = {
+            team: {pos: round(sum(weeks.values()) / len(weeks), 2) for pos, weeks in by_pos.items()}
+            for team, by_pos in allowed.items()
+        }
+        pace = {team: round(sum(weeks.values()) / len(weeks), 2) for team, weeks in plays.items()}
+
+        league_avg_defense_vs_position = {
+            pos: round(sum(v) / len(v), 2)
+            for pos in _DK_RELEVANT_POSITIONS
+            if (v := [by_pos[pos] for by_pos in defense_vs_position.values() if pos in by_pos])
+        }
+        league_avg_pace = round(sum(pace.values()) / len(pace), 2) if pace else None
+
+        return {
+            "season": season,
+            "defense_vs_position": defense_vs_position,
+            "league_avg_defense_vs_position": league_avg_defense_vs_position,
+            "pace": pace,
+            "league_avg_pace": league_avg_pace,
+        }
+
+    settings = get_settings()
+    return await cached(f"nfl:prior_season_context:{season}", settings.ttl_stats * 4, _load)

@@ -381,14 +381,32 @@ NFL GPP correlation play, the same idea as MLB's hitter stacking).
 Upload a DraftKings salary CSV and a RotoWire projections CSV for the
 week the same way you would for MLB.
 
-**Deliberately smaller than the MLB model right now.** MLB's matchup
-score leans on a full season of granular per-player split data; NFL's
-here runs on what's genuinely knowable from free data today — Vegas
-implied team total, game script from the spread, home field, and
-weather. No position-vs-defense or pace component yet (there's no
-"this season's" defense data before a season has actually started) —
-see `services/nfl_scoring.py` for exactly what's in and why, and the
-Roadmap below for what's next.
+**Still smaller than the MLB model, deliberately.** MLB's matchup score
+leans on a full season of granular per-player split data. NFL's runs on
+Vegas implied team total, game script from the spread, home field, and
+weather — plus, as of this component, **defense-vs-position and pace**,
+computed from a full prior completed season's real box scores rather
+than in-season data that doesn't exist before Week 1. Used as a static
+prior the same way a small-sample MLB stat gets shrunk toward league
+average, just shrunk all the way there since there's zero current-season
+sample yet:
+
+| Source | What it gives you |
+|---|---|
+| [nflverse](https://github.com/nflverse/nflverse-data) `player_stats` export | one full season's per-player, per-game box scores |
+
+`clients/nfl.get_prior_season_context()` fetches that CSV once (cached),
+computes DraftKings points for every player-game with DK's own scoring
+rules (not the export's generic PPR column, which has different
+bonuses/penalties), and aggregates two things per team: DK points
+allowed per game to each of QB/RB/WR/TE (the classic "defense vs.
+position" signal), and offensive plays run per game (pace — more snaps
+means more opportunity for everyone on that offense). `PRIOR_SEASON` in
+that same file is the one line to bump once nflverse publishes the next
+season's stats — **it's currently pinned to 2024**, since nflverse
+hadn't published 2025 numbers yet as of when this shipped.
+
+See `services/nfl_scoring.py` for exactly what's in and why.
 
 ## Improving it from here
 
@@ -397,9 +415,9 @@ happened. After a month you can check whether your weights are any good,
 which is the only way to know. A `results` table in the same SQLite file
 is enough.
 
-**2. NFL: pace and defense-vs-position.** Once there's real in-season
-data to compute them from, `services/nfl_scoring.py` is built the same
-extensible way `scoring.py` is — add a component, add a weight.
+**2. NFL: bump `PRIOR_SEASON`.** Once nflverse publishes a season closer
+to the current one, change the one constant in `clients/nfl.py` — the
+defense-vs-position and pace pipeline doesn't otherwise change.
 
 ---
 
@@ -414,8 +432,8 @@ extensible way `scoring.py` is — add a component, add a weight.
 - [x] RotoWire FPTS/ownership projections
 - [x] Lineup optimizer (MLB and NFL), including a lineup-confirmation watcher for MLB
 - [x] NFL: weekly matchups + Classic lineup optimizer with QB stacking
+- [x] NFL: pace and defense-vs-position scoring components (prior-season prior)
 - [ ] Results tracking and weight backtesting
-- [ ] NFL: pace and defense-vs-position scoring components
 - [ ] NBA
 
 ---

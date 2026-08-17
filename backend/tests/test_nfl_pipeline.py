@@ -11,13 +11,25 @@ Run it with:
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import cache  # noqa: E402
 from app.clients import nfl  # noqa: E402
 from app.services import nfl_optimizer, nfl_scoring, player_match, salaries  # noqa: E402
+
+_FAKE_CACHE: dict[str, object] = {}
+
+
+def _fake_cache_get(key):
+    return _FAKE_CACHE.get(key)
+
+
+def _fake_cache_put(key, value, ttl):
+    _FAKE_CACHE[key] = value
 
 PASS, FAILED = [], []
 
@@ -109,11 +121,96 @@ def main() -> int:
     full = nfl_scoring.score_player(
         "RB", implied_total=27.0, is_home=True, spread=7.0, favored=True,
         wind_mph=5.0, precip_chance_pct=10,
+        defense_allowed_per_game=28.0, league_avg_defense_allowed=22.85,
+        pace_plays_per_game=63.8, league_avg_pace=60.0,
     )
-    check("score_player returns a 0-100 score with every component and a top_driver",
-          0 <= full["score"] <= 100 and set(full["components"]) == {"implied_total", "game_script", "weather"}
+    check("score_player returns a 0-100 score with every component (including the new pair) and a top_driver",
+          0 <= full["score"] <= 100
+          and set(full["components"]) == {"implied_total", "game_script", "weather", "defense_vs_position", "pace"}
           and full["top_driver"] in full["components"],
           str(full))
+
+    print("\nDefense-vs-position and pace components (prior-season prior)")
+    funnel = nfl_scoring.defense_vs_position_component("RB", 32.1, 22.85)
+    tough = nfl_scoring.defense_vs_position_component("RB", 16.4, 22.85)
+    check("a defense allowing well above average to a position scores as a funnel matchup",
+          funnel["value"] > 0 and "funnel" in funnel["detail"], str(funnel))
+    check("a defense allowing well below average scores as a tough matchup",
+          tough["value"] < 0 and "tough" in tough["detail"], str(tough))
+    check("defense_vs_position_component is neutral with no data",
+          nfl_scoring.defense_vs_position_component("RB", None, 22.85)["value"] == 0.0)
+    extreme = nfl_scoring.defense_vs_position_component("RB", 200.0, 20.0)
+    check("defense_vs_position_component caps its adjustment rather than blowing up on an outlier",
+          extreme["value"] == nfl_scoring.DEFENSE_VS_POSITION_MAX_ADJUSTMENT, str(extreme))
+
+    fast = nfl_scoring.pace_component(63.8, 60.0)
+    slow = nfl_scoring.pace_component(56.3, 60.0)
+    check("a faster-than-average offense gets a positive pace bump",
+          fast["value"] > 0, str(fast))
+    check("a slower-than-average offense gets a negative pace adjustment",
+          slow["value"] < 0, str(slow))
+    check("pace_component is neutral with no data",
+          nfl_scoring.pace_component(None, 60.0)["value"] == 0.0)
+    extreme_pace = nfl_scoring.pace_component(300.0, 60.0)
+    check("pace_component caps its adjustment rather than blowing up on an outlier",
+          extreme_pace["value"] == nfl_scoring.PACE_MAX_ADJUSTMENT, str(extreme_pace))
+
+    # --------------------------------------------------------------------
+    # clients/nfl.py -- DK fantasy points from raw box-score counting
+    # stats (the prior-season defense/pace aggregation's building block)
+    # --------------------------------------------------------------------
+    print("\nDK fantasy points from raw prior-season box-score stats")
+    qb_row = {"passing_yards": "320", "passing_tds": "2", "interceptions": "1"}
+    check("a 320-yard, 2 TD, 1 INT passing game scores the 300-yard bonus correctly",
+          nfl._dk_fantasy_points(qb_row) == 22.8, str(nfl._dk_fantasy_points(qb_row)))
+
+    rb_row = {"rushing_yards": "105", "rushing_tds": "1"}
+    check("a 105-yard, 1 TD rushing game scores the 100-yard bonus correctly",
+          nfl._dk_fantasy_points(rb_row) == 19.5, str(nfl._dk_fantasy_points(rb_row)))
+
+    rb_no_bonus = {"rushing_yards": "80", "rushing_tds": "0"}
+    check("rushing under 100 yards doesn't get the bonus",
+          nfl._dk_fantasy_points(rb_no_bonus) == 8.0, str(nfl._dk_fantasy_points(rb_no_bonus)))
+
+    fumble_row = {"rushing_yards": "10", "sack_fumbles_lost": "1", "rushing_2pt_conversions": "1"}
+    check("lost fumbles and 2pt conversions are scored correctly",
+          nfl._dk_fantasy_points(fumble_row) == 1.0 - 1 + 2, str(nfl._dk_fantasy_points(fumble_row)))
+
+    print("\nPrior-season defense-vs-position + pace aggregation (fake CSV, no network)")
+    fake_csv = (
+        "recent_team,season,week,season_type,opponent_team,position_group,attempts,carries,"
+        "passing_yards,passing_tds,interceptions,rushing_yards,rushing_tds,receptions,"
+        "receiving_yards,receiving_tds,sack_fumbles_lost,rushing_fumbles_lost,"
+        "receiving_fumbles_lost,passing_2pt_conversions,rushing_2pt_conversions,"
+        "receiving_2pt_conversions,special_teams_tds\n"
+        "AAA,2099,1,REG,BBB,RB,0,20,0,0,0,100,1,0,0,0,0,0,0,0,0,0,0\n"
+        "AAA,2099,2,REG,BBB,RB,0,15,0,0,0,50,0,0,0,0,0,0,0,0,0,0,0\n"
+        "AAA,2099,1,PRE,BBB,RB,0,999,0,0,0,999,1,0,0,0,0,0,0,0,0,0,0\n"
+        "BBB,2099,1,REG,AAA,WR,30,0,0,0,0,0,0,5,80,1,0,0,0,0,0,0,0\n"
+        "BBB,2099,2,REG,AAA,WR,25,0,0,0,0,0,0,3,40,0,0,0,0,0,0,0,0\n"
+    )
+
+    async def _fake_loader(season):
+        return fake_csv
+
+    cache.get = _fake_cache_get
+    cache.put = _fake_cache_put
+    nfl._load_player_stats_csv = _fake_loader
+    context = asyncio.run(nfl.get_prior_season_context(season=2099))
+
+    check("preseason rows are excluded from the aggregation",
+          context["defense_vs_position"]["BBB"]["RB"] == 12.0, str(context["defense_vs_position"]))
+    check("defense-vs-position is a per-game average of DK points allowed to that position",
+          context["defense_vs_position"]["AAA"]["WR"] == 13.0, str(context["defense_vs_position"]))
+    check("a position never faced isn't in a team's defense-vs-position breakdown",
+          "WR" not in context["defense_vs_position"]["BBB"], str(context["defense_vs_position"]))
+    check("league_avg_defense_vs_position only covers positions with real data",
+          context["league_avg_defense_vs_position"] == {"RB": 12.0, "WR": 13.0},
+          str(context["league_avg_defense_vs_position"]))
+    check("pace is plays (attempts + carries) per game, averaged across weeks",
+          context["pace"] == {"AAA": 17.5, "BBB": 27.5}, str(context["pace"]))
+    check("league_avg_pace averages across every team with pace data",
+          context["league_avg_pace"] == 22.5, str(context["league_avg_pace"]))
 
     # --------------------------------------------------------------------
     # salaries.py -- dk_id capture (needed since NFL has no separate
