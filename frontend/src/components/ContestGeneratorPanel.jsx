@@ -492,6 +492,8 @@ export function ContestGeneratorPanel({ date, slate }) {
                   <tr>
                     <th className="num">#</th>
                     <th className="num">Salary</th>
+                    <th title="Stack shape, e.g. 5-3 = 5 hitters from one team + 3 from another">Stack</th>
+                    <th title="Teams in the stack, largest group first (primary, secondary, tertiary...)">Teams</th>
                     <th className="num">Proj FPTS</th>
                     {state.simulated && (
                       <th className="num" title="10th-90th percentile simulated points across every trial">
@@ -531,6 +533,8 @@ export function ContestGeneratorPanel({ date, slate }) {
                       <tr key={i}>
                         <td className="num">{i + 1}</td>
                         <td className="num">${e.salary_used.toLocaleString()}</td>
+                        <td>{e.stack_type || <span className="dim">—</span>}</td>
+                        <td>{e.stack || <span className="dim">—</span>}</td>
                         <td className="num">{e.projected_points.toFixed(1)}</td>
                         {state.simulated && (
                           <td className="num dim" style={{ fontSize: 12 }}>
