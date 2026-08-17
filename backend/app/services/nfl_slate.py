@@ -54,6 +54,7 @@ def _game_time_utc(game: dict[str, Any]) -> str | None:
 
 def _team_players(
     team: str,
+    opp: str,
     salary_rows: list[dict[str, Any]],
     projection_lookup: dict[tuple[str, str], dict[str, Any]],
     *,
@@ -63,22 +64,41 @@ def _team_players(
     favored: bool | None,
     wind_mph: float | None,
     precip_chance_pct: float | None,
+    prior_season: dict[str, Any],
 ) -> list[dict[str, Any]]:
     team_norm = player_match.normalize_team(team)
+    defense_vs_position = prior_season.get("defense_vs_position") or {}
+    league_avg_defense = prior_season.get("league_avg_defense_vs_position") or {}
+    pace = prior_season.get("pace") or {}
+    league_avg_pace = prior_season.get("league_avg_pace")
+
     players = []
     for row in salary_rows:
         if player_match.normalize_team(row["team"]) != team_norm:
             continue
+        position = row["position"]
         proj = player_match.match(projection_lookup, row["name"], row["team"])
+        # DST has no defense-vs-DST data to lean on; its own useful pace
+        # signal is the *opponent's* plays run, not this team's own.
+        if position == "DST":
+            defense_allowed = None
+            pace_plays = pace.get(opp)
+        else:
+            defense_allowed = (defense_vs_position.get(opp) or {}).get(position)
+            pace_plays = pace.get(team)
         edge = (
             nfl_scoring.score_player(
-                row["position"],
+                position,
                 implied_total=implied_total,
                 is_home=is_home,
                 spread=spread,
                 favored=bool(favored),
                 wind_mph=wind_mph,
                 precip_chance_pct=precip_chance_pct,
+                defense_allowed_per_game=defense_allowed,
+                league_avg_defense_allowed=league_avg_defense.get(position),
+                pace_plays_per_game=pace_plays,
+                league_avg_pace=league_avg_pace,
             )
             if favored is not None
             else None
@@ -104,6 +124,7 @@ async def _build_game(
     game: dict[str, Any],
     salary_rows: list[dict[str, Any]],
     projection_lookup: dict[tuple[str, str], dict[str, Any]],
+    prior_season: dict[str, Any],
 ) -> dict[str, Any]:
     home, away = game["home_team"], game["away_team"]
     implied = nfl.implied_team_totals(game)
@@ -124,15 +145,17 @@ async def _build_game(
     precip_pct = (wx or {}).get("precip_chance_pct")
 
     home_players = _team_players(
-        home, salary_rows, projection_lookup,
+        home, away, salary_rows, projection_lookup,
         implied_total=implied["home"], is_home=True, spread=spread,
         favored=home_favored, wind_mph=wind_mph, precip_chance_pct=precip_pct,
+        prior_season=prior_season,
     )
     away_favored = None if home_favored is None else not home_favored
     away_players = _team_players(
-        away, salary_rows, projection_lookup,
+        away, home, salary_rows, projection_lookup,
         implied_total=implied["away"], is_home=False, spread=spread,
         favored=away_favored, wind_mph=wind_mph, precip_chance_pct=precip_pct,
+        prior_season=prior_season,
     )
 
     return {
@@ -170,9 +193,10 @@ async def build_slate(season: int, week: int) -> dict[str, Any]:
     salary_rows = salaries.load(key)
     projection_rows = projections.load(key)
     projection_lookup = projections.build_lookup(projection_rows)
+    prior_season = await nfl.get_prior_season_context()
 
     built = await asyncio.gather(
-        *[_build_game(g, salary_rows, projection_lookup) for g in games]
+        *[_build_game(g, salary_rows, projection_lookup, prior_season) for g in games]
     )
 
     return {
