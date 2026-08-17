@@ -197,7 +197,16 @@ export const api = {
   simulateDkEntries: (
     date,
     contestId,
-    { fieldSize, prizePool, firstPlacePct, payoutPct, shape, sampleSize = null, includedGamePks = null } = {},
+    {
+      fieldSize,
+      prizePool,
+      firstPlacePct,
+      payoutPct,
+      shape,
+      maxExposurePct = null,
+      sampleSize = null,
+      includedGamePks = null,
+    } = {},
   ) =>
     request('/api/mlb/dk-entries/simulate', {
       method: 'POST',
@@ -209,6 +218,7 @@ export const api = {
         first_place_pct: firstPlacePct,
         payout_pct: payoutPct,
         shape,
+        max_exposure_pct: maxExposurePct,
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
       }),

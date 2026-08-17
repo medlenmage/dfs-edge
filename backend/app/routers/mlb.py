@@ -643,18 +643,25 @@ async def simulate_dk_entries(
     first_place_pct: float = Body(..., embed=True, description="% of the prize pool 1st place wins"),
     payout_pct: float = Body(0.20, embed=True, description="Fraction of field_size that cashes"),
     shape: str = Body("top_heavy", embed=True, description="'top_heavy' (GPP) or 'flat' (double-up/50-50)"),
+    max_exposure_pct: float | None = Body(
+        None, embed=True, description="Cap how often any one player appears across the generated lineups"
+    ),
     sample_size: int | None = Body(
         None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
     ),
     included_game_pks: list[int] | None = Body(
-        None, embed=True, description="Restrict the opponent field to these games only"
+        None, embed=True, description="Restrict the pool to these games only"
     ),
 ) -> dict[str, Any]:
     """
-    Simulate the lineups you actually built for one real contest from
-    an uploaded DK entries file (POST /dk-entries), against that
-    contest's real economics -- entry fee comes straight from the
-    file, prize_pool/first_place_pct/field_size/payout_pct/shape are
+    Simulate one real contest from an uploaded DK entries file (POST
+    /dk-entries): the file establishes the baseline -- how many entries
+    you have in that contest and what each one costs -- and this app
+    generates fresh lineups (same construction "Generate entries" mode
+    uses) to fill out whichever ones are still blank reservations,
+    alongside any you'd already built yourself, then simulates the
+    whole batch against the contest's real economics.
+    prize_pool/first_place_pct/field_size/payout_pct/shape are
     hand-entered since a bulk entries export has no payout-table data
     at all. Always runs 10,000 trials, same as /contest-entries-simulated.
     """
@@ -667,25 +674,36 @@ async def simulate_dk_entries(
         )
     season = int(day[:4])
     slate = await mlb_slate.build_slate(day)
-    resolved, warnings = dk_entries.resolve_entries(text, slate, contest_id=contest_id)
-    if not resolved:
+
+    parsed = dk_entries.parse_entries_csv(text)
+    contest_row = next((c for c in dk_entries.contest_summary(parsed) if c["contest_id"] == contest_id), None)
+    if contest_row is None:
         raise HTTPException(
-            status_code=400,
-            detail="None of that contest's entries could be simulated -- every one was either an "
-            "empty reservation or referenced a player not in today's loaded salary/projections pool.",
+            status_code=404,
+            detail="That contest wasn't found in the uploaded file -- re-upload via POST /dk-entries.",
         )
+    resolved, resolve_warnings = dk_entries.resolve_entries(text, slate, contest_id=contest_id)
+    # A blank reservation is the expected, normal case here -- this
+    # endpoint generates a lineup for it rather than treating it as a
+    # problem, so only surface warnings about entries that actually
+    # had a lineup picked but couldn't be matched (a real data issue
+    # worth knowing about).
+    warnings = [w for w in resolve_warnings if "empty roster slot" not in w]
 
     try:
         result = await contest.build_dk_entries_simulated(
             slate,
             resolved,
             season=season,
+            num_entries_total=contest_row["num_entries"],
+            entry_fee=contest_row["entry_fee"] or 0.0,
             field_size=field_size,
             prize_pool=prize_pool,
             first_place_pct=first_place_pct,
             payout_pct=payout_pct,
             shape=shape,
             num_trials=_SIM_TRIALS,
+            max_exposure_pct=max_exposure_pct,
             sample_size=sample_size,
             included_game_pks=included_game_pks,
         )
