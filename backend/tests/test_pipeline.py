@@ -1587,6 +1587,85 @@ async def main() -> int:
     except contest.ContestError:
         check("generate_entries rejects num_lineups above MAX_USER_LINEUPS", True)
 
+    print("\nContest generator: weighted stack-shape targeting")
+
+    import random as stack_random_module
+    from collections import Counter as StackCounter
+
+    # _pick_stack_shape: statistical proof the weighting actually favors
+    # the intended order (the shape list's own first entry, 5-3, drawn
+    # meaningfully more often than its last, 3-3), not just that some
+    # weights happen to exist.
+    shape_rng = stack_random_module.Random(99)
+    shape_draws = [
+        tuple(contest._pick_stack_shape(contest.STACK_SHAPES, contest.STACK_SHAPE_WEIGHTS, shape_rng))
+        for _ in range(2000)
+    ]
+    first_shape_count = shape_draws.count(tuple(contest.STACK_SHAPES[0]))
+    last_shape_count = shape_draws.count(tuple(contest.STACK_SHAPES[-1]))
+    check("_pick_stack_shape draws the first-listed shape (5-3) meaningfully more often than the last (3-3)",
+          first_shape_count > last_shape_count * 2,
+          str((first_shape_count, last_shape_count)))
+    check("_pick_stack_shape returns None when given an empty shape list (no feasible shape at all)",
+          contest._pick_stack_shape([], [], shape_rng) is None)
+
+    # _feasible_stack_shapes: a pool with only 2 real teams can never
+    # satisfy a 3-group shape (4-2-2, 3-3-2) no matter how deep those 2
+    # teams are -- this is exactly the bug this function exists to
+    # prevent (a structurally-impossible shape burning every retry and
+    # aborting the whole batch, see mul_slate's own 2-team fixture
+    # below for the real-world version of this).
+    two_team_pool = {"TEAM_A": [{"id": i} for i in range(10)], "TEAM_B": [{"id": i} for i in range(10, 18)]}
+    feasible_shapes, feasible_weights = contest._feasible_stack_shapes(two_team_pool)
+    check("_feasible_stack_shapes excludes 3-group shapes when only 2 teams have any hitters",
+          [4, 2, 2] not in feasible_shapes and [3, 3, 2] not in feasible_shapes,
+          str(feasible_shapes))
+    check("_feasible_stack_shapes keeps every 1- and 2-group shape when both teams are deep enough",
+          all(shape in feasible_shapes for shape in ([5, 3], [5, 2], [5], [4, 4], [4, 3], [4, 2], [3, 3])),
+          str(feasible_shapes))
+    check("_feasible_stack_shapes keeps the weight list aligned with the filtered shape list",
+          len(feasible_shapes) == len(feasible_weights))
+
+    thin_pool = {"TEAM_A": [{"id": i} for i in range(3)]}
+    check("_feasible_stack_shapes excludes every shape once even the pool's only team is too thin for the "
+          "smallest one",
+          contest._feasible_stack_shapes(thin_pool) == ([], []),
+          str(contest._feasible_stack_shapes(thin_pool)))
+
+    # _pick_stack_teams: a direct, deterministic check of the
+    # team-assignment step, independent of the shape-selection
+    # randomness checked above.
+    team_rng = stack_random_module.Random(5)
+    team_pool = {
+        "HOT": [{"id": i, "team": "HOT", "projected_fpts": 15.0} for i in range(6)],
+        "COLD": [{"id": i, "team": "COLD", "projected_fpts": 1.0} for i in range(100, 103)],
+    }
+    assignment = contest._pick_stack_teams(team_pool, [5, 3], contest._fpts_weight, team_rng)
+    check("_pick_stack_teams assigns the largest group to the only team deep enough for it, and the "
+          "remaining group to whichever team is left",
+          assignment == {"HOT": 5, "COLD": 3}, str(assignment))
+    infeasible = contest._pick_stack_teams(team_pool, [5, 4], contest._fpts_weight, team_rng)
+    check("_pick_stack_teams returns None when no remaining team has enough hitters left for a group",
+          infeasible is None, str(infeasible))
+
+    # End-to-end against mul_slate (only 2 teams have hitters, MUL1 and
+    # MUL2 -- exactly the shape this whole feature was built to handle
+    # without silently truncating the batch, see the "40" count check
+    # above, which failed outright before _feasible_stack_shapes existed).
+    target_shape_labels = {"5-3", "5-2", "5", "4-4", "4-3", "4-2-2", "4-2", "3-3-2", "3-3"}
+    stack_types = [e["stack_type"] for e in entries]
+    check("generate_entries' output favors the intended stack shapes -- most of a real batch's "
+          "stack_type lands on one of STACK_SHAPES' own reported labels (some coincidental drift onto "
+          "a leftover free pick doubling up is expected and fine)",
+          sum(1 for st in stack_types if st in target_shape_labels) >= len(entries) * 0.5,
+          str(StackCounter(stack_types)))
+
+    pitcher_teams_used = {p["team"] for lu in entries for p in lu["players"][:2]}
+    check("the hitter stack constraint never leaks into the 2 pitcher slots -- pitchers are drawn from "
+          "every team in the pool, including MUL3-MUL6, which have no hitters at all",
+          bool({"MUL3", "MUL4", "MUL5", "MUL6"} & pitcher_teams_used),
+          str(pitcher_teams_used))
+
     print("\nContest generator: mass multi-entry economics (build_contest_entries)")
 
     # Regression fixture for the double/triple-counting bug: ranking a

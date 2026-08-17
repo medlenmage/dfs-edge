@@ -72,6 +72,37 @@ _OWNERSHIP_FLOOR = 0.5  # even an unowned player gets a sliver of sampling weigh
 _FPTS_SAMPLING_EXPONENT = 3.0
 _FPTS_FLOOR = 0.1
 
+# Named GPP stack shapes every generated lineup is deliberately built
+# toward -- team-group sizes only, largest first. A trailing size-1
+# group (e.g. "5-2-1"'s final "1") isn't a real constraint -- a single
+# player has nothing to stack with -- so it's represented the same as
+# the shape one size shorter ("5-2-1" -> [5, 2], same as "5-2" would
+# be); the leftover slot is just an ordinary free pick like any
+# partial shape's leftovers, same as optimizer.py's own stack-shape
+# feature already treats them. Left unconstrained (no shape at all)
+# isn't offered here on purpose -- without this, independent per-slot
+# sampling produced all sorts of shapes nobody would actually build for
+# a real GPP (single mega-stacks, no-stack spreads across 8 teams),
+# unevenly and without any deliberate control.
+STACK_SHAPES: list[list[int]] = [
+    [5, 3],
+    [5, 2],  # "5-2-1"
+    [5],
+    [4, 4],
+    [4, 3],
+    [4, 2, 2],
+    [4, 2],
+    [3, 3, 2],
+    [3, 3],
+]
+# Weighted toward the shapes that most often win real large-field GPPs
+# (5-3, 5-2-1) without ruling the rest out entirely -- simple rank-based
+# decay, first-listed shape heaviest, ~5x the last-listed shape's
+# weight. Tune the decay constant here if the mix needs to shift;
+# nothing else needs to change.
+_STACK_SHAPE_DECAY = 0.8
+STACK_SHAPE_WEIGHTS: list[float] = [_STACK_SHAPE_DECAY**i for i in range(len(STACK_SHAPES))]
+
 # Named presets covering the common DK contest shapes. `rake_pct` and
 # the payout curve below are a simplified, clearly-approximate model of
 # how real payout tables behave (top-heavy for GPPs, flat for
@@ -124,6 +155,117 @@ def _fpts_weight(p: dict[str, Any]) -> float:
     return max(p["projected_fpts"], _FPTS_FLOOR) ** _FPTS_SAMPLING_EXPONENT
 
 
+def _team_hitter_pools(
+    candidates_by_slot: dict[str, list[dict[str, Any]]], slot_order: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    Distinct hitters (deduplicated by id, since a multi-eligible player
+    shows up under more than one slot's candidate list) available per
+    team, across every non-pitcher slot -- the pool _pick_stack_teams()
+    assigns stack groups from, and a cheap proxy for whether a team can
+    plausibly support a given group size at all.
+    """
+    hitter_slot_types = set(slot_order[SLOT_REQUIREMENTS["P"] :])
+    by_team: dict[str, dict[int, dict[str, Any]]] = {}
+    for slot in hitter_slot_types:
+        for p in candidates_by_slot[slot]:
+            by_team.setdefault(p["team"], {})[p["id"]] = p
+    return {team: list(players.values()) for team, players in by_team.items()}
+
+
+def _feasible_stack_shapes(
+    team_hitter_pools: dict[str, list[dict[str, Any]]],
+) -> tuple[list[list[int]], list[float]]:
+    """
+    STACK_SHAPES/STACK_SHAPE_WEIGHTS filtered down to only shapes this
+    specific candidate pool could possibly satisfy -- a shape needing
+    more team-groups than there are distinct teams with any hitters at
+    all, or whose biggest group needs more hitters than even the
+    deepest team has, can never succeed no matter how many random
+    attempts it gets. Excluding those up front matters because a
+    structurally-impossible shape would otherwise burn every one of a
+    lineup's retry attempts on a guaranteed failure -- and
+    generate_field()/generate_entries() give up on the *whole batch*
+    once a single lineup slot exhausts its retries, so one unlucky
+    infeasible shape draw could silently cut a large request short.
+    Real slates have plenty of teams and depth for this to rarely
+    matter in practice; a single-game slate (2 teams) or a team with a
+    thin confirmed lineup is where it actually kicks in. Pairs each
+    shape's groups (sorted largest-first) against the pool's team
+    sizes (also sorted largest-first) -- the same best-case pairing
+    _pick_stack_teams() would need to succeed, so this is a tight,
+    cheap necessary condition, not just a rough guess.
+    """
+    team_sizes = sorted((len(players) for players in team_hitter_pools.values()), reverse=True)
+    shapes: list[list[int]] = []
+    weights: list[float] = []
+    for shape, weight in zip(STACK_SHAPES, STACK_SHAPE_WEIGHTS):
+        sorted_shape = sorted(shape, reverse=True)
+        if len(sorted_shape) <= len(team_sizes) and all(
+            size <= team_size for size, team_size in zip(sorted_shape, team_sizes)
+        ):
+            shapes.append(shape)
+            weights.append(weight)
+    return shapes, weights
+
+
+def _pick_stack_shape(
+    shapes: list[list[int]], weights: list[float], rng: random.Random
+) -> list[int] | None:
+    """
+    One of `shapes` (weighted by `weights`) -- pass the result of
+    _feasible_stack_shapes() for this specific candidate pool. Returns
+    None if no shape is feasible at all (e.g. even the thinnest team
+    has fewer hitters than the smallest shape needs); the caller should
+    fall back to fully unconstrained sampling for that lineup rather
+    than fail it outright.
+    """
+    if not shapes:
+        return None
+    return rng.choices(shapes, weights=weights, k=1)[0]
+
+
+def _pick_stack_teams(
+    team_hitter_pools: dict[str, list[dict[str, Any]]],
+    groups: list[int],
+    weight_fn: Callable[[dict[str, Any]], float],
+    rng: random.Random,
+) -> dict[str, int] | None:
+    """
+    Assign each of `groups`' sizes to a real team, largest group first --
+    weighted toward whichever teams carry the most aggregate `weight_fn`
+    signal (ownership%/projected points) among their available hitters,
+    so a stack still tends to land on the teams that would realistically
+    get stacked. A team already claimed by a bigger group in this same
+    lineup is excluded from smaller ones; a team without enough distinct
+    hitters to plausibly fill a group is excluded outright. Returns None
+    when no feasible team exists for some group -- the caller
+    (_sample_one_lineup) returns None too, and the per-lineup retry loop
+    tries again with a fresh team assignment for the *same* shape (see
+    generate_field()/generate_entries() -- the shape itself is picked
+    once per lineup, outside this retry loop, precisely so a genuinely
+    harder shape like 5-3 gets a fair, dedicated shot instead of losing
+    out to whichever easier shape happens to get rolled on a given
+    attempt).
+    """
+    assigned: dict[str, int] = {}
+    used_teams: set[str] = set()
+    for size in groups:
+        candidates = {
+            team: players
+            for team, players in team_hitter_pools.items()
+            if team not in used_teams and len(players) >= size
+        }
+        if not candidates:
+            return None
+        teams = list(candidates)
+        weights = [sum(weight_fn(p) for p in candidates[t]) for t in teams]
+        team = rng.choices(teams, weights=weights, k=1)[0]
+        assigned[team] = size
+        used_teams.add(team)
+    return assigned
+
+
 def _sample_one_lineup(
     candidates_by_slot: dict[str, list[dict[str, Any]]],
     slot_order: list[str],
@@ -131,6 +273,8 @@ def _sample_one_lineup(
     weight_fn: Callable[[dict[str, Any]], float],
     *,
     excluded_ids: frozenset[int] = frozenset(),
+    team_hitter_pools: dict[str, list[dict[str, Any]]] | None = None,
+    stack_groups: list[int] | None = None,
 ) -> dict[str, Any] | None:
     """
     Build one randomly-weighted lineup within the salary cap. At each
@@ -140,9 +284,28 @@ def _sample_one_lineup(
     possible player at every remaining slot -- a standard feasible
     random-roster-construction technique. `excluded_ids` removes
     players entirely (e.g. ones that have hit an exposure cap).
+
+    `stack_groups`/`team_hitter_pools`, if both given, constrain this
+    lineup's 8 hitters to the caller-chosen shape via _pick_stack_teams()
+    -- a needed team's eligible players are preferred at each HITTER
+    slot until that team's group is filled (the 2 pitcher slots are
+    never constrained by this -- a stack is a hitter-only concept),
+    falling back to an ordinary unconstrained pick once every group is
+    satisfied (or immediately, for a partial shape's genuine leftover
+    slots). If the chosen shape's groups can't all be filled by the time
+    every slot is walked, the whole attempt fails just like any other
+    infeasible random walk here.
+
     Returns None if this particular random walk couldn't complete; the
     caller just retries.
     """
+    stack_remaining: dict[str, int] = {}
+    if stack_groups is not None and team_hitter_pools is not None:
+        assignment = _pick_stack_teams(team_hitter_pools, stack_groups, weight_fn, rng)
+        if assignment is None:
+            return None
+        stack_remaining = assignment
+
     used_ids: set[int] = set()
     picks: list[dict[str, Any]] = []
     salary_so_far = 0
@@ -154,6 +317,13 @@ def _sample_one_lineup(
         ]
         if not eligible:
             return None
+
+        if slot != "P":
+            needed_teams = {t for t, n in stack_remaining.items() if n > 0}
+            if needed_teams:
+                restricted = [p for p in eligible if p["team"] in needed_teams]
+                if restricted:
+                    eligible = restricted
 
         min_cost_of_rest = sum(
             min(
@@ -177,6 +347,11 @@ def _sample_one_lineup(
         picks.append(pick)
         used_ids.add(pick["id"])
         salary_so_far += pick["salary"]
+        if stack_remaining.get(pick["team"], 0) > 0:
+            stack_remaining[pick["team"]] -= 1
+
+    if any(n > 0 for n in stack_remaining.values()):
+        return None  # couldn't fully satisfy the chosen shape's team groups -- caller retries
 
     stack_type, stack = stack_info({"players": picks})
     return {
@@ -253,13 +428,28 @@ def generate_field(
         raise ContestError(f"sample_size can't exceed {MAX_SAMPLE_SIZE}.")
 
     candidates_by_slot, slot_order = _build_candidate_pool(slate, included_game_pks)
+    team_hitter_pools = _team_hitter_pools(candidates_by_slot, slot_order)
+    feasible_shapes, feasible_weights = _feasible_stack_shapes(team_hitter_pools)
 
     rng = random.Random(seed)
     field: list[dict[str, Any]] = []
     for _ in range(sample_size):
+        # Picked once per lineup, outside the retry loop below, so a
+        # genuinely harder shape (5-3, needing 5 salary-expensive
+        # hitters from one team) gets max_attempts_per_lineup real
+        # shots at a working team assignment instead of losing out to
+        # whichever easier shape happens to get rolled on a given retry.
+        shape = _pick_stack_shape(feasible_shapes, feasible_weights, rng)
         lineup = None
         for _ in range(max_attempts_per_lineup):
-            lineup = _sample_one_lineup(candidates_by_slot, slot_order, rng, _ownership_weight)
+            lineup = _sample_one_lineup(
+                candidates_by_slot,
+                slot_order,
+                rng,
+                _ownership_weight,
+                team_hitter_pools=team_hitter_pools,
+                stack_groups=shape,
+            )
             if lineup is not None:
                 break
         if lineup is not None:
@@ -306,6 +496,8 @@ def generate_entries(
         raise ContestError(f"num_lineups can't exceed {MAX_USER_LINEUPS:,}.")
 
     candidates_by_slot, slot_order = _build_candidate_pool(slate, included_game_pks)
+    team_hitter_pools = _team_hitter_pools(candidates_by_slot, slot_order)
+    feasible_shapes, feasible_weights = _feasible_stack_shapes(team_hitter_pools)
 
     def _cap_to_count(pct: float) -> int:
         return max(1, round(pct / 100 * num_lineups))
@@ -317,10 +509,19 @@ def generate_entries(
     entries: list[dict[str, Any]] = []
 
     for _ in range(num_lineups):
+        # Picked once per lineup, outside the retry loop below -- see
+        # generate_field()'s matching comment for why.
+        shape = _pick_stack_shape(feasible_shapes, feasible_weights, rng)
         lineup = None
         for _ in range(max_attempts_per_lineup):
             candidate = _sample_one_lineup(
-                candidates_by_slot, slot_order, rng, _fpts_weight, excluded_ids=frozenset(capped_ids)
+                candidates_by_slot,
+                slot_order,
+                rng,
+                _fpts_weight,
+                excluded_ids=frozenset(capped_ids),
+                team_hitter_pools=team_hitter_pools,
+                stack_groups=shape,
             )
             if candidate is None or candidate["player_ids"] in seen_signatures:
                 continue
