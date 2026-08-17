@@ -140,3 +140,69 @@ async def player_outcome_pool(
     return await cache.cached(
         f"variance:pool:{player_id}:{season}:{position}", settings.ttl_game_logs, _load
     )
+
+
+# --------------------------------------------------------------------------
+# Team correlation (Phase 3)
+# --------------------------------------------------------------------------
+#
+# A team's whole offense having a big or small day together is why
+# stacking exists as a GPP strategy in the first place -- a variance
+# model that samples every player fully independently would make it
+# pointless, since a big Yankees game wouldn't make Yankees hitters any
+# more likely to all do well together. This is a deliberately simple
+# v1 (same "clearly-labeled approximation, not a data-derived model"
+# philosophy contest.py's payout curve already uses, not a full
+# paired-game covariance model): a team's day is a single multiplier,
+# drawn once per Monte Carlo trial, that biases which percentile of
+# EACH of that team's hitters' own outcome pool gets sampled that
+# trial -- correlated *within* a team and trial, independent *across*
+# teams and trials. Pitchers aren't correlated to their own offense
+# this way; a start is a mostly-independent event from the team's own
+# hitting day, so Phase 4's simulator should sample a pitcher's outcome
+# uniformly from his own pool instead of through these functions.
+
+TEAM_MULTIPLIER_MEAN = 1.0
+TEAM_MULTIPLIER_STD = 0.28
+TEAM_MULTIPLIER_MIN = 0.25
+TEAM_MULTIPLIER_MAX = 2.25
+
+# How much a team multiplier away from 1.0 shifts which percentile of
+# a hitter's own history dominates sampling that trial.
+PERCENTILE_SENSITIVITY = 1.0
+
+# Stdev of random jitter around that target percentile, as a fraction
+# of the pool length -- keeps real day-to-day randomness even on a
+# good or bad team day (nobody homers every time their team scores a
+# lot, nobody goes hitless every time it doesn't).
+JITTER_FRACTION = 0.22
+
+
+def team_environment_multiplier(rng: random.Random) -> float:
+    """One team's overall day for one Monte Carlo trial -- sample once
+    per team per trial, not per player, and reuse the same value for
+    every hitter on that team in that trial."""
+    m = rng.gauss(TEAM_MULTIPLIER_MEAN, TEAM_MULTIPLIER_STD)
+    return max(TEAM_MULTIPLIER_MIN, min(TEAM_MULTIPLIER_MAX, m))
+
+
+def sample_correlated_outcome(
+    sorted_pool: list[float], multiplier: float, rng: random.Random
+) -> float:
+    """
+    One hitter's simulated outcome for a trial, biased toward the
+    better (multiplier > 1) or worse (multiplier < 1) end of his own
+    outcome pool.
+
+    `sorted_pool` must already be sorted ascending -- sort a player's
+    pool once and reuse it across every trial in a batch, rather than
+    re-sorting on every single draw, since Phase 4 will call this many
+    thousands of times per player.
+    """
+    n = len(sorted_pool)
+    if n <= 1:
+        return sorted_pool[0] if sorted_pool else 0.0
+    target_pct = min(1.0, max(0.0, 0.5 + (multiplier - 1.0) * PERCENTILE_SENSITIVITY))
+    target_idx = target_pct * (n - 1)
+    idx = round(target_idx + rng.gauss(0, JITTER_FRACTION * n))
+    return sorted_pool[min(n - 1, max(0, idx))]
