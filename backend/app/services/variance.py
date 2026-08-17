@@ -32,6 +32,7 @@ games, never a fabricated number.
 
 from __future__ import annotations
 
+import asyncio
 import random
 from typing import Any
 
@@ -41,7 +42,7 @@ from app import cache
 from app.clients import mlb
 from app.config import get_settings
 from app.services import mlb_dk_points
-from app.services.lineup_export import players_in_slot_order
+from app.services.lineup_export import SLOT_LABELS, players_in_slot_order
 from app.services.optimizer import SLOT_REQUIREMENTS
 
 # Games before a player's own history is trusted on its own -- pitchers
@@ -210,6 +211,29 @@ def sample_correlated_outcome(
     target_idx = target_pct * (n - 1)
     idx = round(target_idx + rng.gauss(0, JITTER_FRACTION * n))
     return sorted_pool[min(n - 1, max(0, idx))]
+
+
+async def player_pools_for_entries(
+    lineups: list[dict[str, Any]], season: int
+) -> dict[int, list[float]]:
+    """
+    Fetch (and cache-populate) player_outcome_pool() for every unique
+    player id appearing anywhere across a batch of lineups/entries --
+    builds the `player_pools` dict simulate_batch() needs. Position is
+    read off each player's own roster slot in the lineup (via
+    lineup_export.SLOT_LABELS, stripped of its numbering -- "OF2" ->
+    "OF") rather than looked up separately, since that's the same
+    "assigned slot" every other part of this app already uses for a
+    multi-eligible player.
+    """
+    positions: dict[int, str] = {}
+    for lineup in lineups:
+        for label, p in zip(SLOT_LABELS, players_in_slot_order(lineup)):
+            positions.setdefault(p["id"], label.rstrip("0123456789"))
+
+    ids = list(positions)
+    pools = await asyncio.gather(*(player_outcome_pool(pid, positions[pid], season) for pid in ids))
+    return dict(zip(ids, pools))
 
 
 # --------------------------------------------------------------------------

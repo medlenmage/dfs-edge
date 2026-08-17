@@ -1909,6 +1909,96 @@ async def main() -> int:
         check("simulate_batch raises a clear error when a player's outcome pool is missing",
               "outcome pool" in str(exc), str(exc))
 
+    print("\nContest generator: simulated economics (contest.py evaluate_batch_simulated)")
+
+    import numpy as np_test
+
+    # Cross-check the vectorized per-trial "distinct rank" math against
+    # a naive brute-force Python loop over trials -- the closed-form
+    # cumulative-max recurrence is the one genuinely tricky piece of
+    # Phase 5's math, so this verifies it directly rather than trusting
+    # the derivation on paper.
+    rank_rng = np_test.random.default_rng(11)
+    ref_entry_sim = rank_rng.normal(50, 15, size=(4, 30))
+    ref_field_sim = rank_rng.normal(50, 15, size=(6, 30))
+    ref_field_size = 100
+    ref_sample_size = ref_field_sim.shape[0]
+    ref_num_entries, ref_num_trials = ref_entry_sim.shape
+
+    ref_field_sorted = np_test.sort(ref_field_sim, axis=0)
+    ref_beaten = np_test.empty((ref_num_entries, ref_num_trials), dtype=np_test.int64)
+    for t in range(ref_num_trials):
+        ref_beaten[:, t] = np_test.searchsorted(ref_field_sorted[:, t], ref_entry_sim[:, t], side="left")
+    ref_pct_rank = np_test.clip(
+        np_test.round((1 - ref_beaten / ref_sample_size) * ref_field_size), 1, ref_field_size
+    ).astype(np_test.int64)
+    ref_order = np_test.argsort(-ref_entry_sim, axis=0)
+    ref_sorted_pct = np_test.take_along_axis(ref_pct_rank, ref_order, axis=0)
+    ref_positions = np_test.arange(ref_num_entries)[:, None]
+    ref_distinct_sorted = np_test.minimum(
+        np_test.maximum.accumulate(ref_sorted_pct - ref_positions, axis=0) + ref_positions, ref_field_size
+    )
+    vectorized_rank = np_test.empty_like(ref_distinct_sorted)
+    np_test.put_along_axis(vectorized_rank, ref_order, ref_distinct_sorted, axis=0)
+
+    brute_rank = np_test.empty_like(vectorized_rank)
+    for t in range(ref_num_trials):
+        field_t = sorted(ref_field_sim[:, t].tolist())
+        order_t = sorted(range(ref_num_entries), key=lambda i: -ref_entry_sim[i, t])
+        prev = 0
+        for i in order_t:
+            beaten_i = sum(1 for fv in field_t if ref_entry_sim[i, t] > fv)
+            pct = min(max(round((1 - beaten_i / ref_sample_size) * ref_field_size), 1), ref_field_size)
+            rank = min(max(pct, prev + 1), ref_field_size)
+            prev = rank
+            brute_rank[i, t] = rank
+
+    check("evaluate_batch_simulated's vectorized per-trial distinct-rank math matches a brute-force per-trial reference",
+          (vectorized_rank == brute_rank).all(),
+          str((vectorized_rank[:, 0].tolist(), brute_rank[:, 0].tolist())))
+
+    async def fake_any_player_game_log(player_id, season, group="hitting"):
+        if group == "pitching":
+            return [
+                {"game_date": f"2099-04-{i:02d}", "outs": 18, "strikeouts": 6, "wins": 0,
+                 "earned_runs": 2, "hits_against": 6, "walks_against": 1, "hit_batsmen": 0,
+                 "complete_games": 0, "shutouts": 0}
+                for i in range(1, 21)
+            ]
+        return [
+            {"game_date": f"2099-04-{i:02d}", "plate_appearances": 4, "hits": 1, "doubles": 0,
+             "triples": 0, "home_runs": 0, "rbi": 1, "runs": 1, "walks": 0, "hit_by_pitch": 0,
+             "stolen_bases": 0}
+            for i in range(1, 21)
+        ]
+
+    mlb.get_player_game_log = fake_any_player_game_log
+
+    sim_batch = await contest.build_contest_entries_simulated(
+        mul_slate, "gpp_small", 10, season=2099, num_trials=300, sample_size=40, seed=31
+    )
+    check("build_contest_entries_simulated builds the requested number of entries",
+          sim_batch["num_entries_built"] == 10, sim_batch["num_entries_built"])
+    check("build_contest_entries_simulated reports num_trials actually run",
+          sim_batch["num_trials"] == 300, sim_batch["num_trials"])
+    cash_pcts = [r["cash_probability_pct"] for r in sim_batch["results"]]
+    check("every entry's simulated cash probability is a valid percentage",
+          all(0.0 <= c <= 100.0 for c in cash_pcts), str(cash_pcts))
+    # Payout is zero-inflated (most trials don't cash) with rare large
+    # spikes when they do, so its mean can legitimately sit above the
+    # 90th percentile -- p10 <= p90 (percentiles are self-consistent)
+    # and every value is a non-negative real payout are what's actually
+    # guaranteed, not p10 <= mean <= p90.
+    check("every entry's simulated payout p10 <= p90, and all payout figures are non-negative",
+          all(
+              0 <= r["payout_p10"] <= r["payout_p90"] and r["expected_payout"] >= 0
+              for r in sim_batch["results"]
+          ),
+          str([(r["payout_p10"], r["expected_payout"], r["payout_p90"]) for r in sim_batch["results"]]))
+    check("build_contest_entries_simulated's avg_cash_probability_pct matches its own per-entry results",
+          abs(sim_batch["summary"]["avg_cash_probability_pct"] - sum(cash_pcts) / len(cash_pcts)) < 0.15,
+          str((sim_batch["summary"]["avg_cash_probability_pct"], round(sum(cash_pcts) / len(cash_pcts), 1))))
+
     print("\nJSON serialisation")
     import json
 
