@@ -4,9 +4,9 @@ full batch off to an external process (a Monte Carlo simulator, another
 Claude session working from the file, a spreadsheet) rather than
 working through the small JSON payload the UI itself renders.
 
-One row per lineup. One column-group per DK Classic MLB roster slot
-(name, team, salary, projected points, ownership%), plus lineup-level
-totals and -- when the batch was ranked against a contest field -- the
+One row per lineup: each roster slot's player name, lineup-level
+totals (salary used, stack shape/teams, projected points, ownership%),
+and -- when the batch was ranked against a contest field -- the
 per-lineup rank/cash/payout estimate too. Handles both shapes already
 in this codebase: optimizer.py's lineups (players grouped under
 `slots` by roster position) and contest.py's entries (a flat `players`
@@ -29,6 +29,38 @@ SLOT_LABELS: list[str] = [
     for slot, count in SLOT_REQUIREMENTS.items()
     for i in range(count)
 ]
+
+
+def stack_info(lineup: dict[str, Any]) -> tuple[str, str]:
+    """
+    Derive a lineup's stack shape and stacked teams from its actual
+    hitter composition (the 8 non-pitcher roster slots) -- not from any
+    intended stack_groups/stack_teams input, so it works for a lineup
+    built any way (optimizer.py's explicit stack constraints,
+    contest.py's weighted random construction, or anything else),
+    since it's purely a property of which teams ended up in the
+    roster. A "stack" is any team supplying 2+ of the 8 hitters,
+    ordered largest group first (ties broken by first appearance in
+    roster order) the way DFS players talk about a primary/secondary/
+    tertiary stack -- e.g. 5 Yankees + 3 Braves is stack_type "5-3",
+    stack "NYY,ATL". No team supplying 2+ hitters means no stack --
+    both values come back as an empty string.
+    """
+    hitters = players_in_slot_order(lineup)[SLOT_REQUIREMENTS["P"] :]
+    teams_seen: list[str] = []
+    counts: dict[str, int] = {}
+    for p in hitters:
+        team = p.get("team")
+        if team not in counts:
+            teams_seen.append(team)
+        counts[team] = counts.get(team, 0) + 1
+
+    groups = [(counts[t], t) for t in teams_seen if counts[t] >= 2]
+    groups.sort(key=lambda g: -g[0])
+
+    stack_type = "-".join(str(size) for size, _ in groups)
+    stack = ",".join(team for _, team in groups)
+    return stack_type, stack
 
 
 def players_in_slot_order(lineup: dict[str, Any]) -> list[dict[str, Any]]:
@@ -92,9 +124,8 @@ def lineups_to_csv(
     first) should sort before calling this.
     """
     buf = io.StringIO()
-    fieldnames = ["lineup_index", "salary_used", "projected_points", "total_ownership_pct"]
-    for label in SLOT_LABELS:
-        fieldnames += [f"{label}_name", f"{label}_team", f"{label}_salary", f"{label}_proj_fpts", f"{label}_own_pct"]
+    fieldnames = ["lineup_index", "salary_used", "stack_type", "stack", "projected_points", "total_ownership_pct"]
+    fieldnames += [f"{label}_name" for label in SLOT_LABELS]
     simulated = bool(results) and "cash_probability_pct" in results[0]
     if results is not None:
         fieldnames += _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS
@@ -104,18 +135,17 @@ def lineups_to_csv(
 
     for i, lineup in enumerate(lineups):
         players = players_in_slot_order(lineup)
+        stack_type, stack = stack_info(lineup)
         row: dict[str, Any] = {
             "lineup_index": i,
             "salary_used": lineup.get("salary_used"),
+            "stack_type": stack_type,
+            "stack": stack,
             "projected_points": lineup.get("projected_points"),
             "total_ownership_pct": lineup.get("total_ownership_pct"),
         }
         for label, p in zip(SLOT_LABELS, players):
             row[f"{label}_name"] = p.get("name")
-            row[f"{label}_team"] = p.get("team")
-            row[f"{label}_salary"] = p.get("salary")
-            row[f"{label}_proj_fpts"] = p.get("projected_fpts")
-            row[f"{label}_own_pct"] = p.get("ownership_pct")
         if results is not None:
             r = results[i]
             for field in _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS:

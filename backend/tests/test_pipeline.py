@@ -1626,6 +1626,38 @@ async def main() -> int:
           all("projected_fpts" in p and "ownership_pct" in p for lu in enriched for p in lu["players"]),
           str(enriched[0]["players"][0]))
 
+    print("\nStack shape/teams derivation (lineup_export.stack_info)")
+
+    five_three = {
+        "players": [
+            {"name": "P1", "team": "BOS"}, {"name": "P2", "team": "BOS"},
+            {"name": "C1", "team": "NYY"}, {"name": "H1", "team": "NYY"},
+            {"name": "H2", "team": "NYY"}, {"name": "H3", "team": "NYY"},
+            {"name": "H4", "team": "NYY"}, {"name": "H5", "team": "ATL"},
+            {"name": "H6", "team": "ATL"}, {"name": "H7", "team": "ATL"},
+        ]
+    }
+    check("stack_info reads a 5-3 stack correctly, primary team first, pitchers excluded",
+          lineup_export.stack_info(five_three) == ("5-3", "NYY,ATL"),
+          str(lineup_export.stack_info(five_three)))
+
+    tied_stack = {
+        "players": [
+            {"name": "P1", "team": "BOS"}, {"name": "P2", "team": "BOS"},
+            {"name": "H1", "team": "ATL"}, {"name": "H2", "team": "ATL"},
+            {"name": "H3", "team": "ATL"}, {"name": "H4", "team": "ATL"},
+            {"name": "H5", "team": "NYY"}, {"name": "H6", "team": "NYY"},
+            {"name": "H7", "team": "NYY"}, {"name": "H8", "team": "NYY"},
+        ]
+    }
+    check("stack_info breaks a tied group size by first appearance in roster order (4-4, ATL before NYY)",
+          lineup_export.stack_info(tied_stack) == ("4-4", "ATL,NYY"),
+          str(lineup_export.stack_info(tied_stack)))
+
+    no_stack = {"players": [{"name": f"p{i}", "team": f"T{i}"} for i in range(10)]}
+    check("stack_info reports no stack (empty strings) when no team supplies 2+ hitters",
+          lineup_export.stack_info(no_stack) == ("", ""), str(lineup_export.stack_info(no_stack)))
+
     print("\nLineup CSV export (for handing a batch off to an external simulator)")
 
     import csv as csv_module
@@ -1636,8 +1668,11 @@ async def main() -> int:
     opt_csv_rows = list(csv_module.DictReader(io_module.StringIO(opt_csv)))
     check("lineups_to_csv produces one data row per optimizer lineup",
           len(opt_csv_rows) == 1, str(len(opt_csv_rows)))
-    check("lineups_to_csv has a column-group per DK roster slot (P1/P2/C/1B/2B/3B/SS/OF1/OF2/OF3)",
+    check("lineups_to_csv has one name column per DK roster slot (P1/P2/C/1B/2B/3B/SS/OF1/OF2/OF3)",
           all(f"{label}_name" in opt_csv_rows[0] for label in lineup_export.SLOT_LABELS),
+          str(sorted(opt_csv_rows[0].keys())))
+    check("lineups_to_csv no longer carries per-player team/salary/proj_fpts/own_pct sub-columns",
+          not any(k.endswith(("_team", "_salary", "_proj_fpts", "_own_pct")) for k in opt_csv_rows[0]),
           str(sorted(opt_csv_rows[0].keys())))
     p1_name_in_csv = opt_csv_rows[0]["P1_name"]
     p1_name_in_lineup = opt_lineup["slots"]["P"][0]["name"]
@@ -1645,17 +1680,27 @@ async def main() -> int:
           p1_name_in_csv == p1_name_in_lineup, str((p1_name_in_csv, p1_name_in_lineup)))
     check("lineup-level totals (salary_used, projected_points) are carried into the CSV row",
           float(opt_csv_rows[0]["salary_used"]) == opt_lineup["salary_used"], opt_csv_rows[0]["salary_used"])
+    check("lineups_to_csv's stack_type/stack columns match stack_info() computed directly on the lineup",
+          (opt_csv_rows[0]["stack_type"], opt_csv_rows[0]["stack"]) == lineup_export.stack_info(opt_lineup),
+          str(((opt_csv_rows[0]["stack_type"], opt_csv_rows[0]["stack"]), lineup_export.stack_info(opt_lineup))))
 
     batch_for_csv = contest.build_contest_entries(mul_slate, "gpp_small", 5, sample_size=50, seed=23)
+    check("contest-generator entries carry their own stack_type/stack fields, matching stack_info()",
+          all(
+              (e["stack_type"], e["stack"]) == lineup_export.stack_info(e)
+              for e in batch_for_csv["entries"]
+          ),
+          str([(e["stack_type"], e["stack"]) for e in batch_for_csv["entries"][:3]]))
     entries_csv = lineup_export.lineups_to_csv(batch_for_csv["entries"], results=batch_for_csv["results"])
     entries_csv_rows = list(csv_module.DictReader(io_module.StringIO(entries_csv)))
     check("lineups_to_csv produces one data row per contest-generator entry",
           len(entries_csv_rows) == 5, str(len(entries_csv_rows)))
     check("the contest generator's flat `players` shape is already in roster order, no reordering needed",
           entries_csv_rows[0]["P1_name"] == batch_for_csv["entries"][0]["players"][0]["name"])
-    check("per-player proj_fpts/own_pct columns are populated for contest-generator entries",
-          entries_csv_rows[0]["P1_proj_fpts"] != '' and entries_csv_rows[0]["P1_own_pct"] != '',
-          str(entries_csv_rows[0]))
+    check("the CSV's stack_type/stack columns for a contest-generator entry match its own attached fields",
+          (entries_csv_rows[0]["stack_type"], entries_csv_rows[0]["stack"])
+          == (batch_for_csv["entries"][0]["stack_type"], batch_for_csv["entries"][0]["stack"]),
+          str((entries_csv_rows[0]["stack_type"], entries_csv_rows[0]["stack"])))
     check("results (rank/cash/payout), when given, are appended as extra columns",
           "estimated_rank" in entries_csv_rows[0] and "in_the_money" in entries_csv_rows[0]
           and "estimated_payout" in entries_csv_rows[0],

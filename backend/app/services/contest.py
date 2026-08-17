@@ -56,6 +56,7 @@ from typing import Any
 import numpy as np
 
 from app.services import variance
+from app.services.lineup_export import stack_info
 from app.services.optimizer import SALARY_CAP, SLOT_REQUIREMENTS, SLOT_TYPES, build_player_pool
 
 MAX_SAMPLE_SIZE = 5000
@@ -177,8 +178,11 @@ def _sample_one_lineup(
         used_ids.add(pick["id"])
         salary_so_far += pick["salary"]
 
+    stack_type, stack = stack_info({"players": picks})
     return {
         "salary_used": salary_so_far,
+        "stack_type": stack_type,
+        "stack": stack,
         "projected_points": round(sum(p["projected_fpts"] for p in picks), 2),
         "total_ownership_pct": round(sum(p["ownership_pct"] for p in picks), 1),
         "players": [
