@@ -942,12 +942,112 @@ async def build_contest_entries_simulated(
     }
 
 
-async def build_dk_entries_simulated(
-    slate: dict[str, Any],
-    filled_entries: list[dict[str, Any]],
+async def evaluate_field_mirrored(
+    field_lineups: list[dict[str, Any]],
+    contest: dict[str, Any],
     *,
     season: int,
-    num_entries_total: int,
+    num_trials: int = 10_000,
+    seed: int | None = None,
+    first_place_pct: float | None = None,
+) -> dict[str, Any]:
+    """
+    Simulate `field_lineups` -- an ownership-weighted SAMPLE standing in
+    for a real contest's entire field (same construction generate_field()
+    already uses to model what actual public rosters look like: chalk-
+    heavy, duplicates allowed) -- as one self-contained population: every
+    lineup ranked against every OTHER lineup in the same simulated trial,
+    not against a separately generated "my entries" batch the way
+    evaluate_batch_simulated works. Every sampled lineup gets its own
+    cash probability/ROI/etc., meant for browsing the whole simulated
+    field to see which archetypes actually perform -- not for ranking a
+    specific handful of "your" entries.
+
+    `contest["field_size"]` is the REAL contest's total entry count,
+    almost always larger than `len(field_lineups)` (capped for
+    performance, same "simulate a sample, project onto the real size"
+    approach the rest of this module already uses for a field too large
+    to fully enumerate). Each sampled lineup's rank *within the sample*
+    is projected onto the real field_size by simple linear
+    interpolation -- rank k of sample_size maps to
+    round(1 + (k-1) * (field_size-1) / (sample_size-1)) -- which is
+    exact and collision-free (strictly increasing in k) as long as
+    field_size >= sample_size, unlike evaluate_batch_simulated's
+    situation of reconciling two independently-sampled populations.
+    """
+    if not field_lineups:
+        raise ContestError("Need at least one lineup to simulate.")
+
+    field_size = contest["field_size"]
+    entry_fee = contest["entry_fee"]
+    sample_size = len(field_lineups)
+    if sample_size > field_size:
+        raise ContestError(
+            f"Can't simulate {sample_size:,} lineups against a field_size of only {field_size:,}."
+        )
+    paid_count = max(1, round(field_size * contest["payout_pct"]))
+    prize_pool = contest.get("prize_pool") or round(field_size * entry_fee * (1 - RAKE_PCT), 2)
+    payouts = np.array(_custom_payout_curve(paid_count, prize_pool, contest["shape"], first_place_pct))
+
+    player_pools = await variance.player_pools_for_entries(field_lineups, season)
+    sim = variance.simulate_batch(field_lineups, player_pools, num_trials=num_trials, seed=seed)
+
+    order = np.argsort(-sim, axis=0)  # best-to-worst lineup index per trial
+    if sample_size > 1:
+        real_ranks_by_k = 1 + np.floor(
+            np.arange(sample_size) * (field_size - 1) / (sample_size - 1)
+        ).astype(np.int64)
+    else:
+        real_ranks_by_k = np.array([1])
+    final_rank = np.empty_like(order)
+    np.put_along_axis(final_rank, order, real_ranks_by_k[:, None], axis=0)
+
+    top_1pct_threshold = max(1, round(0.01 * field_size))
+    top_10pct_threshold = max(1, round(0.10 * field_size))
+    in_the_money = final_rank <= paid_count
+    first_place = final_rank == 1
+    top_1pct = final_rank <= top_1pct_threshold
+    top_10pct = final_rank <= top_10pct_threshold
+    payout_index = np.clip(final_rank - 1, 0, paid_count - 1)
+    payout_per_trial = np.where(in_the_money, payouts[payout_index], 0.0)
+
+    results = []
+    for i in range(sample_size):
+        row = sim[i]
+        payout_row = payout_per_trial[i]
+        expected_payout = float(payout_row.mean())
+        results.append(
+            {
+                "lineup_index": i,
+                "cash_probability_pct": round(float(in_the_money[i].mean()) * 100, 1),
+                "first_place_pct": round(float(first_place[i].mean()) * 100, 2),
+                "top_1pct_pct": round(float(top_1pct[i].mean()) * 100, 2),
+                "top_10pct_pct": round(float(top_10pct[i].mean()) * 100, 2),
+                "expected_payout": round(expected_payout, 2),
+                "payout_p10": round(float(np.percentile(payout_row, 10)), 2),
+                "payout_p90": round(float(np.percentile(payout_row, 90)), 2),
+                "roi_pct": round((expected_payout - entry_fee) / entry_fee * 100, 1) if entry_fee else 0.0,
+                "simulated_points_mean": round(float(row.mean()), 2),
+                "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
+                "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
+            }
+        )
+
+    return {
+        "field_size": field_size,
+        "sample_size": sample_size,
+        "paid_count": paid_count,
+        "entry_fee": entry_fee,
+        "prize_pool": prize_pool,
+        "num_trials": num_trials,
+        "results": results,
+    }
+
+
+async def build_dk_entries_simulated(
+    slate: dict[str, Any],
+    *,
+    season: int,
     entry_fee: float,
     field_size: int,
     prize_pool: float,
@@ -955,57 +1055,36 @@ async def build_dk_entries_simulated(
     payout_pct: float = 0.20,
     shape: str = "top_heavy",
     num_trials: int = 10_000,
-    max_exposure_pct: float | None = None,
     sample_size: int | None = None,
     included_game_pks: list[int] | None = None,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """
-    Like build_contest_entries_simulated, but for a real contest you've
-    reserved entries into on DraftKings -- against that REAL contest's
-    own economics, rather than this app's own randomized entries
-    against a named preset.
+    Mirror a real DraftKings contest and simulate its whole field: an
+    ownership-weighted representative sample of field_size lineups
+    (generate_field() -- the same construction this app already uses to
+    model what a real public field actually looks like, chalk-heavy with
+    duplicates, not this app's own "individually strong and distinct"
+    construction), simulated as one self-contained population via
+    evaluate_field_mirrored() -- every lineup ranked against every OTHER
+    sampled lineup, not against a separately generated "my own entries"
+    batch. Returns every sampled lineup's own simulated cash probability/
+    ROI/etc., meant for browsing the results to see which archetypes
+    actually perform well in this specific contest and slate, and
+    picking which ones to submit yourself -- not a batch of entries this
+    app is claiming are "yours."
 
-    A DK entries export's real job here is establishing the baseline:
-    how many entries you have in the contest (num_entries_total, from
-    dk_entries.contest_summary()) and what each one costs (entry_fee,
-    read straight from the file). Most of a freshly-reserved contest's
-    entries have no lineup picked yet -- rather than treating that as
-    an error, this generates fresh lineups (the same randomized-but-
-    strong construction generate_entries() already uses for "Generate
-    entries" mode) to fill out every still-blank reservation, alongside
-    any entries you'd already filled in yourself
-    (`filled_entries`, resolved via dk_entries.resolve_entries()) --
-    then simulates the WHOLE batch together against the contest's real
-    prize_pool/first_place_pct (hand-entered, since a bulk entries
-    export has no payout-table data at all) and field_size (also the
-    real contest's total entry count, needed for the cash line and to
-    build a correctly-sized synthetic opponent field, same role it
-    plays everywhere else in this module).
+    entry_fee/field_size/prize_pool/first_place_pct describe the real
+    contest: entry_fee comes straight from the DK entries file (see
+    dk_entries.contest_summary()), the rest are hand-entered since a
+    bulk entries export has no payout-table data or field-size
+    information at all.
     """
-    if num_entries_total < len(filled_entries):
-        raise ContestError(
-            f"num_entries_total ({num_entries_total:,}) is smaller than the number of entries "
-            f"already filled in from the file ({len(filled_entries):,})."
-        )
-    num_to_generate = num_entries_total - len(filled_entries)
-    generated_entries: list[dict[str, Any]] = []
-    if num_to_generate > 0:
-        generated_entries = generate_entries(
-            slate,
-            num_to_generate,
-            max_exposure_pct=max_exposure_pct,
-            included_game_pks=included_game_pks,
-            seed=seed,
-        )
-    entries = filled_entries + generated_entries
-    if not entries:
-        raise ContestError("No entries to simulate -- couldn't generate any legal lineups from this pool.")
-    if field_size < num_entries_total:
-        raise ContestError(
-            f"field_size ({field_size:,}) can't be smaller than num_entries_total "
-            f"({num_entries_total:,}) -- your own entries are part of the field, not additional to it."
-        )
+    if field_size < 1:
+        raise ContestError("field_size must be at least 1.")
+
+    field_sample = sample_size or min(field_size, MAX_SAMPLE_SIZE)
+    field_lineups = generate_field(slate, field_sample, included_game_pks=included_game_pks, seed=seed)
 
     contest = {
         "entry_fee": entry_fee,
@@ -1014,12 +1093,8 @@ async def build_dk_entries_simulated(
         "shape": shape,
         "prize_pool": prize_pool,
     }
-    field_sample = sample_size or min(field_size, MAX_SAMPLE_SIZE)
-    field = generate_field(slate, field_sample, included_game_pks=included_game_pks, seed=seed)
-
-    evaluation = await evaluate_batch_simulated(
-        entries,
-        field,
+    evaluation = await evaluate_field_mirrored(
+        field_lineups,
         contest,
         season=season,
         num_trials=num_trials,
@@ -1027,8 +1102,8 @@ async def build_dk_entries_simulated(
         first_place_pct=first_place_pct,
     )
 
-    order = sorted(range(len(entries)), key=lambda i: -evaluation["results"][i]["roi_pct"])
-    entries = [entries[i] for i in order]
+    order = sorted(range(len(field_lineups)), key=lambda i: -evaluation["results"][i]["roi_pct"])
+    entries = [field_lineups[i] for i in order]
     evaluation = {
         **evaluation,
         "results": [{**evaluation["results"][i], "lineup_index": new_i} for new_i, i in enumerate(order)],
@@ -1045,10 +1120,7 @@ async def build_dk_entries_simulated(
 
     return {
         "contest": contest,
-        "num_entries_requested": num_entries_total,
         "num_entries_built": len(entries),
-        "num_entries_prefilled": len(filled_entries),
-        "num_entries_generated": len(generated_entries),
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
         "paid_count": evaluation["paid_count"],
@@ -1068,13 +1140,12 @@ async def build_dk_entries_simulated(
         "entries": entries,
         "results": evaluation["results"],
         "note": (
-            f"Cash probability and expected payout come from {evaluation['num_trials']:,} real "
-            "Monte Carlo simulated trials of each player's own historical outcome pool, with team "
-            "correlation for hitters, against this real contest's actual entry fee/prize pool. "
-            f"{len(generated_entries):,} of these {len(entries):,} lineups were generated by this "
-            f"app (the same fast randomized construction 'Generate entries' mode uses) to fill out "
-            f"still-blank reservations from the file; {len(filled_entries):,} were lineups you'd "
-            "already built yourself. prize_pool, first_place_pct, and field_size are hand-entered, "
-            "since a DraftKings entries export doesn't include the contest's payout table."
+            f"A {len(entries):,}-lineup ownership-weighted sample standing in for this real "
+            f"contest's full {field_size:,}-entry field, simulated over {evaluation['num_trials']:,} "
+            "Monte Carlo trials with each lineup ranked against every other lineup in the same "
+            "simulated reality (not against a separate 'your entries' batch) -- browse the results "
+            "below to see which archetypes actually perform, then pick whichever ones you want to "
+            "submit yourself. prize_pool, first_place_pct, and field_size are hand-entered, since a "
+            "DraftKings entries export doesn't include the contest's payout table or true size."
         ),
     }

@@ -638,32 +638,32 @@ async def upload_dk_entries(
 async def simulate_dk_entries(
     date: str | None = Body(None, embed=True),
     contest_id: str = Body(..., embed=True, description="One of GET /dk-entries's returned contest_id values"),
-    field_size: int = Body(..., embed=True, description="The real contest's total entry count"),
+    field_size: int = Body(
+        ..., embed=True, description="The real contest's total entry count -- a representative sample gets simulated and projected onto this size"
+    ),
     prize_pool: float = Body(..., embed=True, description="The real contest's total prize pool"),
     first_place_pct: float = Body(..., embed=True, description="% of the prize pool 1st place wins"),
     payout_pct: float = Body(0.20, embed=True, description="Fraction of field_size that cashes"),
     shape: str = Body("top_heavy", embed=True, description="'top_heavy' (GPP) or 'flat' (double-up/50-50)"),
-    max_exposure_pct: float | None = Body(
-        None, embed=True, description="Cap how often any one player appears across the generated lineups"
-    ),
     sample_size: int | None = Body(
-        None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
+        None, embed=True, description="How many lineups to actually simulate as the field sample (capped)"
     ),
     included_game_pks: list[int] | None = Body(
         None, embed=True, description="Restrict the pool to these games only"
     ),
 ) -> dict[str, Any]:
     """
-    Simulate one real contest from an uploaded DK entries file (POST
-    /dk-entries): the file establishes the baseline -- how many entries
-    you have in that contest and what each one costs -- and this app
-    generates fresh lineups (same construction "Generate entries" mode
-    uses) to fill out whichever ones are still blank reservations,
-    alongside any you'd already built yourself, then simulates the
-    whole batch against the contest's real economics.
-    prize_pool/first_place_pct/field_size/payout_pct/shape are
-    hand-entered since a bulk entries export has no payout-table data
-    at all. Always runs 10,000 trials, same as /contest-entries-simulated.
+    Mirror and simulate a real contest's whole field from an uploaded
+    DK entries file (POST /dk-entries): the file's only real job is
+    supplying entry_fee (the one economic fact it actually contains).
+    This app builds an ownership-weighted representative sample of the
+    real contest (ranked against itself, not a separate "your entries"
+    batch) and returns every sampled lineup's own simulated cash
+    probability/ROI so you can browse the results and pick which ones
+    to actually submit yourself. prize_pool/first_place_pct/field_size/
+    payout_pct/shape are hand-entered since a bulk entries export has
+    no payout-table data or true field size at all. Always runs 10,000
+    trials, same as /contest-entries-simulated.
     """
     day = date or date_cls.today().isoformat()
     text = dk_entries.load(day)
@@ -682,20 +682,11 @@ async def simulate_dk_entries(
             status_code=404,
             detail="That contest wasn't found in the uploaded file -- re-upload via POST /dk-entries.",
         )
-    resolved, resolve_warnings = dk_entries.resolve_entries(text, slate, contest_id=contest_id)
-    # A blank reservation is the expected, normal case here -- this
-    # endpoint generates a lineup for it rather than treating it as a
-    # problem, so only surface warnings about entries that actually
-    # had a lineup picked but couldn't be matched (a real data issue
-    # worth knowing about).
-    warnings = [w for w in resolve_warnings if "empty roster slot" not in w]
 
     try:
         result = await contest.build_dk_entries_simulated(
             slate,
-            resolved,
             season=season,
-            num_entries_total=contest_row["num_entries"],
             entry_fee=contest_row["entry_fee"] or 0.0,
             field_size=field_size,
             prize_pool=prize_pool,
@@ -703,7 +694,6 @@ async def simulate_dk_entries(
             payout_pct=payout_pct,
             shape=shape,
             num_trials=_SIM_TRIALS,
-            max_exposure_pct=max_exposure_pct,
             sample_size=sample_size,
             included_game_pks=included_game_pks,
         )
@@ -722,5 +712,4 @@ async def simulate_dk_entries(
     result["batch_id"] = batch_id
     result["results"] = full_results[:200]
     result["sample_entries"] = full_entries[:200]
-    result["warnings"] = warnings
     return {"date": day, **result}
