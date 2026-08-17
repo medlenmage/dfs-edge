@@ -31,7 +31,7 @@ SLOT_LABELS: list[str] = [
 ]
 
 
-def _players_in_slot_order(lineup: dict[str, Any]) -> list[dict[str, Any]]:
+def players_in_slot_order(lineup: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Normalize either lineup shape into a flat list of players in fixed
     DK roster order (P, P, C, 1B, 2B, 3B, SS, OF, OF, OF).
@@ -75,7 +75,7 @@ def lineups_to_csv(
     writer.writeheader()
 
     for i, lineup in enumerate(lineups):
-        players = _players_in_slot_order(lineup)
+        players = players_in_slot_order(lineup)
         row: dict[str, Any] = {
             "lineup_index": i,
             "salary_used": lineup.get("salary_used"),

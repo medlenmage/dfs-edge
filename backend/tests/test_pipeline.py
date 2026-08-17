@@ -1845,6 +1845,70 @@ async def main() -> int:
     check("a stacked lineup shows genuinely higher variance than an equivalent unstacked one -- the whole point of correlation existing",
           stacked_stdev > 1.3 * unstacked_stdev, str((round(stacked_stdev, 2), round(unstacked_stdev, 2))))
 
+    print("\nMonte Carlo simulation engine (variance.py simulate_batch)")
+
+    def _sim_player(pid, team):
+        return {
+            "id": pid, "name": f"P{pid}", "team": team, "salary": 5000,
+            "projected_fpts": 10.0, "ownership_pct": 0,
+        }
+
+    def _sim_entry_flat(player_ids, team):
+        return {
+            "salary_used": 50000, "projected_points": 100.0, "total_ownership_pct": 0.0,
+            "players": [_sim_player(pid, team) for pid in player_ids],
+        }
+
+    def _sim_entry_slots(player_ids, team):
+        pitchers, hitters = player_ids[:2], player_ids[2:]
+        return {
+            "salary_used": 50000, "projected_points": 100.0, "total_ownership_pct": 0.0,
+            "slots": {
+                "P": [_sim_player(pid, team) for pid in pitchers],
+                "C": [_sim_player(hitters[0], team)],
+                "1B": [_sim_player(hitters[1], team)],
+                "2B": [_sim_player(hitters[2], team)],
+                "3B": [_sim_player(hitters[3], team)],
+                "SS": [_sim_player(hitters[4], team)],
+                "OF": [_sim_player(pid, team) for pid in hitters[5:8]],
+            },
+        }
+
+    tight_ids = list(range(93001, 93011))
+    wide_ids = list(range(94001, 94011))
+    sim_pools = {}
+    for pid in tight_ids:
+        sim_pools[pid] = [8.0, 10.0, 12.0] * 67  # mean ~10, low variance
+    for pid in wide_ids:
+        sim_pools[pid] = [0.0, 20.0] * 100  # mean 10, high variance
+
+    tight_entry = _sim_entry_flat(tight_ids, "TIGHTTEAM")
+    wide_entry = _sim_entry_flat(wide_ids, "WIDETEAM")
+
+    sim = variance.simulate_batch([tight_entry, wide_entry], sim_pools, num_trials=2000, seed=99)
+    tight_totals, wide_totals = sim[0], sim[1]
+
+    check("simulate_batch returns one row of simulated totals per entry, num_trials columns each",
+          sim.shape == (2, 2000), str(sim.shape))
+    check("a tight (low-variance) lineup and a wide (high-variance) one land at roughly the same simulated mean",
+          abs(float(tight_totals.mean()) - float(wide_totals.mean())) < 15.0,
+          str((round(float(tight_totals.mean()), 2), round(float(wide_totals.mean()), 2))))
+    check("a lineup built from high-variance players shows a genuinely wider simulated distribution than an equivalent low-variance one -- proof this is modeling variance, not just re-deriving the mean",
+          float(wide_totals.std()) > 3 * float(tight_totals.std()),
+          str((round(float(tight_totals.std()), 2), round(float(wide_totals.std()), 2))))
+
+    flat_sim = variance.simulate_batch([_sim_entry_flat(tight_ids, "TIGHTTEAM")], sim_pools, num_trials=500, seed=55)
+    slots_sim = variance.simulate_batch([_sim_entry_slots(tight_ids, "TIGHTTEAM")], sim_pools, num_trials=500, seed=55)
+    check("simulate_batch treats optimizer.py's `slots`-grouped shape and contest.py's flat `players` shape identically",
+          (flat_sim == slots_sim).all(), str((flat_sim[0][:3].tolist(), slots_sim[0][:3].tolist())))
+
+    try:
+        variance.simulate_batch([tight_entry], {}, num_trials=10, seed=1)
+        check("simulate_batch raises a clear error when a player's outcome pool is missing", False, "no exception raised")
+    except ValueError as exc:
+        check("simulate_batch raises a clear error when a player's outcome pool is missing",
+              "outcome pool" in str(exc), str(exc))
+
     print("\nJSON serialisation")
     import json
 
