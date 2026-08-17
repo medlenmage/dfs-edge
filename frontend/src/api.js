@@ -124,6 +124,26 @@ export const api = {
       method: 'POST',
     }),
 
+  contestTypes: () => request('/api/mlb/contest-types'),
+
+  buildContestField: (
+    date,
+    contestType,
+    lineups,
+    { fieldSize = null, sampleSize = null, includedGamePks = null } = {},
+  ) =>
+    request('/api/mlb/contest-field', {
+      method: 'POST',
+      body: JSON.stringify({
+        date,
+        contest_type: contestType,
+        lineups,
+        field_size: fieldSize,
+        sample_size: sampleSize,
+        included_game_pks: includedGamePks,
+      }),
+    }),
+
   nflSlate: (season, week) => {
     const params = new URLSearchParams()
     if (season) params.set('season', season)

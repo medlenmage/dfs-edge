@@ -283,6 +283,7 @@ dfs-edge/
 │   │   │   ├── mlb_slate.py  assembles the daily MLB slate
 │   │   │   ├── nfl_slate.py  assembles the weekly NFL slate
 │   │   │   ├── optimizer.py  MLB DraftKings Classic lineup optimizer
+│   │   │   ├── contest.py    MLB synthetic contest field generator
 │   │   │   ├── nfl_optimizer.py  NFL DraftKings Classic lineup optimizer
 │   │   │   ├── analysis.py   Claude integration
 │   │   │   ├── salaries.py   DraftKings salary CSV upload (MLB + NFL)
@@ -353,6 +354,30 @@ vanishing from the doc:
   credit for an entire category of his real DK value. `stolen_base`
   compares season-long SB rate against the league average, regressed
   by sample size the same way every other split-based component is.
+- **MLB contest field generator.** The optimizer only ever answered "is
+  this the best lineup" — never "how does it compare to what everyone
+  else is rostering." `services/contest.py` builds a synthetic public
+  field by randomly sampling each roster slot weighted by RotoWire
+  ownership% (the signal that actually describes what the public plays,
+  unlike another optimizer solve, which would just build a pile of
+  near-identical near-optimal lineups). A large real contest
+  (thousands to 100,000+ entries) is modeled as a statistical *sample*
+  capped at `MAX_SAMPLE_SIZE` (5,000, chosen after benchmarking — a
+  5,000-lineup field builds in about a second even on a full slate),
+  with a lineup's rank projected back onto the real contest size the
+  way a poll projects from a sample. On the Lineups tab, generate a
+  lineup as usual, then use the new "Contest field" section to test it
+  against a double-up, small-field GPP, large-field GPP, or
+  millionaire-maker-style preset — same slate-game filter as the
+  optimizer, so the field is always drawn from the actual games in
+  play. **Not a lineup simulator**: there's no player-outcome variance
+  model yet, so ranks and payouts are the field's *projected* points,
+  not a distribution of real-world outcomes — which is also why an
+  optimizer-built lineup (itself point-maximizing) tends to rank near
+  the top of the field on this measure. The payout curve is a
+  deliberately simple, clearly-labeled approximation (flat for
+  double-ups, a smooth top-heavy decay for GPPs), not a scraped or
+  hardcoded real payout table.
 
 ## NFL
 
@@ -433,6 +458,8 @@ defense-vs-position and pace pipeline doesn't otherwise change.
 - [x] Lineup optimizer (MLB and NFL), including a lineup-confirmation watcher for MLB
 - [x] NFL: weekly matchups + Classic lineup optimizer with QB stacking
 - [x] NFL: pace and defense-vs-position scoring components (prior-season prior)
+- [x] MLB: contest field generator (ownership-weighted synthetic field, ranked by projected points)
+- [ ] MLB: lineup simulator (player-outcome variance model + Monte Carlo contest simulation) -- the harder follow-up to the field generator above; needs a real per-player variance model, not just a point estimate, before it's worth building
 - [ ] Results tracking and weight backtesting
 - [ ] NBA
 
