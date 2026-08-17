@@ -1999,6 +1999,29 @@ async def main() -> int:
           abs(sim_batch["summary"]["avg_cash_probability_pct"] - sum(cash_pcts) / len(cash_pcts)) < 0.15,
           str((sim_batch["summary"]["avg_cash_probability_pct"], round(sum(cash_pcts) / len(cash_pcts), 1))))
 
+    check("every entry reports first_place_pct <= top_1pct_pct <= top_10pct_pct <= cash_probability_pct "
+          "(a stricter finish is never more common than a looser one)",
+          all(
+              0 <= r["first_place_pct"] <= r["top_1pct_pct"] <= r["top_10pct_pct"] <= r["cash_probability_pct"]
+              for r in sim_batch["results"]
+          ),
+          str([(r["first_place_pct"], r["top_1pct_pct"], r["top_10pct_pct"], r["cash_probability_pct"])
+               for r in sim_batch["results"]]))
+    check("every entry's roi_pct matches (expected_payout - entry_fee) / entry_fee",
+          all(
+              abs(r["roi_pct"] - round((r["expected_payout"] - sim_batch["contest"]["entry_fee"])
+                                        / sim_batch["contest"]["entry_fee"] * 100, 1)) < 0.05
+              for r in sim_batch["results"]
+          ),
+          str([r["roi_pct"] for r in sim_batch["results"]]))
+    check("build_contest_entries_simulated's summary carries avg_first_place_pct/avg_top_1pct_pct/"
+          "avg_top_10pct_pct/avg_roi_pct",
+          all(
+              key in sim_batch["summary"]
+              for key in ("avg_first_place_pct", "avg_top_1pct_pct", "avg_top_10pct_pct", "avg_roi_pct")
+          ),
+          str(sim_batch["summary"]))
+
     print("\nJSON serialisation")
     import json
 

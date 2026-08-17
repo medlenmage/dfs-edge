@@ -567,17 +567,33 @@ async def evaluate_batch_simulated(
     payout_index = np.clip(final_rank - 1, 0, paid_count - 1)
     payout_per_trial = np.where(in_the_money, payouts[payout_index], 0.0)
 
+    # "Top 1%"/"top 10%" are relative to the real contest's field_size
+    # (same scale final_rank already projects onto), not the entry
+    # batch or the sampled field -- a rank of 100 in a 10,000-entry
+    # contest is top 1% regardless of how many entries you personally
+    # submitted.
+    top_1pct_threshold = max(1, round(0.01 * field_size))
+    top_10pct_threshold = max(1, round(0.10 * field_size))
+    first_place = final_rank == 1
+    top_1pct = final_rank <= top_1pct_threshold
+    top_10pct = final_rank <= top_10pct_threshold
+
     results = []
     for i in range(num_entries):
         row = entry_sim[i]
         payout_row = payout_per_trial[i]
+        expected_payout = float(payout_row.mean())
         results.append(
             {
                 "lineup_index": i,
                 "cash_probability_pct": round(float(in_the_money[i].mean()) * 100, 1),
-                "expected_payout": round(float(payout_row.mean()), 2),
+                "first_place_pct": round(float(first_place[i].mean()) * 100, 2),
+                "top_1pct_pct": round(float(top_1pct[i].mean()) * 100, 2),
+                "top_10pct_pct": round(float(top_10pct[i].mean()) * 100, 2),
+                "expected_payout": round(expected_payout, 2),
                 "payout_p10": round(float(np.percentile(payout_row, 10)), 2),
                 "payout_p90": round(float(np.percentile(payout_row, 90)), 2),
+                "roi_pct": round((expected_payout - entry_fee) / entry_fee * 100, 1) if entry_fee else 0.0,
                 "simulated_points_mean": round(float(row.mean()), 2),
                 "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
                 "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
@@ -832,6 +848,10 @@ async def build_contest_entries_simulated(
     )
 
     cash_probs = [r["cash_probability_pct"] for r in evaluation["results"]]
+    first_place_pcts = [r["first_place_pct"] for r in evaluation["results"]]
+    top_1pct_pcts = [r["top_1pct_pct"] for r in evaluation["results"]]
+    top_10pct_pcts = [r["top_10pct_pct"] for r in evaluation["results"]]
+    roi_pcts = [r["roi_pct"] for r in evaluation["results"]]
     expected_payouts = [r["expected_payout"] for r in evaluation["results"]]
     total_cost = round(len(entries) * contest["entry_fee"], 2)
     total_expected_payout = round(sum(expected_payouts), 2)
@@ -848,6 +868,10 @@ async def build_contest_entries_simulated(
         "num_trials": evaluation["num_trials"],
         "summary": {
             "avg_cash_probability_pct": round(sum(cash_probs) / len(cash_probs), 1),
+            "avg_first_place_pct": round(sum(first_place_pcts) / len(first_place_pcts), 2),
+            "avg_top_1pct_pct": round(sum(top_1pct_pcts) / len(top_1pct_pcts), 2),
+            "avg_top_10pct_pct": round(sum(top_10pct_pcts) / len(top_10pct_pcts), 2),
+            "avg_roi_pct": round(sum(roi_pcts) / len(roi_pcts), 1),
             "total_entry_cost": total_cost,
             "total_expected_payout": total_expected_payout,
             "estimated_net_profit": round(total_expected_payout - total_cost, 2),

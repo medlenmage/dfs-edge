@@ -266,6 +266,13 @@ export function ContestGeneratorPanel({ date, slate }) {
                 <span className="badge">
                   {state.summary.avg_cash_probability_pct}% avg cash probability
                 </span>
+                <span className="badge">{state.summary.avg_first_place_pct}% avg 1st place</span>
+                <span className="badge">{state.summary.avg_top_1pct_pct}% avg top 1%</span>
+                <span className="badge">{state.summary.avg_top_10pct_pct}% avg top 10%</span>
+                <span className={`badge ${state.summary.avg_roi_pct >= 0 ? 'ok' : 'risk'}`}>
+                  {state.summary.avg_roi_pct >= 0 ? '+' : ''}
+                  {state.summary.avg_roi_pct}% avg ROI
+                </span>
                 <span className="badge">${state.summary.total_entry_cost.toLocaleString()} cost</span>
                 <span className="badge">
                   ${state.summary.total_expected_payout.toLocaleString()} expected payout
@@ -346,7 +353,19 @@ export function ContestGeneratorPanel({ date, slate }) {
                     {state.simulated ? (
                       <>
                         <th className="num">Cash %</th>
+                        <th className="num" title="How often this lineup finished 1st out of the whole simulated contest">
+                          1st %
+                        </th>
+                        <th className="num" title="How often this lineup finished in the top 1% of the whole simulated contest">
+                          Top 1%
+                        </th>
+                        <th className="num" title="How often this lineup finished in the top 10% of the whole simulated contest">
+                          Top 10%
+                        </th>
                         <th className="num">Exp. payout</th>
+                        <th className="num" title="(expected payout - entry fee) / entry fee">
+                          ROI %
+                        </th>
                       </>
                     ) : (
                       <>
@@ -375,7 +394,11 @@ export function ContestGeneratorPanel({ date, slate }) {
                         {state.simulated ? (
                           <>
                             <td className="num">{r ? `${r.cash_probability_pct}%` : '—'}</td>
+                            <td className="num">{r ? `${r.first_place_pct}%` : '—'}</td>
+                            <td className="num">{r ? `${r.top_1pct_pct}%` : '—'}</td>
+                            <td className="num">{r ? `${r.top_10pct_pct}%` : '—'}</td>
                             <td className="num">{r ? `$${r.expected_payout.toFixed(2)}` : '—'}</td>
+                            <td className="num">{r ? `${r.roi_pct >= 0 ? '+' : ''}${r.roi_pct}%` : '—'}</td>
                           </>
                         ) : (
                           <>
