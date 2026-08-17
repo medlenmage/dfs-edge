@@ -2131,24 +2131,45 @@ async def main() -> int:
           contest._custom_payout_curve(10, 1000.0, "top_heavy", None)
           == contest._payout_curve(10, 1000.0, "top_heavy"))
 
+    # A DK entries file's real job is establishing the baseline (how many
+    # entries, what they cost) -- most of a freshly-reserved contest has
+    # no lineup picked yet, so build_dk_entries_simulated generates fresh
+    # lineups to fill out num_entries_total, alongside any already-filled
+    # ones, rather than treating a blank reservation as an error.
     dk_sim = await contest.build_dk_entries_simulated(
-        mul_slate, dk_resolved_all, season=2099, field_size=500, prize_pool=200.0,
-        first_place_pct=25.0, payout_pct=0.20, num_trials=300, seed=11,
+        mul_slate, dk_resolved_all, season=2099, num_entries_total=3, entry_fee=1.0,
+        field_size=500, prize_pool=200.0, first_place_pct=25.0, payout_pct=0.20, num_trials=300, seed=11,
     )
-    check("build_dk_entries_simulated simulates the resolved entry and reports the real contest's own economics",
-          dk_sim["field_size"] == 500 and dk_sim["prize_pool"] == 200.0 and dk_sim["num_entries_built"] == 1,
-          str((dk_sim["field_size"], dk_sim["prize_pool"], dk_sim["num_entries_built"])))
-    check("build_dk_entries_simulated's total_entry_cost matches the entry's own real entry_fee from the file",
-          dk_sim["summary"]["total_entry_cost"] == 1.0, str(dk_sim["summary"]["total_entry_cost"]))
+    check("build_dk_entries_simulated generates lineups to fill out num_entries_total beyond what was pre-filled",
+          dk_sim["num_entries_built"] == 3 and dk_sim["num_entries_prefilled"] == 1
+          and dk_sim["num_entries_generated"] == 2,
+          str((dk_sim["num_entries_built"], dk_sim["num_entries_prefilled"], dk_sim["num_entries_generated"])))
+    check("build_dk_entries_simulated reports the real contest's own economics",
+          dk_sim["field_size"] == 500 and dk_sim["prize_pool"] == 200.0,
+          str((dk_sim["field_size"], dk_sim["prize_pool"])))
+    check("build_dk_entries_simulated's total_entry_cost uses the contest's uniform entry_fee across "
+          "every entry, pre-filled and generated alike",
+          dk_sim["summary"]["total_entry_cost"] == 3.0, str(dk_sim["summary"]["total_entry_cost"]))
+
+    dk_sim_all_generated = await contest.build_dk_entries_simulated(
+        mul_slate, [], season=2099, num_entries_total=4, entry_fee=0.25,
+        field_size=500, prize_pool=100.0, first_place_pct=20.0, num_trials=300, seed=13,
+    )
+    check("build_dk_entries_simulated generates every lineup when none were pre-filled -- the common real-world "
+          "case of a freshly-reserved contest with no picks made yet",
+          dk_sim_all_generated["num_entries_built"] == 4 and dk_sim_all_generated["num_entries_generated"] == 4
+          and dk_sim_all_generated["num_entries_prefilled"] == 0,
+          str((dk_sim_all_generated["num_entries_built"], dk_sim_all_generated["num_entries_generated"],
+               dk_sim_all_generated["num_entries_prefilled"])))
 
     try:
         await contest.build_dk_entries_simulated(
-            mul_slate, dk_resolved_all, season=2099, field_size=0, prize_pool=200.0,
-            first_place_pct=25.0, num_trials=50,
+            mul_slate, dk_resolved_all, season=2099, num_entries_total=1, entry_fee=1.0,
+            field_size=0, prize_pool=200.0, first_place_pct=25.0, num_trials=50,
         )
-        check("build_dk_entries_simulated rejects a field_size smaller than the entry count", False)
+        check("build_dk_entries_simulated rejects a field_size smaller than num_entries_total", False)
     except contest.ContestError:
-        check("build_dk_entries_simulated rejects a field_size smaller than the entry count", True)
+        check("build_dk_entries_simulated rejects a field_size smaller than num_entries_total", True)
 
     print("\nJSON serialisation")
     import json

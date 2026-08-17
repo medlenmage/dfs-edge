@@ -944,45 +944,71 @@ async def build_contest_entries_simulated(
 
 async def build_dk_entries_simulated(
     slate: dict[str, Any],
-    entries: list[dict[str, Any]],
+    filled_entries: list[dict[str, Any]],
     *,
     season: int,
+    num_entries_total: int,
+    entry_fee: float,
     field_size: int,
     prize_pool: float,
     first_place_pct: float,
     payout_pct: float = 0.20,
     shape: str = "top_heavy",
     num_trials: int = 10_000,
+    max_exposure_pct: float | None = None,
     sample_size: int | None = None,
     included_game_pks: list[int] | None = None,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """
-    Like build_contest_entries_simulated, but for lineups you actually
-    built (or reserved) on DraftKings -- resolved via
-    dk_entries.resolve_entries() -- against a REAL contest's economics,
-    rather than this app's own randomized entries against a named
-    preset. A bulk entries export has no payout-table data at all, so
-    prize_pool/first_place_pct describe the contest by hand; payout_pct
-    (what fraction of the field cashes) and shape default to a typical
-    top-heavy GPP but can be overridden the same way.
+    Like build_contest_entries_simulated, but for a real contest you've
+    reserved entries into on DraftKings -- against that REAL contest's
+    own economics, rather than this app's own randomized entries
+    against a named preset.
 
-    `field_size` is the REAL contest's total entry count (not just how
-    many of your own entries are in `entries`) -- needed to know both
-    the cash line (paid_count = field_size * payout_pct) and to build a
-    correctly-sized synthetic opponent field to simulate against, same
-    role it plays everywhere else in this module.
+    A DK entries export's real job here is establishing the baseline:
+    how many entries you have in the contest (num_entries_total, from
+    dk_entries.contest_summary()) and what each one costs (entry_fee,
+    read straight from the file). Most of a freshly-reserved contest's
+    entries have no lineup picked yet -- rather than treating that as
+    an error, this generates fresh lineups (the same randomized-but-
+    strong construction generate_entries() already uses for "Generate
+    entries" mode) to fill out every still-blank reservation, alongside
+    any entries you'd already filled in yourself
+    (`filled_entries`, resolved via dk_entries.resolve_entries()) --
+    then simulates the WHOLE batch together against the contest's real
+    prize_pool/first_place_pct (hand-entered, since a bulk entries
+    export has no payout-table data at all) and field_size (also the
+    real contest's total entry count, needed for the cash line and to
+    build a correctly-sized synthetic opponent field, same role it
+    plays everywhere else in this module).
     """
-    if not entries:
-        raise ContestError("No resolvable entries to simulate -- every row was missing a full 10-man lineup.")
-    if field_size < len(entries):
+    if num_entries_total < len(filled_entries):
         raise ContestError(
-            f"field_size ({field_size:,}) can't be smaller than the number of entries being "
-            f"simulated ({len(entries):,}) -- your own entries are part of the field."
+            f"num_entries_total ({num_entries_total:,}) is smaller than the number of entries "
+            f"already filled in from the file ({len(filled_entries):,})."
+        )
+    num_to_generate = num_entries_total - len(filled_entries)
+    generated_entries: list[dict[str, Any]] = []
+    if num_to_generate > 0:
+        generated_entries = generate_entries(
+            slate,
+            num_to_generate,
+            max_exposure_pct=max_exposure_pct,
+            included_game_pks=included_game_pks,
+            seed=seed,
+        )
+    entries = filled_entries + generated_entries
+    if not entries:
+        raise ContestError("No entries to simulate -- couldn't generate any legal lineups from this pool.")
+    if field_size < num_entries_total:
+        raise ContestError(
+            f"field_size ({field_size:,}) can't be smaller than num_entries_total "
+            f"({num_entries_total:,}) -- your own entries are part of the field, not additional to it."
         )
 
     contest = {
-        "entry_fee": entries[0].get("entry_fee") or 0.0,
+        "entry_fee": entry_fee,
         "field_size": field_size,
         "payout_pct": payout_pct,
         "shape": shape,
@@ -1014,12 +1040,15 @@ async def build_dk_entries_simulated(
     top_10pct_pcts = [r["top_10pct_pct"] for r in evaluation["results"]]
     roi_pcts = [r["roi_pct"] for r in evaluation["results"]]
     expected_payouts = [r["expected_payout"] for r in evaluation["results"]]
-    total_cost = round(sum(e.get("entry_fee") or 0.0 for e in entries), 2)
+    total_cost = round(len(entries) * entry_fee, 2)
     total_expected_payout = round(sum(expected_payouts), 2)
 
     return {
         "contest": contest,
+        "num_entries_requested": num_entries_total,
         "num_entries_built": len(entries),
+        "num_entries_prefilled": len(filled_entries),
+        "num_entries_generated": len(generated_entries),
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
         "paid_count": evaluation["paid_count"],
@@ -1041,8 +1070,11 @@ async def build_dk_entries_simulated(
         "note": (
             f"Cash probability and expected payout come from {evaluation['num_trials']:,} real "
             "Monte Carlo simulated trials of each player's own historical outcome pool, with team "
-            "correlation for hitters, against this real contest's actual entry fee/prize pool -- "
-            "the only hand-entered numbers are prize_pool, first_place_pct, and field_size, since "
-            "a DraftKings entries export doesn't include the contest's payout table."
+            "correlation for hitters, against this real contest's actual entry fee/prize pool. "
+            f"{len(generated_entries):,} of these {len(entries):,} lineups were generated by this "
+            f"app (the same fast randomized construction 'Generate entries' mode uses) to fill out "
+            f"still-blank reservations from the file; {len(filled_entries):,} were lineups you'd "
+            "already built yourself. prize_pool, first_place_pct, and field_size are hand-entered, "
+            "since a DraftKings entries export doesn't include the contest's payout table."
         ),
     }
