@@ -78,7 +78,10 @@ export default function App() {
       setMsg('Uploading…')
       try {
         const result = await uploadFn(date, file)
-        setMsg(`Loaded ${result.players_loaded} ${label}`)
+        const derived = result.salaries_derived
+          ? ` (salaries pulled from the same file for ${result.salaries_derived} of them)`
+          : ''
+        setMsg(`Loaded ${result.players_loaded} ${label}${derived}`)
         load(true)
       } catch (err) {
         setMsg(`Upload failed: ${err.message}`)

@@ -401,6 +401,28 @@ vanishing from the doc:
   other* for the same limited paid ranks -- and `num_lineups` is now
   validated against the contest's real `field_size` up front (your
   entries are part of the field, not additional to it).
+- **Fixed: DK salary upload rejecting a valid export.** DraftKings'
+  lineup-builder page's "Export to CSV" button ships a wider file than
+  the flat player-pool export this app was originally built against --
+  an empty roster-slot template occupies the first several
+  rows/columns, with the real player table's header embedded well past
+  row 1. `csv.DictReader` always takes row 1 as the header, so against
+  that shape it found none of the expected columns and every row got
+  silently skipped, even though the file was perfectly valid.
+  `salaries._find_dk_header_row()` scans for the row instead of
+  assuming its position.
+- **Salary from a RotoWire upload, when it's already there.**
+  RotoWire's player-pool export pulls salary straight from DK into its
+  own SAL column -- the same number a separate DK upload would give,
+  just bundled into one file. If no salary file is loaded yet for a
+  date, uploading projections now seeds the salary store from that SAL
+  column too (`salaries.from_rotowire_rows()`), so a file with both
+  projections and salaries only needs uploading once. A real DK upload,
+  now or later, is never overwritten by a projections re-upload -- the
+  two gaps versus an actual DK export (`game_info` for DK-slate
+  auto-detection, `dk_id` for NFL's optimizer) are handled by leaving
+  them empty rather than guessed at, and this is MLB-only for exactly
+  the `dk_id` reason.
 
 ## NFL
 
