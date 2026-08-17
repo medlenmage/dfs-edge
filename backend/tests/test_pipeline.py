@@ -1782,6 +1782,69 @@ async def main() -> int:
     check("player_outcome_pool is cached -- calling again returns the same pool, ignoring a new seed",
           first_call == second_call, str((len(first_call), len(second_call))))
 
+    print("\nTeam correlation: stacked lineups show higher variance than unstacked (variance.py)")
+
+    import random as random_module
+
+    check("sample_correlated_outcome leans toward the top of a pool when the multiplier is high",
+          variance.sample_correlated_outcome([1.0, 5.0, 10.0, 15.0, 20.0], 2.0, random_module.Random(1))
+          >= variance.sample_correlated_outcome([1.0, 5.0, 10.0, 15.0, 20.0], 0.3, random_module.Random(1)))
+    check("team_environment_multiplier stays within its clamped bounds",
+          all(
+              variance.TEAM_MULTIPLIER_MIN
+              <= variance.team_environment_multiplier(random_module.Random(seed))
+              <= variance.TEAM_MULTIPLIER_MAX
+              for seed in range(500)
+          ))
+
+    # Reuse the same "consistent" 60-game fixture (mean 10.0, DK pts in
+    # {8,10,12}) for all 8 synthetic hitters -- isolates the
+    # correlation mechanism's effect on lineup-level variance from any
+    # difference in individual player variance.
+    correlation_game_logs = {pid: consistent_games for pid in range(92001, 92009)}
+
+    async def fake_correlation_game_log(player_id, season, group="hitting"):
+        return correlation_game_logs.get(player_id, [])
+
+    mlb.get_player_game_log = fake_correlation_game_log
+
+    stack_pools = [
+        sorted(await variance.player_outcome_pool(pid, "OF", VARIANCE_SEASON, seed=pid))
+        for pid in range(92001, 92005)  # 4 hitters, all sharing one team's multiplier
+    ]
+    unstacked_pools = [
+        sorted(await variance.player_outcome_pool(pid, "OF", VARIANCE_SEASON, seed=pid))
+        for pid in range(92005, 92009)  # 4 hitters, each on a different team
+    ]
+
+    corr_rng = random_module.Random(777)
+    NUM_CORRELATION_TRIALS = 3000
+    stacked_totals = []
+    unstacked_totals = []
+    for _ in range(NUM_CORRELATION_TRIALS):
+        team_a_multiplier = variance.team_environment_multiplier(corr_rng)
+        stacked_totals.append(
+            sum(variance.sample_correlated_outcome(pool, team_a_multiplier, corr_rng) for pool in stack_pools)
+        )
+        unstacked_totals.append(
+            sum(
+                variance.sample_correlated_outcome(
+                    pool, variance.team_environment_multiplier(corr_rng), corr_rng
+                )
+                for pool in unstacked_pools
+            )
+        )
+
+    stacked_mean = statistics_module.mean(stacked_totals)
+    unstacked_mean = statistics_module.mean(unstacked_totals)
+    stacked_stdev = statistics_module.pstdev(stacked_totals)
+    unstacked_stdev = statistics_module.pstdev(unstacked_totals)
+
+    check("a stacked lineup (shared team multiplier) and an unstacked one land at roughly the same mean",
+          abs(stacked_mean - unstacked_mean) < 2.0, str((round(stacked_mean, 2), round(unstacked_mean, 2))))
+    check("a stacked lineup shows genuinely higher variance than an equivalent unstacked one -- the whole point of correlation existing",
+          stacked_stdev > 1.3 * unstacked_stdev, str((round(stacked_stdev, 2), round(unstacked_stdev, 2))))
+
     print("\nJSON serialisation")
     import json
 
