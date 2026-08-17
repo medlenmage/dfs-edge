@@ -331,6 +331,89 @@ async def get_recent_form(
 
 
 # --------------------------------------------------------------------------
+# Per-game logs (raw counting stats, one row per game actually played)
+# --------------------------------------------------------------------------
+
+async def get_player_game_log(
+    player_id: int, season: int, group: str = "hitting"
+) -> list[dict[str, Any]]:
+    """
+    One row per regular-season game `player_id` actually appeared in,
+    with the raw counting stats DK scoring needs -- not the same job as
+    get_league_season()/get_league_splits() (those blend a whole
+    season into derived rates via _normalise_stat(), which is exactly
+    wrong here: computing DK fantasy points for one specific game needs
+    that game's own untouched counts, not a season-blended rate).
+
+    Deliberately not run through _normalise_stat() -- its hitting/
+    pitching branches are missing fields this needs (hitByPitch,
+    stolenBases as a raw count, hitBatsmen) and compute derived rates
+    (k_pct, iso, ...) that are meaningless for a single game.
+
+    `group="pitching"`'s raw stat blob is worth a specific warning: it
+    includes the PITCHER'S OWN batting line from games he came to bat
+    in (avg/obp/slg/stolenBases/hitByPitch), since some pitchers still
+    hit. Batters he hit with a pitch is a separate field, `hitBatsmen`
+    -- using `hitByPitch` there would silently score the pitcher's own
+    at-bats instead of the penalty DK actually charges him.
+    """
+    settings = get_settings()
+
+    async def _load() -> Any:
+        return await get_json(
+            f"{BASE}/people/{player_id}/stats",
+            params={"stats": "gameLog", "group": group, "season": season, "sportId": SPORT_ID},
+            source="MLB Stats API",
+        )
+
+    payload = await cached(
+        f"mlb:gamelog:{player_id}:{season}:{group}", settings.ttl_game_logs, _load
+    )
+
+    rows: list[dict[str, Any]] = []
+    for block in payload.get("stats") or []:
+        for split in block.get("splits") or []:
+            if split.get("gameType") != "R":
+                continue
+            stat = split.get("stat") or {}
+            row: dict[str, Any] = {
+                "game_pk": (split.get("game") or {}).get("gamePk"),
+                "date": split.get("date"),
+            }
+            if group == "pitching":
+                row.update(
+                    {
+                        "outs": _i(stat.get("outs")),
+                        "strikeouts": _i(stat.get("strikeOuts")),
+                        "wins": _i(stat.get("wins")),
+                        "earned_runs": _i(stat.get("earnedRuns")),
+                        "hits_against": _i(stat.get("hits")),
+                        "walks_against": _i(stat.get("baseOnBalls")),
+                        "hit_batsmen": _i(stat.get("hitBatsmen")),
+                        "complete_games": _i(stat.get("completeGames")),
+                        "shutouts": _i(stat.get("shutouts")),
+                    }
+                )
+            else:
+                row.update(
+                    {
+                        "plate_appearances": _i(stat.get("plateAppearances")),
+                        "hits": _i(stat.get("hits")),
+                        "doubles": _i(stat.get("doubles")),
+                        "triples": _i(stat.get("triples")),
+                        "home_runs": _i(stat.get("homeRuns")),
+                        "rbi": _i(stat.get("rbi")),
+                        "runs": _i(stat.get("runs")),
+                        "walks": _i(stat.get("baseOnBalls")),
+                        "hit_by_pitch": _i(stat.get("hitByPitch")),
+                        "stolen_bases": _i(stat.get("stolenBases")),
+                    }
+                )
+            rows.append(row)
+    return rows
+
+
+# --------------------------------------------------------------------------
 # Bullpen quality -- relievers only, aggregated by team
 # --------------------------------------------------------------------------
 
