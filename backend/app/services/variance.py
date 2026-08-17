@@ -35,10 +35,14 @@ from __future__ import annotations
 import random
 from typing import Any
 
+import numpy as np
+
 from app import cache
 from app.clients import mlb
 from app.config import get_settings
 from app.services import mlb_dk_points
+from app.services.lineup_export import players_in_slot_order
+from app.services.optimizer import SLOT_REQUIREMENTS
 
 # Games before a player's own history is trusted on its own -- pitchers
 # get a lower bar since even a full-time starter only makes ~30 starts
@@ -206,3 +210,102 @@ def sample_correlated_outcome(
     target_idx = target_pct * (n - 1)
     idx = round(target_idx + rng.gauss(0, JITTER_FRACTION * n))
     return sorted_pool[min(n - 1, max(0, idx))]
+
+
+# --------------------------------------------------------------------------
+# Monte Carlo simulation engine (Phase 4)
+# --------------------------------------------------------------------------
+#
+# Vectorized with numpy: every trial for every player is one array
+# element, not one Python-level draw, since Phase 5's contest-generator
+# batches can run thousands of lineups x thousands of trials. Accepts
+# both lineup shapes already in this codebase (optimizer.py's
+# `slots`-grouped lineups and contest.py's flat `players` entries) via
+# lineup_export.py's players_in_slot_order() -- the same normalization
+# its CSV export already relies on -- so callers don't need to know or
+# care which generator produced a given entry.
+
+# The first PITCHER_COUNT players in DK roster order (per
+# players_in_slot_order()) are always the two pitcher slots, since "P"
+# is the first key in optimizer.py's SLOT_REQUIREMENTS.
+PITCHER_COUNT = SLOT_REQUIREMENTS["P"]
+
+
+def simulate_batch(
+    entries: list[dict[str, Any]],
+    player_pools: dict[int, list[float]],
+    *,
+    num_trials: int,
+    seed: int | None = None,
+) -> np.ndarray:
+    """
+    Simulate a batch of lineups/entries together across `num_trials`
+    Monte Carlo trials. Returns a `(len(entries), num_trials)` array of
+    simulated DK-point totals.
+
+    Every *unique* player across the whole batch is sampled once per
+    trial, not once per lineup containing them -- two lineups sharing 8
+    of their 10 players see correlated results between them in the same
+    simulated "reality", for free, rather than each lineup being
+    simulated as if it existed in isolation. Hitters on the same team
+    share that trial's `team_environment_multiplier()`; pitchers are
+    sampled independently and uniformly from their own pool (a start is
+    a mostly-independent event from the team's own hitting day -- see
+    the Phase 3 note above).
+
+    `player_pools` must have an entry (from `player_outcome_pool()`) for
+    every player id appearing anywhere in `entries`.
+    """
+    flattened = [players_in_slot_order(entry) for entry in entries]
+
+    unique_players: dict[int, dict[str, Any]] = {}
+    for players in flattened:
+        for slot_index, p in enumerate(players):
+            unique_players.setdefault(
+                p["id"], {"team": p.get("team"), "is_pitcher": slot_index < PITCHER_COUNT}
+            )
+
+    missing = sorted(pid for pid in unique_players if pid not in player_pools)
+    if missing:
+        preview = missing[:5]
+        suffix = "..." if len(missing) > 5 else ""
+        raise ValueError(f"simulate_batch: no outcome pool for player id(s) {preview}{suffix}")
+
+    rng = np.random.default_rng(seed)
+
+    hitter_teams = sorted(
+        {info["team"] for info in unique_players.values() if not info["is_pitcher"] and info.get("team")}
+    )
+    team_multipliers = {
+        team: np.clip(
+            rng.normal(TEAM_MULTIPLIER_MEAN, TEAM_MULTIPLIER_STD, size=num_trials),
+            TEAM_MULTIPLIER_MIN,
+            TEAM_MULTIPLIER_MAX,
+        )
+        for team in hitter_teams
+    }
+
+    player_ids = list(unique_players)
+    player_index = {pid: i for i, pid in enumerate(player_ids)}
+    outcomes = np.zeros((len(player_ids), num_trials))
+
+    for pid, info in unique_players.items():
+        pool = np.array(sorted(player_pools[pid]), dtype=float)
+        n = len(pool)
+        if n == 0:
+            continue
+        i = player_index[pid]
+        if info["is_pitcher"] or not info.get("team"):
+            idx = rng.integers(0, n, size=num_trials)
+        else:
+            multiplier = team_multipliers[info["team"]]
+            target_pct = np.clip(0.5 + (multiplier - 1.0) * PERCENTILE_SENSITIVITY, 0.0, 1.0)
+            target_idx = target_pct * (n - 1)
+            jitter = rng.normal(0.0, JITTER_FRACTION * n, size=num_trials)
+            idx = np.clip(np.round(target_idx + jitter).astype(int), 0, n - 1)
+        outcomes[i] = pool[idx]
+
+    lineup_indices = np.array(
+        [[player_index[p["id"]] for p in players] for players in flattened]
+    )
+    return outcomes[lineup_indices].sum(axis=1)
