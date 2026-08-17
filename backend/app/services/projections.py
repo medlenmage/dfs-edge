@@ -39,16 +39,25 @@ def _f(value: Any) -> float | None:
         return None
 
 
+def _i(value: Any) -> int | None:
+    f = _f(value)
+    return int(f) if f is not None else None
+
+
 def parse_rotowire_csv(text: str) -> list[dict[str, Any]]:
     """
     Parse a RotoWire player-pool export into a flat list.
 
     Expected columns: PLAYER, RW Pick, TEAM, SAL, POS, VAL, RST%, OPP,
-    LINEUP, FPTS, MIN EXP, MAX EXP. Only PLAYER/TEAM/POS/FPTS/RST% are
-    used here -- salary is its own upload (services/salaries.py), and
-    the rest (RW Pick, VAL, OPP, LINEUP, exposure caps) are RotoWire's
-    own lineup-building fields, not projections. Rows missing a name
-    are skipped rather than raising.
+    LINEUP, FPTS, MIN EXP, MAX EXP. PLAYER/TEAM/POS/FPTS/RST% are used
+    directly here; RW Pick, VAL, OPP, LINEUP, and the exposure caps are
+    RotoWire's own lineup-building fields, not projections, and stay
+    unused. SAL is captured too -- RotoWire's player-pool export pulls
+    salary straight from DK, so it's the same number as a separate DK
+    upload would give, just bundled into one file. See
+    `salaries.from_rotowire_rows()` for where that gets used to spare a
+    separate salary upload when this file already has it. Rows missing
+    a name are skipped rather than raising.
     """
     rows: list[dict[str, Any]] = []
     reader = csv.DictReader(io.StringIO(text))
@@ -64,6 +73,7 @@ def parse_rotowire_csv(text: str) -> list[dict[str, Any]]:
                 "position": (row.get("POS") or "").strip(),
                 "fpts": _f(row.get("FPTS")),
                 "ownership_pct": _f(row.get("RST%")),
+                "salary": _i(row.get("SAL")),
             }
         )
     return rows

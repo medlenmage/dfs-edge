@@ -226,6 +226,13 @@ async def upload_projections(
 
     Reference data only -- see services/projections.py for why this
     isn't blended into the matchup score.
+
+    If the file's own SAL column has salary data (RotoWire's
+    player-pool export pulls it straight from DK) and no salary file
+    has been uploaded for this date yet, that salary data seeds the
+    salary store too -- one upload instead of two. A real DK upload,
+    now or later, still takes priority and is never overwritten by a
+    projections re-upload.
     """
     day = date or date_cls.today().isoformat()
     raw = await file.read()
@@ -241,7 +248,15 @@ async def upload_projections(
             detail="No players found in that file -- is it a RotoWire player-pool export?",
         )
     projections.store(day, rows)
-    return {"date": day, "players_loaded": len(rows)}
+    result = {"date": day, "players_loaded": len(rows)}
+
+    if not salaries.load(day):
+        derived = salaries.from_rotowire_rows(rows)
+        if derived:
+            salaries.store(day, derived)
+            result["salaries_derived"] = len(derived)
+
+    return result
 
 
 @router.get("/projections")

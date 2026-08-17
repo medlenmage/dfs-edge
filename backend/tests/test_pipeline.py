@@ -394,6 +394,31 @@ async def main() -> int:
           home_salary["value"] == round(home_edge["score"] / 8.8, 2),
           f"{home_salary['value']} vs expected {round(home_edge['score'] / 8.8, 2)}")
 
+    print("\nDeriving salaries from a RotoWire upload (one file instead of two)")
+
+    rw_with_sal = projections.parse_rotowire_csv(
+        "PLAYER,RW Pick,TEAM,SAL,POS,VAL,RST%,OPP,LINEUP,FPTS,MIN EXP,MAX EXP\n"
+        "Shohei Ohtani,-,LAD,7000,1B/OF,1.89,14.43,COL,1,13.21,0,100\n"
+        "Bobby Witt,-,KC,6000,SS,1.84,16.14,ATH,2,11.05,0,100\n"
+        "Freddy Fermin,-,SD,2400,C,0.73,0.00,NYM,BN,1.74,0,100\n"
+    )
+    check("parse_rotowire_csv captures the SAL column alongside FPTS/RST%",
+          [r["salary"] for r in rw_with_sal] == [7000, 6000, 2400], str(rw_with_sal))
+
+    derived = salaries.from_rotowire_rows(rw_with_sal)
+    check("from_rotowire_rows builds one DK-salary-shaped row per priced player",
+          len(derived) == 3 and derived[0]["salary"] == 7000 and derived[0]["position"] == "1B/OF",
+          str(derived[0]))
+    check("from_rotowire_rows leaves game_info/dk_id empty (RotoWire doesn't expose either)",
+          derived[0]["game_info"] == "" and derived[0]["dk_id"] == "", str(derived[0]))
+
+    rw_no_sal = projections.parse_rotowire_csv(
+        "PLAYER,RW Pick,TEAM,SAL,POS,VAL,RST%,OPP,LINEUP,FPTS,MIN EXP,MAX EXP\n"
+        "No Salary Guy,-,LAD,,1B,1.89,14.43,COL,1,13.21,0,100\n"
+    )
+    check("a RotoWire row with an empty SAL column is skipped, not treated as $0",
+          salaries.from_rotowire_rows(rw_no_sal) == [])
+
     print("\nInjuries")
     check("Red Sox injury report includes the hurt reliever",
           any(p["name"] == "Hurt Reliever" for p in game["home"]["injuries"]))

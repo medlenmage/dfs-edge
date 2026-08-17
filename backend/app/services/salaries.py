@@ -134,6 +134,46 @@ def parse_dk_csv(text: str) -> list[dict[str, Any]]:
     return rows
 
 
+def from_rotowire_rows(projection_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Build DK-salary-shaped rows from a RotoWire projections upload that
+    already carries a SAL column (RotoWire's player-pool export pulls
+    salary straight from DK, so it's the same number a separate DK
+    upload would give -- just bundled into one file). Lets a
+    projections-only upload seed the salary store too, sparing a
+    separate DK CSV when the file already has everything needed. See
+    routers/mlb.py's upload_projections for where this gets called,
+    and why it only fires when no salary data is loaded yet.
+
+    Two real gaps versus an actual DK export, both handled gracefully
+    rather than guessed at: no `game_info` (RotoWire doesn't expose the
+    away@home matchup string DK's own export does, so DK-slate
+    auto-detection just has nothing to detect until a real DK file is
+    uploaded -- same as the state before any salary file exists), and
+    no `dk_id` (RotoWire's file has no equivalent to DK's own numeric
+    player id, which only matters for NFL's optimizer output, not
+    MLB's -- this function is MLB-only for exactly that reason).
+    """
+    rows: list[dict[str, Any]] = []
+    for r in projection_rows:
+        salary = r.get("salary")
+        if not salary:
+            continue
+        rows.append(
+            {
+                "name": r["name"],
+                "normalized_name": r["normalized_name"],
+                "team": r["team"],
+                "position": r["position"],
+                "salary": salary,
+                "avg_points": None,
+                "game_info": "",
+                "dk_id": "",
+            }
+        )
+    return rows
+
+
 def parse_game_info(game_info: str) -> tuple[str, str] | None:
     """
     Pull the (away, home) team codes out of DK's "Game Info" column,
