@@ -139,7 +139,13 @@ def lineups_to_csv(
         row: dict[str, Any] = {
             "lineup_index": i,
             "salary_used": lineup.get("salary_used"),
-            "stack_type": stack_type,
+            # A leading apostrophe is the standard Excel "force this cell to
+            # stay text" escape -- without it, Excel's own CSV auto-typing
+            # reads a value like "5-3" as a date (March 5th) and displays
+            # the wrong thing, even though the raw field is plain text.
+            # Excel hides the apostrophe on display; a non-Excel reader
+            # sees it literally and should strip it if it cares.
+            "stack_type": f"'{stack_type}" if stack_type else "",
             "stack": stack,
             "projected_points": lineup.get("projected_points"),
             "total_ownership_pct": lineup.get("total_ownership_pct"),

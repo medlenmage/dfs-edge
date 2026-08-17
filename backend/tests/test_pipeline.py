@@ -1680,9 +1680,14 @@ async def main() -> int:
           p1_name_in_csv == p1_name_in_lineup, str((p1_name_in_csv, p1_name_in_lineup)))
     check("lineup-level totals (salary_used, projected_points) are carried into the CSV row",
           float(opt_csv_rows[0]["salary_used"]) == opt_lineup["salary_used"], opt_csv_rows[0]["salary_used"])
+    opt_expected_stack_type, opt_expected_stack = lineup_export.stack_info(opt_lineup)
     check("lineups_to_csv's stack_type/stack columns match stack_info() computed directly on the lineup",
-          (opt_csv_rows[0]["stack_type"], opt_csv_rows[0]["stack"]) == lineup_export.stack_info(opt_lineup),
-          str(((opt_csv_rows[0]["stack_type"], opt_csv_rows[0]["stack"]), lineup_export.stack_info(opt_lineup))))
+          (opt_csv_rows[0]["stack_type"].lstrip("'"), opt_csv_rows[0]["stack"]) == (opt_expected_stack_type, opt_expected_stack),
+          str(((opt_csv_rows[0]["stack_type"], opt_csv_rows[0]["stack"]), (opt_expected_stack_type, opt_expected_stack))))
+    check("a non-empty CSV stack_type gets a leading apostrophe so Excel doesn't misread it as a date "
+          "(e.g. '5-3' -> March 5th)",
+          not opt_expected_stack_type or opt_csv_rows[0]["stack_type"].startswith("'"),
+          opt_csv_rows[0]["stack_type"])
 
     batch_for_csv = contest.build_contest_entries(mul_slate, "gpp_small", 5, sample_size=50, seed=23)
     check("contest-generator entries carry their own stack_type/stack fields, matching stack_info()",
@@ -1697,8 +1702,9 @@ async def main() -> int:
           len(entries_csv_rows) == 5, str(len(entries_csv_rows)))
     check("the contest generator's flat `players` shape is already in roster order, no reordering needed",
           entries_csv_rows[0]["P1_name"] == batch_for_csv["entries"][0]["players"][0]["name"])
-    check("the CSV's stack_type/stack columns for a contest-generator entry match its own attached fields",
-          (entries_csv_rows[0]["stack_type"], entries_csv_rows[0]["stack"])
+    check("the CSV's stack_type/stack columns for a contest-generator entry match its own attached fields "
+          "(modulo the CSV's leading-apostrophe Excel escape)",
+          (entries_csv_rows[0]["stack_type"].lstrip("'"), entries_csv_rows[0]["stack"])
           == (batch_for_csv["entries"][0]["stack_type"], batch_for_csv["entries"][0]["stack"]),
           str((entries_csv_rows[0]["stack_type"], entries_csv_rows[0]["stack"])))
     check("results (rank/cash/payout), when given, are appended as extra columns",

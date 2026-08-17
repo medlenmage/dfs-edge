@@ -54,7 +54,16 @@ export function lineupsToCsv(lineups) {
   lineups.forEach((lineup, i) => {
     const used = {}
     const { stackType, stack } = stackInfo(lineup)
-    const row = [i, lineup.salary_used, stackType, stack, lineup.projected_points, lineup.total_ownership_pct]
+    // Leading apostrophe forces Excel to keep this cell as text -- without
+    // it, a value like "5-3" gets auto-read as a date (March 5th) on open.
+    const row = [
+      i,
+      lineup.salary_used,
+      stackType ? `'${stackType}` : '',
+      stack,
+      lineup.projected_points,
+      lineup.total_ownership_pct,
+    ]
     for (const label of labels) {
       const slot = label.replace(/\d+$/, '')
       const idx = used[slot] || 0
