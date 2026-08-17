@@ -31,6 +31,7 @@ from app.services import (  # noqa: E402
     projections,
     salaries,
     scoring,
+    variance,
 )
 
 DAY = "2026-08-14"
@@ -1713,6 +1714,73 @@ async def main() -> int:
           mlb_dk_points.pitcher_game_points(routine_start)
           == round(27 * 0.75 + 10 * 2 + 1 * 4 - 0 * 2 - 6 * 0.6 - 1 * 0.6 - 0 * 0.6, 2),
           str(mlb_dk_points.pitcher_game_points(routine_start)))
+
+    print("\nPer-player outcome distribution pools (variance.py)")
+
+    import statistics as statistics_module
+
+    VARIANCE_SEASON = 2099
+
+    def _rbi_game(rbi):
+        return {
+            "plate_appearances": 1, "hits": 0, "doubles": 0, "triples": 0,
+            "home_runs": 0, "rbi": rbi, "runs": 0, "walks": 0,
+            "hit_by_pitch": 0, "stolen_bases": 0,
+        }
+
+    # 60 games each (comfortably above MIN_GAMES_FULL_TRUST["hitter"]),
+    # identical season-average DK points (10.0), deliberately different
+    # game-to-game spread -- isolates the variance-capturing behavior
+    # from everything else.
+    consistent_games = [_rbi_game(r) for r in ([5, 4, 6, 5] * 15)]  # DK pts in {8,10,12}
+    boom_bust_games = [_rbi_game(r) for r in ([0, 10] * 30)]  # DK pts in {0,20}
+    thin_sample_games = [_rbi_game(5) for _ in range(3)]  # only 3 games, DK pts = 10 each
+
+    variance_game_logs = {
+        90001: consistent_games,
+        90002: boom_bust_games,
+        90003: thin_sample_games,
+        90005: consistent_games,
+    }
+
+    async def fake_variance_game_log(player_id, season, group="hitting"):
+        return variance_game_logs.get(player_id, [])
+
+    mlb.get_player_game_log = fake_variance_game_log
+
+    consistent_pool = await variance.player_outcome_pool(90001, "OF", VARIANCE_SEASON, seed=1)
+    boom_bust_pool = await variance.player_outcome_pool(90002, "OF", VARIANCE_SEASON, seed=1)
+
+    check("player_outcome_pool returns POOL_SIZE values",
+          len(consistent_pool) == variance.POOL_SIZE, str(len(consistent_pool)))
+    check("both pools have roughly the same mean (same underlying season average)",
+          abs(statistics_module.mean(consistent_pool) - statistics_module.mean(boom_bust_pool)) < 1.0,
+          str((statistics_module.mean(consistent_pool), statistics_module.mean(boom_bust_pool))))
+    check("the boom/bust player's pool has genuinely higher variance than the consistent player's",
+          statistics_module.pstdev(boom_bust_pool) > 3 * statistics_module.pstdev(consistent_pool),
+          str((statistics_module.pstdev(consistent_pool), statistics_module.pstdev(boom_bust_pool))))
+    check("a player with games well above MIN_GAMES_FULL_TRUST draws entirely from his own history",
+          set(consistent_pool) <= {8.0, 10.0, 12.0}, str(set(consistent_pool)))
+
+    # By now the shared "OF" position pool has been warmed up by the
+    # two full-season players above (each call contributes its own
+    # games), so a thin-sample player's pool should blend in values
+    # beyond his own 3 games rather than being stuck at exactly {10.0}.
+    thin_pool = await variance.player_outcome_pool(90003, "OF", VARIANCE_SEASON, seed=2)
+    check("a thin-sample player's pool blends in values from the warmed-up shared position pool",
+          not (set(thin_pool) <= {10.0}), str(sorted(set(thin_pool)))[:200])
+
+    # A player with literally zero games this season (hasn't debuted
+    # yet) falls back entirely to the shared position pool rather than
+    # an empty or fabricated result.
+    no_games_pool = await variance.player_outcome_pool(90004, "OF", VARIANCE_SEASON, seed=3)
+    check("a player with zero games this season falls back to the shared position pool",
+          len(no_games_pool) > 0, str(len(no_games_pool)))
+
+    first_call = await variance.player_outcome_pool(90005, "OF", VARIANCE_SEASON, seed=42)
+    second_call = await variance.player_outcome_pool(90005, "OF", VARIANCE_SEASON, seed=7)
+    check("player_outcome_pool is cached -- calling again returns the same pool, ignoring a new seed",
+          first_call == second_call, str((len(first_call), len(second_call))))
 
     print("\nJSON serialisation")
     import json
