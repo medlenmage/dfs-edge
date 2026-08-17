@@ -56,18 +56,50 @@ _TTL = 60 * 60 * 24 * 7
 _GAME_INFO_RE = re.compile(r"^([A-Z]{2,4})@([A-Z]{2,4})\b")
 
 
+def _find_dk_header_row(all_rows: list[list[str]]) -> int | None:
+    """
+    DK ships salary data in two different CSV shapes depending on where
+    you export from. The player-pool page gives a flat file with the
+    real header on row 1. The lineup-builder page's "Export to CSV"
+    button gives a wider file: an empty roster-slot template
+    ("P,P,C,1B,2B,3B,SS,OF,OF,OF,,Instructions") occupies the first
+    several rows/columns, with the actual player table's header --
+    Position, Name + ID, Name, ID, Roster Position, Salary, Game Info,
+    TeamAbbrev, AvgPointsPerGame -- embedded partway down, offset well
+    past column 0. Blindly treating row 1 as the header (what a plain
+    `csv.DictReader` does) finds none of those columns in that second
+    shape, so every row gets skipped and the whole upload silently
+    reports zero players. Scanning for the row containing "Salary" and
+    "TeamAbbrev" -- two column names unique enough to DK's export that
+    they won't appear elsewhere -- finds the real header regardless of
+    which shape or how far down the file it landed.
+    """
+    for i, row in enumerate(all_rows):
+        if "Salary" in row and "TeamAbbrev" in row:
+            return i
+    return None
+
+
 def parse_dk_csv(text: str) -> list[dict[str, Any]]:
     """
     Parse a DraftKings 'DKSalaries.csv' export into a flat list.
 
     Expected columns (DK's standard classic-contest export): Position,
     Name + ID, Name, ID, Roster Position, Salary, Game Info, TeamAbbrev,
-    AvgPointsPerGame. Rows missing a name or salary are skipped rather
-    than raising, since a malformed row shouldn't sink the whole upload.
+    AvgPointsPerGame -- see `_find_dk_header_row` for why this doesn't
+    just assume they're on row 1. Rows missing a name or salary are
+    skipped rather than raising, since a malformed row shouldn't sink
+    the whole upload.
     """
+    all_rows = list(csv.reader(io.StringIO(text)))
+    header_idx = _find_dk_header_row(all_rows)
+    if header_idx is None:
+        return []
+    header = all_rows[header_idx]
+
     rows: list[dict[str, Any]] = []
-    reader = csv.DictReader(io.StringIO(text))
-    for row in reader:
+    for data_row in all_rows[header_idx + 1 :]:
+        row = dict(zip(header, data_row))
         name = (row.get("Name") or "").strip()
         salary_raw = row.get("Salary")
         if not name or not salary_raw:
