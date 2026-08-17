@@ -375,6 +375,36 @@ def _payout_curve(paid_count: int, prize_pool: float, shape: str) -> list[float]
     return [round(prize_pool * w / total_weight, 2) for w in weights]
 
 
+def _custom_payout_curve(
+    paid_count: int, prize_pool: float, shape: str, first_place_pct: float | None
+) -> list[float]:
+    """
+    Like _payout_curve, but for a real contest imported from a DK
+    entries file (see dk_entries.py): `first_place_pct`, if given,
+    pins rank 1's payout to exactly that percentage of the pool -- the
+    one piece of the payout table a bulk entries export never includes
+    -- while every other paid rank still splits the *remaining* pool
+    using the same top-heavy decay shape _payout_curve already uses,
+    rescaled so the whole curve still sums to prize_pool exactly.
+    Falls back to the plain curve when there's no override to apply
+    (a flat-split contest, or fewer than 2 paid places, has no "the
+    rest" to rescale).
+    """
+    base = _payout_curve(paid_count, prize_pool, shape)
+    if first_place_pct is None or shape != "top_heavy" or paid_count <= 1:
+        return base
+    first_place_payout = round(prize_pool * first_place_pct / 100, 2)
+    remaining_pool = prize_pool - first_place_payout
+    rest_weights = [1 / (rank + 1) ** TOP_HEAVY_EXPONENT for rank in range(1, paid_count)]
+    total_rest_weight = sum(rest_weights)
+    rest_payouts = (
+        [round(remaining_pool * w / total_rest_weight, 2) for w in rest_weights]
+        if total_rest_weight
+        else [0.0] * (paid_count - 1)
+    )
+    return [first_place_payout, *rest_payouts]
+
+
 def evaluate_field(
     field: list[dict[str, Any]],
     user_lineups: list[dict[str, Any]],
@@ -505,6 +535,7 @@ async def evaluate_batch_simulated(
     season: int,
     num_trials: int = 2000,
     seed: int | None = None,
+    first_place_pct: float | None = None,
 ) -> dict[str, Any]:
     """
     Like `_evaluate_batch_against_field`, but ranks against
@@ -525,6 +556,13 @@ async def evaluate_batch_simulated(
     trial, distinct_rank_i = i + running_max_{j<=i}(percentile_rank_j -
     j) is the closed form of that exact recurrence, vectorized across
     every trial at once instead of looping trial by trial in Python.
+
+    `contest["prize_pool"]`, if present, is used directly instead of
+    estimating one from field_size * entry_fee -- for a real contest
+    imported via dk_entries.py, the real prize pool is known outright
+    rather than needing to be inferred. `first_place_pct`, passed
+    through to _custom_payout_curve(), does the same for the one paid
+    rank a bulk entries export can't tell you anything about.
     """
     if not entries:
         raise ContestError("Need at least one entry to simulate.")
@@ -534,8 +572,8 @@ async def evaluate_batch_simulated(
     field_size = contest["field_size"]
     entry_fee = contest["entry_fee"]
     paid_count = max(1, round(field_size * contest["payout_pct"]))
-    prize_pool = round(field_size * entry_fee * (1 - RAKE_PCT), 2)
-    payouts = np.array(_payout_curve(paid_count, prize_pool, contest["shape"]))
+    prize_pool = contest.get("prize_pool") or round(field_size * entry_fee * (1 - RAKE_PCT), 2)
+    payouts = np.array(_custom_payout_curve(paid_count, prize_pool, contest["shape"], first_place_pct))
 
     num_entries = len(entries)
     sample_size = len(field)
@@ -900,5 +938,111 @@ async def build_contest_entries_simulated(
             "real Monte Carlo simulated trials of each player's own historical outcome "
             "pool, with team correlation for hitters -- a genuine probability, not a "
             "single projected-points estimate against the field."
+        ),
+    }
+
+
+async def build_dk_entries_simulated(
+    slate: dict[str, Any],
+    entries: list[dict[str, Any]],
+    *,
+    season: int,
+    field_size: int,
+    prize_pool: float,
+    first_place_pct: float,
+    payout_pct: float = 0.20,
+    shape: str = "top_heavy",
+    num_trials: int = 10_000,
+    sample_size: int | None = None,
+    included_game_pks: list[int] | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """
+    Like build_contest_entries_simulated, but for lineups you actually
+    built (or reserved) on DraftKings -- resolved via
+    dk_entries.resolve_entries() -- against a REAL contest's economics,
+    rather than this app's own randomized entries against a named
+    preset. A bulk entries export has no payout-table data at all, so
+    prize_pool/first_place_pct describe the contest by hand; payout_pct
+    (what fraction of the field cashes) and shape default to a typical
+    top-heavy GPP but can be overridden the same way.
+
+    `field_size` is the REAL contest's total entry count (not just how
+    many of your own entries are in `entries`) -- needed to know both
+    the cash line (paid_count = field_size * payout_pct) and to build a
+    correctly-sized synthetic opponent field to simulate against, same
+    role it plays everywhere else in this module.
+    """
+    if not entries:
+        raise ContestError("No resolvable entries to simulate -- every row was missing a full 10-man lineup.")
+    if field_size < len(entries):
+        raise ContestError(
+            f"field_size ({field_size:,}) can't be smaller than the number of entries being "
+            f"simulated ({len(entries):,}) -- your own entries are part of the field."
+        )
+
+    contest = {
+        "entry_fee": entries[0].get("entry_fee") or 0.0,
+        "field_size": field_size,
+        "payout_pct": payout_pct,
+        "shape": shape,
+        "prize_pool": prize_pool,
+    }
+    field_sample = sample_size or min(field_size, MAX_SAMPLE_SIZE)
+    field = generate_field(slate, field_sample, included_game_pks=included_game_pks, seed=seed)
+
+    evaluation = await evaluate_batch_simulated(
+        entries,
+        field,
+        contest,
+        season=season,
+        num_trials=num_trials,
+        seed=(seed + 2) if seed is not None else None,
+        first_place_pct=first_place_pct,
+    )
+
+    order = sorted(range(len(entries)), key=lambda i: -evaluation["results"][i]["roi_pct"])
+    entries = [entries[i] for i in order]
+    evaluation = {
+        **evaluation,
+        "results": [{**evaluation["results"][i], "lineup_index": new_i} for new_i, i in enumerate(order)],
+    }
+
+    cash_probs = [r["cash_probability_pct"] for r in evaluation["results"]]
+    first_place_pcts_sim = [r["first_place_pct"] for r in evaluation["results"]]
+    top_1pct_pcts = [r["top_1pct_pct"] for r in evaluation["results"]]
+    top_10pct_pcts = [r["top_10pct_pct"] for r in evaluation["results"]]
+    roi_pcts = [r["roi_pct"] for r in evaluation["results"]]
+    expected_payouts = [r["expected_payout"] for r in evaluation["results"]]
+    total_cost = round(sum(e.get("entry_fee") or 0.0 for e in entries), 2)
+    total_expected_payout = round(sum(expected_payouts), 2)
+
+    return {
+        "contest": contest,
+        "num_entries_built": len(entries),
+        "field_size": evaluation["field_size"],
+        "sample_size": evaluation["sample_size"],
+        "paid_count": evaluation["paid_count"],
+        "prize_pool": evaluation["prize_pool"],
+        "num_trials": evaluation["num_trials"],
+        "summary": {
+            "avg_cash_probability_pct": round(sum(cash_probs) / len(cash_probs), 1),
+            "avg_first_place_pct": round(sum(first_place_pcts_sim) / len(first_place_pcts_sim), 2),
+            "avg_top_1pct_pct": round(sum(top_1pct_pcts) / len(top_1pct_pcts), 2),
+            "avg_top_10pct_pct": round(sum(top_10pct_pcts) / len(top_10pct_pcts), 2),
+            "avg_roi_pct": round(sum(roi_pcts) / len(roi_pcts), 1),
+            "total_entry_cost": total_cost,
+            "total_expected_payout": total_expected_payout,
+            "estimated_net_profit": round(total_expected_payout - total_cost, 2),
+        },
+        "exposure": field_exposure(entries, top_n=20),
+        "entries": entries,
+        "results": evaluation["results"],
+        "note": (
+            f"Cash probability and expected payout come from {evaluation['num_trials']:,} real "
+            "Monte Carlo simulated trials of each player's own historical outcome pool, with team "
+            "correlation for hitters, against this real contest's actual entry fee/prize pool -- "
+            "the only hand-entered numbers are prize_pool, first_place_pct, and field_size, since "
+            "a DraftKings entries export doesn't include the contest's payout table."
         ),
     }

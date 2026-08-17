@@ -173,7 +173,6 @@ export const api = {
     contestType,
     numLineups,
     {
-      numTrials = 1000,
       maxExposurePct = null,
       fieldSize = null,
       sampleSize = null,
@@ -186,9 +185,30 @@ export const api = {
         date,
         contest_type: contestType,
         num_lineups: numLineups,
-        num_trials: numTrials,
         max_exposure_pct: maxExposurePct,
         field_size: fieldSize,
+        sample_size: sampleSize,
+        included_game_pks: includedGamePks,
+      }),
+    }),
+
+  uploadDkEntries: (date, file) => uploadFile(`/api/mlb/dk-entries?date=${date}`, file),
+
+  simulateDkEntries: (
+    date,
+    contestId,
+    { fieldSize, prizePool, firstPlacePct, payoutPct, shape, sampleSize = null, includedGamePks = null } = {},
+  ) =>
+    request('/api/mlb/dk-entries/simulate', {
+      method: 'POST',
+      body: JSON.stringify({
+        date,
+        contest_id: contestId,
+        field_size: fieldSize,
+        prize_pool: prizePool,
+        first_place_pct: firstPlacePct,
+        payout_pct: payoutPct,
+        shape,
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
       }),

@@ -22,6 +22,7 @@ from app.clients import mlb, odds, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     contest,
+    dk_entries,
     lineup_export,
     lineup_watch,
     mlb_dk_points,
@@ -2040,6 +2041,114 @@ async def main() -> int:
     check("the simulated CSV's roi_pct column matches the JSON response, in the same (sorted) row order",
           [row["roi_pct"] for row in sim_csv_rows] == [str(r["roi_pct"]) for r in sim_batch["results"]],
           str(([row["roi_pct"] for row in sim_csv_rows], [r["roi_pct"] for r in sim_batch["results"]])))
+
+    print("\nDraftKings entries CSV (dk_entries.py) -- simulating lineups you actually built on DK")
+
+    # DK's real bulk-entries export packs two unrelated tables into one
+    # CSV: the entries table (Entry ID..OF3) starting at column 0, and
+    # the slate's full player pool starting well past it (column 15
+    # here, matching the real file's own "blank column, then
+    # Instructions" offset) -- confirmed against a real DK export
+    # during manual verification. Reusing mul_slate's own players
+    # (MP1/MP2/MC1/M1B1/M2B1/M3B1/MSS1/MOF1/MOF2/MOF3) so the resolved
+    # salary/points totals can be checked against known values.
+    dk_header = "Entry ID,Contest Name,Contest ID,Entry Fee,P,P,C,1B,2B,3B,SS,OF,OF,OF,,Instructions"
+    dk_filled_picks = (
+        "MP1 (90001),MP2 (90002),MC1 (90003),M1B1 (90004),M2B1 (90005),"
+        "M3B1 (90006),MSS1 (90007),MOF1 (90008),MOF2 (90009),MOF3 (90010)"
+    )
+    dk_entry_rows = [
+        f"5000000001,Test GPP,7000001,$1.00,{dk_filled_picks},,",
+        "5000000002,Test GPP,7000001,$1.00,,,,,,,,,,,",
+        "5000000003,Other Contest,7000002,$5.00,,,,,,,,,,,",
+    ]
+    dk_pad = "," * 15  # entries table is 14 columns wide + 1 blank column before "Instructions"
+    dk_pool_header = dk_pad + "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame"
+    dk_pool_rows = [
+        dk_pad + row
+        for row in [
+            "SP,MP1 (90001),MP1,90001,P,9000,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,18.0",
+            "SP,MP2 (90002),MP2,90002,P,8800,MUL1@MUL2 08/17/2026 07:05PM ET,MUL2,17.5",
+            "C,MC1 (90003),MC1,90003,C,3000,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,8.0",
+            "1B,M1B1 (90004),M1B1,90004,1B,4000,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,10.0",
+            "2B,M2B1 (90005),M2B1,90005,2B,3500,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,9.0",
+            "3B,M3B1 (90006),M3B1,90006,3B,4500,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,12.0",
+            "SS,MSS1 (90007),MSS1,90007,SS,3800,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,9.5",
+            "OF,MOF1 (90008),MOF1,90008,OF,5000,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,14.0",
+            "OF,MOF2 (90009),MOF2,90009,OF,4800,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,13.5",
+            "OF,MOF3 (90010),MOF3,90010,OF,4600,MUL1@MUL2 08/17/2026 07:05PM ET,MUL1,13.0",
+        ]
+    ]
+    dk_entries_csv = "\n".join([dk_header, *dk_entry_rows, dk_pool_header, *dk_pool_rows]) + "\n"
+
+    dk_parsed = dk_entries.parse_entries_csv(dk_entries_csv)
+    check("parse_entries_csv finds all 3 entries and stops before the embedded player-pool table",
+          len(dk_parsed) == 3, str(len(dk_parsed)))
+    check("a filled entry's picks are DK ids in fixed roster order",
+          dk_parsed[0]["picks"] == ["90001", "90002", "90003", "90004", "90005", "90006", "90007", "90008", "90009", "90010"],
+          str(dk_parsed[0]["picks"]))
+    check("a blank reservation's picks are all None",
+          dk_parsed[1]["picks"] == [None] * 10, str(dk_parsed[1]["picks"]))
+    check("entry_fee is parsed as a float, dollar sign stripped",
+          dk_parsed[0]["entry_fee"] == 1.0 and dk_parsed[2]["entry_fee"] == 5.0,
+          str((dk_parsed[0]["entry_fee"], dk_parsed[2]["entry_fee"])))
+
+    dk_contests = dk_entries.contest_summary(dk_parsed)
+    contests_by_id = {c["contest_id"]: c for c in dk_contests}
+    check("contest_summary finds both distinct contests in the file",
+          set(contests_by_id) == {"7000001", "7000002"}, str(set(contests_by_id)))
+    check("contest_summary counts entries and filled lineups per contest correctly",
+          contests_by_id["7000001"]["num_entries"] == 2 and contests_by_id["7000001"]["num_filled"] == 1
+          and contests_by_id["7000002"]["num_entries"] == 1 and contests_by_id["7000002"]["num_filled"] == 0,
+          str(contests_by_id))
+
+    dk_resolved_all, dk_warnings_all = dk_entries.resolve_entries(dk_entries_csv, mul_slate)
+    check("resolve_entries resolves the one filled entry and warns about both blank reservations",
+          len(dk_resolved_all) == 1 and len(dk_warnings_all) == 2,
+          str((len(dk_resolved_all), len(dk_warnings_all))))
+    check("a resolved entry's players are matched against the live slate's own player data "
+          "(internal ids, not DK's own numeric ids)",
+          {p["id"] for p in dk_resolved_all[0]["players"]}
+          == {9400, 9401, 9301, 9304, 9307, 9310, 9313, 9316, 9317, 9318},
+          str(sorted(p["id"] for p in dk_resolved_all[0]["players"])))
+    check("a resolved entry's salary_used/projected_points sum the matched players' real slate values",
+          dk_resolved_all[0]["salary_used"] == 51000 and dk_resolved_all[0]["projected_points"] == 124.5,
+          str((dk_resolved_all[0]["salary_used"], dk_resolved_all[0]["projected_points"])))
+
+    dk_resolved_one_contest, dk_warnings_one_contest = dk_entries.resolve_entries(
+        dk_entries_csv, mul_slate, contest_id="7000001"
+    )
+    check("resolve_entries with contest_id filters out the other contest's entries entirely (no warning for it)",
+          len(dk_resolved_one_contest) == 1 and len(dk_warnings_one_contest) == 1,
+          str((len(dk_resolved_one_contest), len(dk_warnings_one_contest))))
+
+    curve = contest._custom_payout_curve(10, 1000.0, "top_heavy", 40.0)
+    check("_custom_payout_curve pins rank 1's payout to exactly first_place_pct of the pool",
+          curve[0] == 400.0, str(curve[0]))
+    check("_custom_payout_curve's whole curve still sums to (approximately) the full prize pool",
+          abs(sum(curve) - 1000.0) < 0.10, str(sum(curve)))
+    check("_custom_payout_curve falls back to the plain curve when no first_place_pct override is given",
+          contest._custom_payout_curve(10, 1000.0, "top_heavy", None)
+          == contest._payout_curve(10, 1000.0, "top_heavy"))
+
+    dk_sim = await contest.build_dk_entries_simulated(
+        mul_slate, dk_resolved_all, season=2099, field_size=500, prize_pool=200.0,
+        first_place_pct=25.0, payout_pct=0.20, num_trials=300, seed=11,
+    )
+    check("build_dk_entries_simulated simulates the resolved entry and reports the real contest's own economics",
+          dk_sim["field_size"] == 500 and dk_sim["prize_pool"] == 200.0 and dk_sim["num_entries_built"] == 1,
+          str((dk_sim["field_size"], dk_sim["prize_pool"], dk_sim["num_entries_built"])))
+    check("build_dk_entries_simulated's total_entry_cost matches the entry's own real entry_fee from the file",
+          dk_sim["summary"]["total_entry_cost"] == 1.0, str(dk_sim["summary"]["total_entry_cost"]))
+
+    try:
+        await contest.build_dk_entries_simulated(
+            mul_slate, dk_resolved_all, season=2099, field_size=0, prize_pool=200.0,
+            first_place_pct=25.0, num_trials=50,
+        )
+        check("build_dk_entries_simulated rejects a field_size smaller than the entry count", False)
+    except contest.ContestError:
+        check("build_dk_entries_simulated rejects a field_size smaller than the entry count", True)
 
     print("\nJSON serialisation")
     import json

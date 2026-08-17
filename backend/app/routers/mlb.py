@@ -9,19 +9,17 @@ from uuid import uuid4
 from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile
 
 from app import cache
-from app.services import analysis, contest, lineup_export, mlb_slate, optimizer, projections, salaries
+from app.services import analysis, contest, dk_entries, lineup_export, mlb_slate, optimizer, projections, salaries
 
 # How long a generated contest-entries batch stays downloadable as CSV
 # after the fact -- long enough to cover "generate, look it over, then
 # download," short enough not to pile up disk cache forever.
 _CONTEST_BATCH_TTL = 3600
 
-# A Monte Carlo trial is real compute (every player's own outcome pool,
-# resampled num_trials times) on top of an already-large mass-generation
-# call -- capped well below contest.MAX_USER_LINEUPS' scale so a single
-# request can't hang the server.
-_MAX_SIM_TRIALS = 5000
-_DEFAULT_SIM_TRIALS = 1000
+# Every simulated run uses the same trial count -- not user-configurable,
+# so results are always directly comparable across runs and there's no
+# "how many trials should I pick" decision to make.
+_SIM_TRIALS = 10_000
 
 router = APIRouter(prefix="/api/mlb", tags=["mlb"])
 
@@ -518,9 +516,6 @@ async def build_contest_entries_simulated(
     date: str | None = Body(None, embed=True),
     contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
     num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {contest.MAX_USER_LINEUPS:,}"),
-    num_trials: int = Body(
-        _DEFAULT_SIM_TRIALS, embed=True, description=f"Monte Carlo trials to run, up to {_MAX_SIM_TRIALS:,}"
-    ),
     max_exposure_pct: float | None = Body(
         None, embed=True, description="Cap how often any one player appears across the whole batch"
     ),
@@ -540,13 +535,13 @@ async def build_contest_entries_simulated(
     instead of a single projected-points snapshot against the field --
     each entry's cash_probability_pct is the real fraction of simulated
     trials it lands in the paid zone, with an expected_payout range
-    (10th/90th percentile), not a point estimate. Slower than
-    /contest-entries (fetches every player's own real outcome pool, then
-    runs num_trials simulated realities), so this is a separate opt-in
-    endpoint rather than a flag on the fast deterministic default.
+    (10th/90th percentile), not a point estimate. Always runs
+    _SIM_TRIALS trials -- not user-configurable, so results are always
+    directly comparable run to run. Slower than /contest-entries
+    (fetches every player's own real outcome pool, then runs 10,000
+    simulated realities), so this is a separate opt-in endpoint rather
+    than a flag on the fast deterministic default.
     """
-    if not (1 <= num_trials <= _MAX_SIM_TRIALS):
-        raise HTTPException(status_code=400, detail=f"num_trials must be between 1 and {_MAX_SIM_TRIALS:,}.")
     day = date or date_cls.today().isoformat()
     season = int(day[:4])
     slate = await mlb_slate.build_slate(day)
@@ -556,7 +551,7 @@ async def build_contest_entries_simulated(
             contest_type,
             num_lineups,
             season=season,
-            num_trials=num_trials,
+            num_trials=_SIM_TRIALS,
             max_exposure_pct=max_exposure_pct,
             field_size=field_size,
             sample_size=sample_size,
@@ -604,3 +599,110 @@ async def download_contest_entries_csv(batch_id: str) -> Response:
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="contest-entries-{batch_id}.csv"'},
     )
+
+
+@router.post("/dk-entries")
+async def upload_dk_entries(
+    date: str | None = Query(None, description="Slate date this file is for, defaults to today"),
+    file: UploadFile = File(..., description="DraftKings bulk entries export/upload CSV"),
+) -> dict[str, Any]:
+    """
+    Upload a DraftKings entries CSV -- the same "bulk entries" export/
+    upload file DK's own site gives you, one row per contest entry you
+    reserved or already built a lineup for. Cached until you upload a
+    new one for the same date, same as the salary/projections uploads.
+
+    Returns the distinct contests found in the file (a single export
+    can span more than one, if you entered several the same day) so
+    the frontend can offer a picker -- POST /dk-entries/simulate takes
+    the contest_id from here.
+    """
+    day = date or date_cls.today().isoformat()
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Couldn't read that as text: {exc}") from exc
+
+    entries = dk_entries.parse_entries_csv(text)
+    if not entries:
+        raise HTTPException(
+            status_code=400,
+            detail="No entries found in that file -- is it a DraftKings bulk entries export?",
+        )
+    dk_entries.store(day, text)
+    return {"date": day, "contests": dk_entries.contest_summary(entries)}
+
+
+@router.post("/dk-entries/simulate")
+async def simulate_dk_entries(
+    date: str | None = Body(None, embed=True),
+    contest_id: str = Body(..., embed=True, description="One of GET /dk-entries's returned contest_id values"),
+    field_size: int = Body(..., embed=True, description="The real contest's total entry count"),
+    prize_pool: float = Body(..., embed=True, description="The real contest's total prize pool"),
+    first_place_pct: float = Body(..., embed=True, description="% of the prize pool 1st place wins"),
+    payout_pct: float = Body(0.20, embed=True, description="Fraction of field_size that cashes"),
+    shape: str = Body("top_heavy", embed=True, description="'top_heavy' (GPP) or 'flat' (double-up/50-50)"),
+    sample_size: int | None = Body(
+        None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
+    ),
+    included_game_pks: list[int] | None = Body(
+        None, embed=True, description="Restrict the opponent field to these games only"
+    ),
+) -> dict[str, Any]:
+    """
+    Simulate the lineups you actually built for one real contest from
+    an uploaded DK entries file (POST /dk-entries), against that
+    contest's real economics -- entry fee comes straight from the
+    file, prize_pool/first_place_pct/field_size/payout_pct/shape are
+    hand-entered since a bulk entries export has no payout-table data
+    at all. Always runs 10,000 trials, same as /contest-entries-simulated.
+    """
+    day = date or date_cls.today().isoformat()
+    text = dk_entries.load(day)
+    if not text:
+        raise HTTPException(
+            status_code=404,
+            detail="No DK entries file uploaded for that date yet -- upload one via POST /dk-entries first.",
+        )
+    season = int(day[:4])
+    slate = await mlb_slate.build_slate(day)
+    resolved, warnings = dk_entries.resolve_entries(text, slate, contest_id=contest_id)
+    if not resolved:
+        raise HTTPException(
+            status_code=400,
+            detail="None of that contest's entries could be simulated -- every one was either an "
+            "empty reservation or referenced a player not in today's loaded salary/projections pool.",
+        )
+
+    try:
+        result = await contest.build_dk_entries_simulated(
+            slate,
+            resolved,
+            season=season,
+            field_size=field_size,
+            prize_pool=prize_pool,
+            first_place_pct=first_place_pct,
+            payout_pct=payout_pct,
+            shape=shape,
+            num_trials=_SIM_TRIALS,
+            sample_size=sample_size,
+            included_game_pks=included_game_pks,
+        )
+    except contest.ContestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    full_entries = result.pop("entries")
+    full_results = result["results"]
+    batch_id = uuid4().hex
+    cache.put(
+        f"contest_batch:{batch_id}",
+        {"entries": full_entries, "results": full_results},
+        _CONTEST_BATCH_TTL,
+    )
+
+    result["batch_id"] = batch_id
+    result["results"] = full_results[:200]
+    result["sample_entries"] = full_entries[:200]
+    result["warnings"] = warnings
+    return {"date": day, **result}

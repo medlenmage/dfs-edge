@@ -14,15 +14,28 @@ import { localTime } from '../format'
  * See the caveat rendered next to the economics numbers below.
  */
 export function ContestGeneratorPanel({ date, slate }) {
+  const [mode, setMode] = useState('generate') // 'generate' | 'dk-entries'
   const [contestTypes, setContestTypes] = useState(null)
   const [contestType, setContestType] = useState('gpp_large')
   const [numLineups, setNumLineups] = useState(500)
   const [maxExposure, setMaxExposure] = useState('')
   const [simulate, setSimulate] = useState(false)
-  const [numTrials, setNumTrials] = useState(1000)
   const [showSlateGames, setShowSlateGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
   const [state, setState] = useState({ status: 'idle' })
+
+  const [dkUploading, setDkUploading] = useState(false)
+  const [dkUploadError, setDkUploadError] = useState('')
+  const [dkContests, setDkContests] = useState(null)
+  const [dkContestId, setDkContestId] = useState('')
+  const [dkFieldSize, setDkFieldSize] = useState(1000)
+  const [dkPrizePool, setDkPrizePool] = useState(1000)
+  const [dkFirstPlacePct, setDkFirstPlacePct] = useState(20)
+
+  function switchMode(m) {
+    setMode(m)
+    setState({ status: 'idle' })
+  }
 
   useEffect(() => {
     api
@@ -71,9 +84,42 @@ export function ContestGeneratorPanel({ date, slate }) {
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
       }
       const result = simulate
-        ? await api.buildContestEntriesSimulated(date, contestType, numLineups, { ...opts, numTrials })
+        ? await api.buildContestEntriesSimulated(date, contestType, numLineups, opts)
         : await api.buildContestEntries(date, contestType, numLineups, opts)
-      setState({ status: 'ready', simulated: simulate, ...result })
+      setState({ status: 'ready', simulated: simulate, mode: 'generate', ...result })
+    } catch (err) {
+      setState({ status: 'error', message: err.message })
+    }
+  }
+
+  async function uploadDkFile(file) {
+    setDkUploading(true)
+    setDkUploadError('')
+    try {
+      const result = await api.uploadDkEntries(date, file)
+      setDkContests(result.contests)
+      setDkContestId(result.contests[0]?.contest_id || '')
+    } catch (err) {
+      setDkUploadError(err.message)
+      setDkContests(null)
+    } finally {
+      setDkUploading(false)
+    }
+  }
+
+  const selectedDkContest = dkContests?.find((c) => c.contest_id === dkContestId)
+
+  async function runDkEntries() {
+    setState({ status: 'loading' })
+    try {
+      const result = await api.simulateDkEntries(date, dkContestId, {
+        fieldSize: dkFieldSize,
+        prizePool: dkPrizePool,
+        firstPlacePct: dkFirstPlacePct,
+        includedGamePks:
+          slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
+      })
+      setState({ status: 'ready', simulated: true, mode: 'dk-entries', ...result })
     } catch (err) {
       setState({ status: 'error', message: err.message })
     }
@@ -81,6 +127,16 @@ export function ContestGeneratorPanel({ date, slate }) {
 
   return (
     <div className="card">
+      <div className="controls" style={{ marginBottom: 14 }}>
+        <button className={mode === 'generate' ? 'primary' : ''} onClick={() => switchMode('generate')}>
+          Generate entries
+        </button>
+        <button className={mode === 'dk-entries' ? 'primary' : ''} onClick={() => switchMode('dk-entries')}>
+          My DK entries
+        </button>
+      </div>
+
+      {mode === 'generate' && (
       <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
         <label className="dim" style={{ fontSize: 13 }}>
           Contest{' '}
@@ -123,18 +179,6 @@ export function ContestGeneratorPanel({ date, slate }) {
           <input type="checkbox" checked={simulate} onChange={(e) => setSimulate(e.target.checked)} />
           Simulate
         </label>
-        {simulate && (
-          <label className="dim" style={{ fontSize: 13 }}>
-            Trials{' '}
-            <select value={numTrials} onChange={(e) => setNumTrials(Number(e.target.value))}>
-              {[500, 1000, 2000, 5000].map((n) => (
-                <option key={n} value={n}>
-                  {n.toLocaleString()}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
         {slateGames.length > 0 && (
           <button onClick={() => setShowSlateGames((v) => !v)}>
             {showSlateGames ? 'Hide slate games' : 'Slate games'} ({includedGames.size} of{' '}
@@ -149,8 +193,85 @@ export function ContestGeneratorPanel({ date, slate }) {
             : `${simulate ? 'Simulate' : 'Build'} ${numLineups.toLocaleString()} entries`}
         </button>
       </div>
+      )}
 
-      {preset && overRequested && (
+      {mode === 'dk-entries' && (
+      <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
+        <input
+          type="file"
+          accept=".csv"
+          id="dk-entries-file"
+          style={{ display: 'none' }}
+          onChange={(e) => e.target.files[0] && uploadDkFile(e.target.files[0])}
+        />
+        <button onClick={() => document.getElementById('dk-entries-file').click()} disabled={dkUploading}>
+          {dkUploading ? 'Uploading…' : dkContests ? 'Re-upload DK entries CSV' : 'Upload DK entries CSV'}
+        </button>
+        {dkContests && dkContests.length > 0 && (
+          <>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Contest{' '}
+              <select value={dkContestId} onChange={(e) => setDkContestId(e.target.value)}>
+                {dkContests.map((c) => (
+                  <option key={c.contest_id} value={c.contest_id}>
+                    {c.contest_name} ({c.num_filled}/{c.num_entries} filled)
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedDkContest && (
+              <span className="badge" title="Read straight from the uploaded file">
+                ${selectedDkContest.entry_fee?.toFixed(2)} entry fee
+              </span>
+            )}
+            <label className="dim" style={{ fontSize: 13 }}>
+              Total contest entries{' '}
+              <input
+                type="number"
+                min="1"
+                value={dkFieldSize}
+                onChange={(e) => setDkFieldSize(Math.max(1, Number(e.target.value) || 1))}
+                style={{ width: 90 }}
+              />
+            </label>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Prize pool{' '}
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={dkPrizePool}
+                onChange={(e) => setDkPrizePool(Math.max(0, Number(e.target.value) || 0))}
+                style={{ width: 100 }}
+              />
+            </label>
+            <label className="dim" style={{ fontSize: 13 }}>
+              1st place %{' '}
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="0.1"
+                value={dkFirstPlacePct}
+                onChange={(e) => setDkFirstPlacePct(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                style={{ width: 70 }}
+              />
+            </label>
+            <button
+              className="primary"
+              onClick={runDkEntries}
+              disabled={state.status === 'loading' || !dkContestId}
+            >
+              {state.status === 'loading' ? 'Simulating…' : 'Simulate my entries'}
+            </button>
+          </>
+        )}
+      </div>
+      )}
+
+      {dkUploadError && <div className="notice error" style={{ marginBottom: 14 }}>{dkUploadError}</div>}
+
+      {mode === 'generate' && preset && overRequested && (
         <div className="notice" style={{ marginBottom: 14 }}>
           {preset.label}'s field only holds {preset.field_size.toLocaleString()} entries — your own
           entries are part of that field, not additional to it. Lower "Entries to build" to at most{' '}
@@ -189,13 +310,24 @@ export function ContestGeneratorPanel({ date, slate }) {
         </div>
       )}
 
-      {state.status === 'idle' && (
+      {state.status === 'idle' && mode === 'generate' && (
         <p style={{ marginTop: 0, color: 'var(--text-secondary)' }}>
           Builds up to 10,000 of your own DraftKings Classic MLB entries in one shot -- each
           individually strong (weighted heavily toward projected points) but genuinely distinct
           from every other entry in the batch. Separate from the Lineups tab's exact optimizer,
           which is built for a small number of provably-best lineups, not mass multi-entry. Upload
           a DraftKings salary CSV and a RotoWire projections CSV for this date first.
+        </p>
+      )}
+
+      {state.status === 'idle' && mode === 'dk-entries' && (
+        <p style={{ marginTop: 0, color: 'var(--text-secondary)' }}>
+          Upload the entries CSV DraftKings gives you (the same "bulk entries" export/upload file
+          from their site) to simulate the lineups you actually built or reserved, against a real
+          contest's own economics -- entry fee comes straight from the file; total contest entries,
+          prize pool, and 1st-place % are hand-entered since a bulk entries export has no
+          payout-table data at all. A file can span more than one contest -- pick which one once
+          it's uploaded.
         </p>
       )}
 
@@ -210,7 +342,7 @@ export function ContestGeneratorPanel({ date, slate }) {
       {state.status === 'error' && (
         <>
           <div className="notice error">{state.message}</div>
-          <button style={{ marginTop: 12 }} onClick={run}>
+          <button style={{ marginTop: 12 }} onClick={mode === 'dk-entries' ? runDkEntries : run}>
             Try again
           </button>
         </>
@@ -223,6 +355,18 @@ export function ContestGeneratorPanel({ date, slate }) {
               Only built {state.num_entries_built.toLocaleString()} of{' '}
               {state.num_entries_requested.toLocaleString()} requested — the pool ran out of room
               for more distinct, legal entries under the current exposure cap.
+            </div>
+          )}
+
+          {state.warnings?.length > 0 && (
+            <div className="notice" style={{ marginBottom: 12 }}>
+              {state.warnings.length} of your entries couldn't be simulated:
+              <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                {state.warnings.slice(0, 10).map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+              {state.warnings.length > 10 && <div>…and {state.warnings.length - 10} more.</div>}
             </div>
           )}
 
@@ -437,7 +581,7 @@ export function ContestGeneratorPanel({ date, slate }) {
             {state.note}
           </div>
 
-          <button onClick={run}>Rebuild</button>
+          <button onClick={state.mode === 'dk-entries' ? runDkEntries : run}>Rebuild</button>
         </>
       )}
     </div>
