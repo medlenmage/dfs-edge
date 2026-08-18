@@ -14,13 +14,17 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.config import get_settings
+
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cache (
@@ -69,6 +73,23 @@ def purge_expired() -> int:
     with _connect() as conn:
         cur = conn.execute("DELETE FROM cache WHERE expires_at < ?", (time.time(),))
         return cur.rowcount
+
+
+def vacuum() -> None:
+    """
+    Reclaim the disk space `DELETE`s leave behind -- SQLite doesn't
+    shrink a file on its own after rows are removed, it just marks the
+    freed pages reusable for future writes. Large short-TTL entries
+    (e.g. a contest-generator batch of thousands of lineups, gone in an
+    hour) can otherwise leave the file many times bigger than its live
+    contents indefinitely. Run outside a transaction -- VACUUM can't
+    execute inside one.
+    """
+    conn = _connect()
+    try:
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
 
 
 def clear(prefix: str | None = None) -> int:
@@ -121,3 +142,31 @@ def _get_ignoring_expiry(key: str) -> Any | None:
         return json.loads(row[0])
     except json.JSONDecodeError:
         return None
+
+
+# Nothing stored in this cache is meant to survive more than a week (every
+# `_TTL`/`ttl_*` value in this codebase tops out at 7 days), so once a day
+# is plenty often to keep the file from growing unbounded.
+_HOUSEKEEPING_INTERVAL_SEC = 24 * 60 * 60
+
+
+async def _housekeeping_loop() -> None:
+    """
+    Runs for as long as the backend process is up: purges expired rows
+    and reclaims their disk space once a day. Without this, deleted
+    rows just leave the file exactly as large as it ever was -- this
+    cache had grown to 223MB with nothing ever reclaiming the space
+    freed by expired `contest_batch:*` entries (up to 10,000 lineups
+    each, gone within an hour) and every other TTL'd response. Wrapped
+    per-iteration, same resilience convention as
+    `lineup_watch._poll_loop()` -- one bad run never kills the loop.
+    """
+    while True:
+        try:
+            purged = purge_expired()
+            vacuum()
+            if purged:
+                log.info("Cache housekeeping: purged %d expired row(s), reclaimed disk space", purged)
+        except Exception:
+            log.exception("Cache housekeeping failed")
+        await asyncio.sleep(_HOUSEKEEPING_INTERVAL_SEC)
