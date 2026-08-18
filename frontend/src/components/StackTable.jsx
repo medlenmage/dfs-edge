@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from 'react'
 import { ScoreMeter } from './ScoreMeter'
 import { localTime } from '../format'
 
@@ -19,8 +20,51 @@ function avgOf(hitters, field) {
  * score of a team's five best bats.
  */
 export function StackTable({ slate }) {
+  const [showGames, setShowGames] = useState(false)
+  const [includedGames, setIncludedGames] = useState(new Set())
+
+  // Same auto-detect-from-uploaded-DK-salary-CSV pattern already used by
+  // the Lineups/Contest Generator tabs' own slate-game checklists -- lets
+  // this default to "just today's real DK slate" instead of every game
+  // MLB's schedule returns, while still allowing a fully manual pick.
+  const slateGames = useMemo(
+    () =>
+      (slate?.games || [])
+        .filter((g) => g.game_pk != null)
+        .map((g) => ({
+          pk: g.game_pk,
+          away: g.away?.abbrev,
+          home: g.home?.abbrev,
+          time: g.game_time_utc,
+          inSlate: g.in_slate,
+        })),
+    [slate],
+  )
+  const slateDetected = slateGames.some((g) => g.inSlate != null)
+  const slateGamePks = slateGames.map((g) => g.pk).join(',')
+
+  useEffect(() => {
+    // Unlike the Lineups/Contest Generator tabs (where restricting to a
+    // real DK salary slate matters for correctness), this tab is purely
+    // informational -- if the in_slate auto-detect would leave nothing
+    // selected (e.g. a salary file loaded for a different date than
+    // today's real slate), showing everything beats silently showing
+    // nothing.
+    const detected = slateGames.filter((g) => g.inSlate !== false).map((g) => g.pk)
+    setIncludedGames(new Set(detected.length ? detected : slateGames.map((g) => g.pk)))
+  }, [slateGamePks])
+
+  function toggleGame(pk) {
+    setIncludedGames((prev) => {
+      const next = new Set(prev)
+      next.has(pk) ? next.delete(pk) : next.add(pk)
+      return next
+    })
+  }
+
   const rows = []
   for (const g of slate?.games || []) {
+    if (slateGames.length && !includedGames.has(g.game_pk)) continue
     for (const side of ['home', 'away']) {
       const t = g[side]
       const opp = g[side === 'home' ? 'away' : 'home']
@@ -54,12 +98,55 @@ export function StackTable({ slate }) {
   }
   rows.sort((a, b) => b.score - a.score)
 
-  if (!rows.length) {
-    return <div className="notice">No stack data yet for this date.</div>
-  }
-
   return (
-    <div className="card table-wrap">
+    <>
+      {slateGames.length > 0 && (
+        <div className="controls" style={{ marginBottom: 12 }}>
+          <button onClick={() => setShowGames((s) => !s)}>
+            {showGames ? 'Hide games' : 'Games'} ({includedGames.size} of {slateGames.length})
+          </button>
+        </div>
+      )}
+
+      {showGames && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="sub-line" style={{ marginBottom: 8 }}>
+            {slateDetected
+              ? 'Auto-detected from your uploaded DK salary CSV -- untick a game to leave it out, or tick one back in.'
+              : 'No DK salary CSV uploaded yet, so every game is included by default -- untick any you want to ignore.'}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {slateGames.map((g) => (
+              <label
+                key={g.pk}
+                className="dim"
+                style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}
+              >
+                <input
+                  type="checkbox"
+                  checked={includedGames.has(g.pk)}
+                  onChange={() => toggleGame(g.pk)}
+                />
+                {g.away} @ {g.home}
+                <span className="dim" style={{ fontSize: 12 }}>
+                  {localTime(g.time)}
+                </span>
+                {g.inSlate === true && <span className="badge ok">in DK slate</span>}
+                {g.inSlate === false && <span className="badge">not in DK slate</span>}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!rows.length ? (
+        <div className="notice">
+          {slateGames.length && includedGames.size === 0
+            ? 'No games selected -- tick at least one above.'
+            : 'No stack data yet for this date.'}
+        </div>
+      ) : (
+      <div className="card table-wrap">
       <table>
         <thead>
           <tr>
@@ -141,6 +228,8 @@ export function StackTable({ slate }) {
           ))}
         </tbody>
       </table>
-    </div>
+      </div>
+      )}
+    </>
   )
 }
