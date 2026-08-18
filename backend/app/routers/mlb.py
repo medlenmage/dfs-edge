@@ -8,7 +8,9 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile
 
-from app import cache
+import asyncio
+
+from app import cache, history_db
 from app.services import analysis, contest, dk_entries, lineup_export, mlb_slate, optimizer, projections, salaries
 
 # How long a generated contest-entries batch stays downloadable as CSV
@@ -260,6 +262,7 @@ async def upload_projections(
             detail="No players found in that file -- is it a RotoWire player-pool export?",
         )
     projections.store(day, rows)
+    asyncio.create_task(history_db.archive_slate_projections(day, rows))
     result = {"date": day, "players_loaded": len(rows)}
 
     if not salaries.load(day):
