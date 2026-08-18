@@ -88,6 +88,14 @@ class Settings:
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # --- Historical data store (Supabase Postgres) ---
+        # Durable archive for data meant to outlive cache.py's TTL'd
+        # SQLite rows (real RotoWire uploads, game results). Optional --
+        # history_db.py no-ops everywhere if this is unset, same
+        # "feature switches itself off instead of crashing" philosophy
+        # as the Claude/Odds keys above.
+        self.supabase_db_url: str = os.getenv("SUPABASE_DB_URL", "").strip()
+
         # --- Server ---
         self.api_host: str = os.getenv("API_HOST", "127.0.0.1").strip()
         self.api_port: int = _int("API_PORT", 8000)
@@ -103,6 +111,10 @@ class Settings:
     @property
     def has_odds(self) -> bool:
         return bool(self.odds_api_key)
+
+    @property
+    def has_history_db(self) -> bool:
+        return bool(self.supabase_db_url)
 
 
 @lru_cache(maxsize=1)
