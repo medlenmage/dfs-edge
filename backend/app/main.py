@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import cache
 from app.clients.http import close_client
 from app.config import get_settings
 from app.routers import mlb, nfl, system
@@ -38,9 +39,12 @@ async def lifespan(app: FastAPI):
     log.info("  AI analysis   : %s", "ON" if settings.has_claude else "off (no ANTHROPIC_API_KEY)")
     log.info("  cache db      : %s", settings.db_path)
     log.info("  lineup watch  : polling every %ds for scratches", settings.lineup_poll_interval_sec)
+    cache.purge_expired()
     watch_task = asyncio.create_task(lineup_watch._poll_loop())
+    housekeeping_task = asyncio.create_task(cache._housekeeping_loop())
     yield
     watch_task.cancel()
+    housekeeping_task.cancel()
     await close_client()
     log.info("DFS Edge shut down")
 
