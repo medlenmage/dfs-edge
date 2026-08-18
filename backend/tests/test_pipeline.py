@@ -2438,6 +2438,66 @@ async def main() -> int:
           "not stuck at his own tiny sample's rate",
           thin_baseline < 7.0, str(thin_baseline))
 
+    print("\nIn-house ownership% (inhouse_projections.py)")
+
+    check("project_ownership returns an empty result for an empty pool",
+          inhouse_projections.project_ownership([]) == {}, "")
+
+    of_pool = [
+        {"id": 81001, "position": "OF", "salary": 3000, "fpts": 6.0, "implied_runs": 4.4},
+        {"id": 81002, "position": "OF", "salary": 4500, "fpts": 8.0, "implied_runs": 4.4},
+        {"id": 81003, "position": "OF", "salary": 6000, "fpts": 9.0, "implied_runs": 4.4},
+    ]
+    c_pool = [
+        {"id": 81004, "position": "C", "salary": 3500, "fpts": 5.0, "implied_runs": 4.4},
+    ]
+    unrecognized_pool = [
+        {"id": 81005, "position": "DH", "salary": 4000, "fpts": 7.0, "implied_runs": 4.4},
+    ]
+    ownership = inhouse_projections.project_ownership(of_pool + c_pool + unrecognized_pool)
+
+    of_total = round(sum(ownership[p["id"]] for p in of_pool), 1)
+    check("a 3-slot position's (OF) total ownership sums to slot_count x 100%",
+          of_total == 300.0, str(of_total))
+    check("a 1-slot position's (C) total ownership sums to exactly 100%",
+          ownership[81004] == 100.0, str(ownership[81004]))
+    check("a position not in DK's roster slots is skipped rather than guessed at",
+          81005 not in ownership, str(ownership.get(81005)))
+
+    # Value signal: same salary/team-total, higher fpts -> higher ownership.
+    value_pool = [
+        {"id": 82001, "position": "SS", "salary": 5000, "fpts": 6.0, "implied_runs": 4.4},
+        {"id": 82002, "position": "SS", "salary": 5000, "fpts": 10.0, "implied_runs": 4.4},
+    ]
+    value_ownership = inhouse_projections.project_ownership(value_pool)
+    check("higher fpts at the same salary/team-total gets higher ownership (value signal)",
+          value_ownership[82002] > value_ownership[82001], str(value_ownership))
+
+    # Team-total signal: same salary/fpts, higher implied team runs -> higher ownership.
+    team_total_pool = [
+        {"id": 83001, "position": "2B", "salary": 4000, "fpts": 7.0, "implied_runs": 3.5},
+        {"id": 83002, "position": "2B", "salary": 4000, "fpts": 7.0, "implied_runs": 6.5},
+    ]
+    team_total_ownership = inhouse_projections.project_ownership(team_total_pool)
+    check("a higher-implied-total team's player gets higher ownership at equal salary/fpts",
+          team_total_ownership[83002] > team_total_ownership[83001], str(team_total_ownership))
+
+    # Salary-tier signal: fpts scaled exactly proportional to salary so
+    # every player has identical "value" (fpts/salary) -- isolates the
+    # salary-tier bump. The min and max salary players should each
+    # outdraw the mid-priced player.
+    VALUE_RATE = 0.002  # fpts per salary dollar
+    salary_tier_pool = [
+        {"id": 84001, "position": "1B", "salary": 3000, "fpts": 3000 * VALUE_RATE, "implied_runs": 4.4},
+        {"id": 84002, "position": "1B", "salary": 4500, "fpts": 4500 * VALUE_RATE, "implied_runs": 4.4},
+        {"id": 84003, "position": "1B", "salary": 6000, "fpts": 6000 * VALUE_RATE, "implied_runs": 4.4},
+    ]
+    salary_tier_ownership = inhouse_projections.project_ownership(salary_tier_pool)
+    check("at identical value, the cheapest (punt) play outdraws the mid-priced player",
+          salary_tier_ownership[84001] > salary_tier_ownership[84002], str(salary_tier_ownership))
+    check("at identical value, the most expensive (stud) play outdraws the mid-priced player",
+          salary_tier_ownership[84003] > salary_tier_ownership[84002], str(salary_tier_ownership))
+
     print("\nJSON serialisation")
     import json
 

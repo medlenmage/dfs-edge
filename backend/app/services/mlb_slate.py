@@ -198,11 +198,27 @@ async def build_slate(
     }
 
 
+def _dk_slot_position(salary_position: str | None, fallback: str) -> str:
+    """
+    The first-listed DK roster-slot code from a multi-eligible salary
+    string (e.g. "1B/3B" -> "1B"), or `fallback` if no salary CSV is
+    loaded for this player. Ownership grouping needs exactly one slot
+    per player -- splitting a real player's ownership across every
+    eligible slot is Phase-5-level precision this v1 doesn't attempt.
+    """
+    if not salary_position:
+        return fallback
+    return salary_position.split("/")[0].strip() or fallback
+
+
 async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: int) -> None:
     """
     Adds projection["inhouse_fpts"] onto every hitter and probable
     pitcher across every built game, additive alongside whatever
-    RotoWire projection is already there (or None). Mutates in place.
+    RotoWire projection is already there (or None), then
+    projection["inhouse_ownership_pct"] on top of that wherever a DK
+    salary is also loaded (ownership is meaningless without a real
+    salary-capped contest to be owned in). Mutates in place.
 
     A probable pitcher only gets an "edge" key when _pitcher_edge()
     could actually compute one (missing season stats, etc. skip it) --
@@ -222,17 +238,57 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
     if not inhouse:
         return
 
+    ownership_pool: list[dict[str, Any]] = []
+    for g in out_games:
+        for side in ("home", "away"):
+            implied_runs = g[side]["implied_runs"]
+            for hitter in g[side]["hitters"]:
+                fpts = inhouse.get(hitter["id"])
+                salary_info = hitter.get("salary")
+                if fpts is not None and salary_info:
+                    ownership_pool.append(
+                        {
+                            "id": hitter["id"],
+                            "position": _dk_slot_position(salary_info.get("position"), hitter["position"]),
+                            "salary": salary_info["salary"],
+                            "fpts": fpts,
+                            "implied_runs": implied_runs,
+                        }
+                    )
+            pitcher = g[side]["probable_pitcher"]
+            if pitcher and pitcher.get("edge"):
+                fpts = inhouse.get(pitcher["id"])
+                salary_info = pitcher.get("salary")
+                if fpts is not None and salary_info:
+                    ownership_pool.append(
+                        {
+                            "id": pitcher["id"],
+                            "position": "P",
+                            "salary": salary_info["salary"],
+                            "fpts": fpts,
+                            "implied_runs": implied_runs,
+                        }
+                    )
+
+    ownership = inhouse_projections.project_ownership(ownership_pool)
+
     for g in out_games:
         for side in ("home", "away"):
             for hitter in g[side]["hitters"]:
                 value = inhouse.get(hitter["id"])
                 if value is not None:
                     hitter["projection"] = {**(hitter["projection"] or {}), "inhouse_fpts": value}
+                own_pct = ownership.get(hitter["id"])
+                if own_pct is not None:
+                    hitter["projection"] = {**(hitter["projection"] or {}), "inhouse_ownership_pct": own_pct}
             pitcher = g[side]["probable_pitcher"]
             if pitcher and pitcher.get("edge"):
                 value = inhouse.get(pitcher["id"])
                 if value is not None:
                     pitcher["projection"] = {**(pitcher["projection"] or {}), "inhouse_fpts": value}
+                own_pct = ownership.get(pitcher["id"])
+                if own_pct is not None:
+                    pitcher["projection"] = {**(pitcher["projection"] or {}), "inhouse_ownership_pct": own_pct}
 
 
 # --------------------------------------------------------------------------
