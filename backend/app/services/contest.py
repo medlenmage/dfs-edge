@@ -64,6 +64,16 @@ MAX_FIELD_SIZE = 200_000
 MAX_USER_LINEUPS = 10_000
 _OWNERSHIP_FLOOR = 0.5  # even an unowned player gets a sliver of sampling weight
 
+# DraftKings Classic MLB's own roster rule: no more than 5 hitters from
+# the same team in a single lineup. STACK_SHAPES below never targets
+# more than 5 in one group, but a shape's genuine leftover/free picks
+# (e.g. "5"'s 3 unconstrained slots) were never prevented from
+# coincidentally landing on the same already-stacked team, which could
+# silently build an illegal 6-, 7-, or even 8-stack -- enforced as a
+# hard cap on every hitter slot's eligible pool below, independent of
+# whether a stack shape is even in play.
+MAX_HITTERS_PER_TEAM = 5
+
 # How hard entry generation leans toward higher-projected players.
 # fpts is raised to this power before sampling -- aggressive enough
 # that entries are genuinely strong (not just plausible), gentle
@@ -285,6 +295,12 @@ def _sample_one_lineup(
     random-roster-construction technique. `excluded_ids` removes
     players entirely (e.g. ones that have hit an exposure cap).
 
+    Every hitter slot also enforces MAX_HITTERS_PER_TEAM (DraftKings'
+    own 5-hitters-per-team roster rule) regardless of any stack target
+    below -- without this, a shape's genuine leftover/free picks could
+    coincidentally land on an already-stacked team and build an illegal
+    6+ stack.
+
     `stack_groups`/`team_hitter_pools`, if both given, constrain this
     lineup's 8 hitters to the caller-chosen shape via _pick_stack_teams()
     -- a needed team's eligible players are preferred at each HITTER
@@ -309,6 +325,7 @@ def _sample_one_lineup(
     used_ids: set[int] = set()
     picks: list[dict[str, Any]] = []
     salary_so_far = 0
+    team_hitter_count: dict[str, int] = {}
 
     for i, slot in enumerate(slot_order):
         remaining_slots = slot_order[i + 1 :]
@@ -319,6 +336,10 @@ def _sample_one_lineup(
             return None
 
         if slot != "P":
+            eligible = [p for p in eligible if team_hitter_count.get(p["team"], 0) < MAX_HITTERS_PER_TEAM]
+            if not eligible:
+                return None
+
             needed_teams = {t for t, n in stack_remaining.items() if n > 0}
             if needed_teams:
                 restricted = [p for p in eligible if p["team"] in needed_teams]
@@ -347,6 +368,8 @@ def _sample_one_lineup(
         picks.append(pick)
         used_ids.add(pick["id"])
         salary_so_far += pick["salary"]
+        if slot != "P":
+            team_hitter_count[pick["team"]] = team_hitter_count.get(pick["team"], 0) + 1
         if stack_remaining.get(pick["team"], 0) > 0:
             stack_remaining[pick["team"]] -= 1
 
