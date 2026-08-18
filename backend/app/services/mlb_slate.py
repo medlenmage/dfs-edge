@@ -26,7 +26,7 @@ from typing import Any
 from app import cache
 from app.clients import mlb, odds, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
-from app.services import projections, salaries, scoring
+from app.services import inhouse_projections, projections, salaries, scoring
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ async def build_slate(
     *,
     force_refresh: bool = False,
     include_hitters: bool = True,
+    include_inhouse: bool = False,
 ) -> dict[str, Any]:
     day = day or date_cls.today().isoformat()
     season = int(day[:4])
@@ -178,6 +179,15 @@ async def build_slate(
 
     out_games.sort(key=lambda g: g.get("game_time_utc") or "")
 
+    # In-house FPTS projections are opt-in: computing them means a real
+    # per-player game-log fetch for every hitter/pitcher on the slate
+    # (a couple hundred players on a full day), which would otherwise
+    # silently add real latency to every plain dashboard refresh. Cheap
+    # once cached, but the first call of the day pays for it, so this
+    # stays off unless explicitly asked for.
+    if include_inhouse and include_hitters:
+        await _attach_inhouse_projections(out_games, season)
+
     return {
         "date": day,
         "season": season,
@@ -186,6 +196,43 @@ async def build_slate(
         "games": out_games,
         "warnings": warnings,
     }
+
+
+async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: int) -> None:
+    """
+    Adds projection["inhouse_fpts"] onto every hitter and probable
+    pitcher across every built game, additive alongside whatever
+    RotoWire projection is already there (or None). Mutates in place.
+
+    A probable pitcher only gets an "edge" key when _pitcher_edge()
+    could actually compute one (missing season stats, etc. skip it) --
+    inhouse_fpts_batch() needs edge["composite"] for every player it's
+    given, so pitchers without one are excluded here rather than
+    passed through and KeyError'd inside the batch call.
+    """
+    all_players: list[dict[str, Any]] = []
+    for g in out_games:
+        for side in ("home", "away"):
+            all_players.extend(g[side]["hitters"])
+            pitcher = g[side]["probable_pitcher"]
+            if pitcher and pitcher.get("edge"):
+                all_players.append({**pitcher, "position": "P"})
+
+    inhouse = await inhouse_projections.inhouse_fpts_batch(all_players, season)
+    if not inhouse:
+        return
+
+    for g in out_games:
+        for side in ("home", "away"):
+            for hitter in g[side]["hitters"]:
+                value = inhouse.get(hitter["id"])
+                if value is not None:
+                    hitter["projection"] = {**(hitter["projection"] or {}), "inhouse_fpts": value}
+            pitcher = g[side]["probable_pitcher"]
+            if pitcher and pitcher.get("edge"):
+                value = inhouse.get(pitcher["id"])
+                if value is not None:
+                    pitcher["projection"] = {**(pitcher["projection"] or {}), "inhouse_fpts": value}
 
 
 # --------------------------------------------------------------------------
