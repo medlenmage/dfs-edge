@@ -36,7 +36,7 @@ const MAX_HITTERS = 8
  * Generates one or many optimal DraftKings Classic MLB lineups from
  * whatever salary + projections CSVs are loaded for the date.
  */
-export function LineupsPanel({ date, slate }) {
+export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
   const [state, setState] = useState({ status: 'idle' })
   const [numLineups, setNumLineups] = useState(1)
   const [stackShape, setStackShape] = useState('no stack')
@@ -185,6 +185,7 @@ export function LineupsPanel({ date, slate }) {
     try {
       const result = await api.generateLineups(date, {
         numLineups,
+        projectionSource,
         stackGroups: groups.length ? groups : null,
         stackTeams: groups.length ? stackTeams.map((t) => t || null) : null,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,

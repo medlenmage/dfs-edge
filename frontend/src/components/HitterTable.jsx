@@ -15,6 +15,8 @@ const COLUMNS = [
   { key: 'value', label: 'Value', sortable: true, num: true },
   { key: 'fpts', label: 'Proj FPTS', sortable: true, num: true },
   { key: 'ownershipPct', label: 'Own%', sortable: true, num: true },
+  { key: 'inhouseFpts', label: 'In-house FPTS', sortable: true, num: true },
+  { key: 'inhouseOwnershipPct', label: 'In-house Own%', sortable: true, num: true },
   { key: 'why', label: 'Biggest factor', sortable: false },
 ]
 
@@ -70,6 +72,8 @@ export function HitterTable({ slate, limit = 50 }) {
             avgPoints: h.salary?.avg_points ?? null,
             fpts: h.projection?.fpts ?? null,
             ownershipPct: h.projection?.ownership_pct ?? null,
+            inhouseFpts: h.projection?.inhouse_fpts ?? null,
+            inhouseOwnershipPct: h.projection?.inhouse_ownership_pct ?? null,
             confirmed: team.lineup_confirmed,
             platoonDetail: h.edge.components.platoon.detail,
           })
@@ -220,6 +224,12 @@ export function HitterTable({ slate, limit = 50 }) {
                 </td>
                 <td className="num">
                   {r.ownershipPct != null ? `${r.ownershipPct.toFixed(1)}%` : '—'}
+                </td>
+                <td className="num">
+                  {r.inhouseFpts != null ? r.inhouseFpts.toFixed(1) : '—'}
+                </td>
+                <td className="num">
+                  {r.inhouseOwnershipPct != null ? `${r.inhouseOwnershipPct.toFixed(1)}%` : '—'}
                 </td>
                 <td className="sub-line">
                   {DRIVER_LABELS[r.driver] || r.driver || '—'}

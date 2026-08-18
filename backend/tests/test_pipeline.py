@@ -628,6 +628,52 @@ async def main() -> int:
     except optimizer.OptimizerError:
         check("optimizer raises OptimizerError on an empty pool", True)
 
+    print("\nLineup optimizer: in-house vs RotoWire projection_source")
+
+    # A slate where RotoWire's fpts and inhouse_fpts deliberately
+    # disagree about who's best at one hitter slot -- proves
+    # build_player_pool() actually reads the requested source's numbers
+    # rather than always falling back to RotoWire's.
+    source_slate = {
+        "games": [
+            {
+                "home": {
+                    "abbrev": "SRC",
+                    "hitters": [
+                        {
+                            "id": 9301, "name": "RotoWireFavorite",
+                            "salary": {"salary": 4000, "position": "C", "avg_points": None, "value": None},
+                            "projection": {"fpts": 15.0, "ownership_pct": 20.0, "inhouse_fpts": 3.0, "inhouse_ownership_pct": 5.0},
+                        },
+                        {
+                            "id": 9302, "name": "InhouseFavorite",
+                            "salary": {"salary": 4000, "position": "C", "avg_points": None, "value": None},
+                            "projection": {"fpts": 3.0, "ownership_pct": 5.0, "inhouse_fpts": 15.0, "inhouse_ownership_pct": 20.0},
+                        },
+                    ],
+                    "probable_pitcher": None,
+                    "scratches": [],
+                },
+                "away": {"abbrev": "SRC2", "hitters": [], "probable_pitcher": None, "scratches": []},
+            }
+        ]
+    }
+    rotowire_pool = {p["id"]: p["projected_fpts"] for p in optimizer.build_player_pool(source_slate)}
+    inhouse_pool = {
+        p["id"]: p["projected_fpts"]
+        for p in optimizer.build_player_pool(source_slate, projection_source="inhouse")
+    }
+    check("build_player_pool defaults to RotoWire's fpts",
+          rotowire_pool == {9301: 15.0, 9302: 3.0}, str(rotowire_pool))
+    check("build_player_pool(projection_source='inhouse') reads inhouse_fpts instead",
+          inhouse_pool == {9301: 3.0, 9302: 15.0}, str(inhouse_pool))
+
+    try:
+        optimizer.build_player_pool(source_slate, projection_source="not_a_real_source")
+        check("build_player_pool rejects an unknown projection_source", False)
+    except optimizer.OptimizerError:
+        check("build_player_pool rejects an unknown projection_source", True)
+
     print("\nLineup optimizer: multi-lineup generation and exposure caps")
 
     # Real headroom at every slot type (3+ options per infield position,

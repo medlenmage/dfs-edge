@@ -316,6 +316,9 @@ async def ask(
 async def generate_lineups(
     date: str | None = Body(None, embed=True),
     num_lineups: int = Body(1, embed=True, description="How many distinct lineups to build"),
+    projection_source: str = Body(
+        "rotowire", embed=True, description="Which FPTS/ownership numbers to optimize against: 'rotowire' or 'inhouse'"
+    ),
     stack_groups: list[int] | None = Body(
         None, embed=True, description="Hitter-group sizes to force, e.g. [4, 2, 2] for a 4-2-2 stack"
     ),
@@ -370,19 +373,17 @@ async def generate_lineups(
 ) -> dict[str, Any]:
     """
     Up to `num_lineups` distinct, highest-projected DraftKings Classic
-    MLB lineups, built from whatever salary + projections CSVs are
-    loaded for the date.
-
-    Requires both -- this app doesn't build its own FPTS projections
-    yet, so a RotoWire projections file is the objective function this
-    optimizes against.
+    MLB lineups, built from whatever salary CSV is loaded and either
+    RotoWire's uploaded projections (default) or this app's own
+    in-house FPTS/ownership model (`projection_source="inhouse"`).
     """
     day = date or date_cls.today().isoformat()
-    slate = await mlb_slate.build_slate(day)
+    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
     try:
         result = optimizer.generate_lineups(
             slate,
             num_lineups=num_lineups,
+            projection_source=projection_source,
             stack_groups=stack_groups,
             stack_teams=stack_teams,
             max_exposure_pct=max_exposure_pct,
@@ -419,6 +420,9 @@ async def build_contest_field(
     lineups: list[dict[str, Any]] = Body(
         ..., embed=True, description="Lineup objects as returned by POST /lineups' 'lineups' array"
     ),
+    projection_source: str = Body(
+        "rotowire", embed=True, description="Which ownership% to sample the field by: 'rotowire' or 'inhouse'"
+    ),
     field_size: int | None = Body(
         None, embed=True, description="Override the preset's real contest size (entries)"
     ),
@@ -431,7 +435,8 @@ async def build_contest_field(
 ) -> dict[str, Any]:
     """
     Build a synthetic public field for a named contest type, sampled by
-    RotoWire ownership%, and rank the given lineup(s) against it.
+    ownership% (RotoWire's or this app's own in-house model), and rank
+    the given lineup(s) against it.
 
     Not a lineup simulator -- there's no player-outcome variance model
     yet, so this ranks by projected points against the field's
@@ -439,12 +444,13 @@ async def build_contest_field(
     useful for chalk exposure and roughly where a build would land.
     """
     day = date or date_cls.today().isoformat()
-    slate = await mlb_slate.build_slate(day)
+    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
     try:
         result = contest.build_contest_field(
             slate,
             contest_type,
             lineups,
+            projection_source=projection_source,
             field_size=field_size,
             sample_size=sample_size,
             included_game_pks=included_game_pks,
@@ -459,6 +465,9 @@ async def build_contest_entries(
     date: str | None = Body(None, embed=True),
     contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
     num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {contest.MAX_USER_LINEUPS:,}"),
+    projection_source: str = Body(
+        "rotowire", embed=True, description="Which FPTS/ownership numbers to build against: 'rotowire' or 'inhouse'"
+    ),
     max_exposure_pct: float | None = Body(
         None, embed=True, description="Cap how often any one player appears across the whole batch"
     ),
@@ -483,9 +492,9 @@ async def build_contest_entries(
     /contest-field) -- this is the fast, large-scale path: entries are
     built by randomized construction weighted toward projected points,
     not an exact solve, so they're individually strong and mutually
-    distinct rather than provably optimal. Requires both a DraftKings
-    salary CSV and a RotoWire projections CSV loaded for the date, same
-    as the optimizer.
+    distinct rather than provably optimal. Requires a DraftKings salary
+    CSV and either a RotoWire projections CSV or the in-house model
+    loaded for the date, same as the optimizer.
 
     The full batch is cached under a `batch_id` returned in the
     response -- GET /contest-entries/{batch_id}/csv downloads all of
@@ -493,12 +502,13 @@ async def build_contest_entries(
     below), e.g. to hand off to an external simulator.
     """
     day = date or date_cls.today().isoformat()
-    slate = await mlb_slate.build_slate(day)
+    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
     try:
         result = contest.build_contest_entries(
             slate,
             contest_type,
             num_lineups,
+            projection_source=projection_source,
             max_exposure_pct=max_exposure_pct,
             field_size=field_size,
             sample_size=sample_size,
@@ -527,6 +537,9 @@ async def build_contest_entries_simulated(
     date: str | None = Body(None, embed=True),
     contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
     num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {contest.MAX_USER_LINEUPS:,}"),
+    projection_source: str = Body(
+        "rotowire", embed=True, description="Which FPTS/ownership numbers to build against: 'rotowire' or 'inhouse'"
+    ),
     max_exposure_pct: float | None = Body(
         None, embed=True, description="Cap how often any one player appears across the whole batch"
     ),
@@ -555,13 +568,14 @@ async def build_contest_entries_simulated(
     """
     day = date or date_cls.today().isoformat()
     season = int(day[:4])
-    slate = await mlb_slate.build_slate(day)
+    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
     try:
         result = await contest.build_contest_entries_simulated(
             slate,
             contest_type,
             num_lineups,
             season=season,
+            projection_source=projection_source,
             num_trials=_SIM_TRIALS,
             max_exposure_pct=max_exposure_pct,
             field_size=field_size,
@@ -656,6 +670,9 @@ async def simulate_dk_entries(
     first_place_pct: float = Body(..., embed=True, description="% of the prize pool 1st place wins"),
     payout_pct: float = Body(0.20, embed=True, description="Fraction of field_size that cashes"),
     shape: str = Body("top_heavy", embed=True, description="'top_heavy' (GPP) or 'flat' (double-up/50-50)"),
+    projection_source: str = Body(
+        "rotowire", embed=True, description="Which ownership% to sample the field by: 'rotowire' or 'inhouse'"
+    ),
     sample_size: int | None = Body(
         None, embed=True, description="How many lineups to actually simulate as the field sample (capped)"
     ),
@@ -684,7 +701,7 @@ async def simulate_dk_entries(
             detail="No DK entries file uploaded for that date yet -- upload one via POST /dk-entries first.",
         )
     season = int(day[:4])
-    slate = await mlb_slate.build_slate(day)
+    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
 
     parsed = dk_entries.parse_entries_csv(text)
     contest_row = next((c for c in dk_entries.contest_summary(parsed) if c["contest_id"] == contest_id), None)
@@ -704,6 +721,7 @@ async def simulate_dk_entries(
             first_place_pct=first_place_pct,
             payout_pct=payout_pct,
             shape=shape,
+            projection_source=projection_source,
             num_trials=_SIM_TRIALS,
             sample_size=sample_size,
             included_game_pks=included_game_pks,

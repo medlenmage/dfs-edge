@@ -6,13 +6,14 @@ highest-scoring, legal, DISTINCT lineups -- mixed-integer linear
 programs (MILP) solved one at a time with PuLP's bundled CBC solver,
 free and pure-Python.
 
-This app isn't building its own FPTS projections yet (see the README's
-wishlist), so it requires a RotoWire projections CSV already loaded for
-the date and maximizes against RotoWire's own FPTS numbers. Salary comes
-from a DraftKings salary CSV, same as everywhere else salary shows up in
-this app. Both are matched onto each hitter/pitcher already by
-mlb_slate.build_slate() -- this module just reads that, it doesn't do
-any matching of its own.
+Requires a projections source already loaded/computed for the date --
+either an uploaded RotoWire CSV, or (via `projection_source="inhouse"`)
+`inhouse_projections.py`'s own FPTS/ownership model, computed by
+mlb_slate.build_slate() when called with `include_inhouse=True`.
+Salary comes from a DraftKings salary CSV, same as everywhere else
+salary shows up in this app. Both are matched onto each hitter/pitcher
+already by mlb_slate.build_slate() -- this module just reads that, it
+doesn't do any matching of its own.
 
 MULTI-LINEUP STRATEGY
 ----------------------
@@ -221,8 +222,17 @@ def _team_count_constraints(
         prob += total_teams <= max_teams
 
 
+PROJECTION_SOURCES = {
+    "rotowire": ("fpts", "ownership_pct"),
+    "inhouse": ("inhouse_fpts", "inhouse_ownership_pct"),
+}
+
+
 def build_player_pool(
-    slate: dict[str, Any], *, included_game_pks: set[int] | None = None
+    slate: dict[str, Any],
+    *,
+    included_game_pks: set[int] | None = None,
+    projection_source: str = "rotowire",
 ) -> list[dict[str, Any]]:
     """
     Flatten every hitter and probable pitcher across the slate into one
@@ -233,7 +243,19 @@ def build_player_pool(
     `included_game_pks`, if given, restricts the pool to those specific
     games -- e.g. to match a particular DK slate rather than every game
     MLB's schedule returns for the date.
+
+    `projection_source` picks which FPTS/ownership numbers to build the
+    pool from -- `"rotowire"` (the default, `projection.fpts`) or
+    `"inhouse"` (`projection.inhouse_fpts`, only present when the slate
+    was built with `include_inhouse=True`).
     """
+    if projection_source not in PROJECTION_SOURCES:
+        raise OptimizerError(
+            f"Unknown projection_source '{projection_source}'. "
+            f"Choose one of: {', '.join(PROJECTION_SOURCES)}."
+        )
+    fpts_key, ownership_key = PROJECTION_SOURCES[projection_source]
+
     pool: list[dict[str, Any]] = []
     for game in slate.get("games") or []:
         if included_game_pks is not None and game.get("game_pk") not in included_game_pks:
@@ -256,7 +278,7 @@ def build_player_pool(
                 proj_info = p.get("projection")
                 if not salary_info or not salary_info.get("salary"):
                     continue
-                if not proj_info or proj_info.get("fpts") is None:
+                if not proj_info or proj_info.get(fpts_key) is None:
                     continue
                 slots = _eligible_slots(salary_info.get("position") or "")
                 if not slots:
@@ -267,8 +289,8 @@ def build_player_pool(
                         "name": p.get("name"),
                         "team": abbrev,
                         "salary": salary_info["salary"],
-                        "projected_fpts": proj_info["fpts"],
-                        "ownership_pct": proj_info.get("ownership_pct") or 0,
+                        "projected_fpts": proj_info[fpts_key],
+                        "ownership_pct": proj_info.get(ownership_key) or 0,
                         "slots": slots,
                     }
                 )
@@ -424,6 +446,7 @@ def generate_lineups(
     slate: dict[str, Any],
     *,
     num_lineups: int = 1,
+    projection_source: str = "rotowire",
     stack_groups: list[int] | None = None,
     stack_teams: list[str | None] | None = None,
     max_exposure_pct: float | None = None,
@@ -533,7 +556,9 @@ def generate_lineups(
         raise OptimizerError("included_game_pks can't be empty.")
 
     pool = build_player_pool(
-        slate, included_game_pks=set(included_game_pks) if included_game_pks is not None else None
+        slate,
+        included_game_pks=set(included_game_pks) if included_game_pks is not None else None,
+        projection_source=projection_source,
     )
     if not pool:
         if included_game_pks is not None:
