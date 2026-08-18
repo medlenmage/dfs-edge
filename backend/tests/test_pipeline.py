@@ -23,6 +23,7 @@ from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     contest,
     dk_entries,
+    inhouse_projections,
     lineup_export,
     lineup_watch,
     mlb_dk_points,
@@ -2357,6 +2358,85 @@ async def main() -> int:
         check("build_dk_entries_simulated rejects a field_size smaller than 1", False)
     except contest.ContestError:
         check("build_dk_entries_simulated rejects a field_size smaller than 1", True)
+
+    print("\nIn-house FPTS projections (inhouse_projections.py)")
+
+    INHOUSE_SEASON = 2098
+
+    def _single_rbi_run_game():
+        return {
+            "plate_appearances": 4, "hits": 1, "doubles": 0, "triples": 0,
+            "home_runs": 0, "rbi": 1, "runs": 1, "walks": 0,
+            "hit_by_pitch": 0, "stolen_bases": 0,
+        }
+
+    # A flat 20-game history: every game is identical, so season
+    # average and last-15-games average agree exactly (7.0 DK pts:
+    # 1 single(3) + 1 RBI(2) + 1 run(2)) -- isolates the
+    # edge.composite multiplier's effect from the season/recent blend.
+    flat_games = [_single_rbi_run_game() for _ in range(20)]
+
+    inhouse_game_logs = {80001: flat_games, 80002: flat_games, 80003: []}
+
+    async def fake_inhouse_game_log(player_id, season, group="hitting"):
+        return inhouse_game_logs.get(player_id, [])
+
+    mlb.get_player_game_log = fake_inhouse_game_log
+
+    baseline_flat = await inhouse_projections.baseline_dk_points(80001, "OF", INHOUSE_SEASON)
+    check("baseline_dk_points matches the flat rate when season and recent-form agree",
+          baseline_flat == 7.0, str(baseline_flat))
+    check("baseline_dk_points returns 0.0 for a player with zero games this season",
+          await inhouse_projections.baseline_dk_points(80003, "OF", INHOUSE_SEASON) == 0.0, "")
+
+    hot_composite, cold_composite = 1.30, 0.80
+    hot_fpts = inhouse_projections.project_fpts(baseline_flat, hot_composite)
+    cold_fpts = inhouse_projections.project_fpts(baseline_flat, cold_composite)
+    check("project_fpts scales the same baseline up for a hot matchup, down for a cold one",
+          hot_fpts > baseline_flat > cold_fpts, str((cold_fpts, baseline_flat, hot_fpts)))
+    check("project_fpts is an exact baseline x composite multiply",
+          hot_fpts == round(baseline_flat * hot_composite, 2), str(hot_fpts))
+
+    # The actual "same average, different matchup multiplier -> different
+    # inhouse_fpts" claim the plan is built on, driven through
+    # inhouse_fpts_batch() -- the real entry point mlb_slate.py calls.
+    same_average_players = [
+        {"id": 80001, "position": "OF", "edge": {"composite": hot_composite}},
+        {"id": 80002, "position": "OF", "edge": {"composite": cold_composite}},
+    ]
+    batch = await inhouse_projections.inhouse_fpts_batch(same_average_players, INHOUSE_SEASON)
+    check("two players with an identical season average but different edge.composite "
+          "get genuinely different inhouse_fpts",
+          batch[80001] != batch[80002] and batch[80001] > batch[80002], str(batch))
+    check("inhouse_fpts_batch's values match project_fpts(baseline, composite) directly",
+          batch[80001] == hot_fpts and batch[80002] == cold_fpts,
+          str((batch, hot_fpts, cold_fpts)))
+
+    # Recent form: a player whose last 15 games differ from his earlier
+    # games should land between the two straight averages, not exactly
+    # at either one.
+    cold_start = [dict(_single_rbi_run_game(), rbi=0, runs=0) for _ in range(10)]  # 3.0 DK pts/game
+    hot_recent = [_single_rbi_run_game() for _ in range(15)]  # 7.0 DK pts/game
+    inhouse_game_logs[80006] = cold_start + hot_recent
+    recent_form_baseline = await inhouse_projections.baseline_dk_points(80006, "OF", INHOUSE_SEASON)
+    season_avg = (10 * 3.0 + 15 * 7.0) / 25
+    recent_avg = 7.0
+    check("baseline_dk_points blends season average with recent form, landing strictly between them",
+          min(season_avg, recent_avg) < recent_form_baseline < max(season_avg, recent_avg),
+          str((season_avg, recent_avg, recent_form_baseline)))
+
+    # Thin-sample shrink: a player with only a handful of games this
+    # season should be pulled toward the shared same-position pool
+    # (warmed up here by the 20-game players above, same as
+    # variance.py's own thin-sample test), not stuck at his own
+    # small-sample rate.
+    inhouse_game_logs[80007] = [_single_rbi_run_game() for _ in range(3)]  # own rate: 7.0
+    inhouse_game_logs[80008] = [dict(_single_rbi_run_game(), rbi=0, runs=0)] * 40  # 3.0 DK pts/game, warms the pool low
+    await inhouse_projections.baseline_dk_points(80008, "OF", INHOUSE_SEASON)
+    thin_baseline = await inhouse_projections.baseline_dk_points(80007, "OF", INHOUSE_SEASON)
+    check("a thin-sample player's baseline is shrunk toward the shared position pool, "
+          "not stuck at his own tiny sample's rate",
+          thin_baseline < 7.0, str(thin_baseline))
 
     print("\nJSON serialisation")
     import json

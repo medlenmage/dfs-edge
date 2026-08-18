@@ -63,11 +63,11 @@ MAX_POSITION_POOL_SIZE = 2000
 PITCHER_SLOT = "P"
 
 
-def _player_kind(position: str) -> str:
+def player_kind(position: str) -> str:
     return "pitcher" if position == PITCHER_SLOT else "hitter"
 
 
-def _own_games(game_log: list[dict[str, Any]], kind: str) -> list[float]:
+def own_games(game_log: list[dict[str, Any]], kind: str) -> list[float]:
     """DK points for every game the player actually appeared in --
     a zero-PA/zero-out row is a non-appearance, not a real outcome."""
     if kind == "pitcher":
@@ -85,7 +85,7 @@ def _position_pool_key(position: str, season: int) -> str:
     return f"variance:position_pool:{season}:{position}"
 
 
-def _contribute_to_position_pool(position: str, season: int, games: list[float]) -> None:
+def contribute_to_position_pool(position: str, season: int, games: list[float]) -> None:
     """
     Read-modify-write into the shared same-position pool -- same
     pattern lineup_watch.py already uses for its own per-day
@@ -100,7 +100,7 @@ def _contribute_to_position_pool(position: str, season: int, games: list[float])
     cache.put(key, combined, get_settings().ttl_game_logs)
 
 
-def _position_pool(position: str, season: int) -> list[float]:
+def position_pool(position: str, season: int) -> list[float]:
     return cache.get(_position_pool_key(position, season)) or []
 
 
@@ -117,28 +117,28 @@ async def player_outcome_pool(
     settings = get_settings()
 
     async def _load() -> list[float]:
-        kind = _player_kind(position)
+        kind = player_kind(position)
         group = "pitching" if kind == "pitcher" else "hitting"
         game_log = await mlb.get_player_game_log(player_id, season, group=group)
-        own = _own_games(game_log, kind)
-        _contribute_to_position_pool(position, season, own)
+        own = own_games(game_log, kind)
+        contribute_to_position_pool(position, season, own)
 
         if not own:
             # No games of his own yet this season (hasn't debuted, or
             # a rookie with zero PA/IP so far) -- nothing but the
             # shared pool to draw from.
-            pool = _position_pool(position, season)
+            pool = position_pool(position, season)
             return pool[:POOL_SIZE] if pool else [0.0]
 
         full_trust = MIN_GAMES_FULL_TRUST[kind]
         trust = min(1.0, len(own) / full_trust)
         # Fall back to his own games if the shared pool hasn't warmed
         # up yet -- better than blending in nothing at all.
-        position_pool = _position_pool(position, season) or own
+        shared_pool = position_pool(position, season) or own
 
         rng = random.Random(seed)
         return [
-            rng.choice(own) if rng.random() < trust else rng.choice(position_pool)
+            rng.choice(own) if rng.random() < trust else rng.choice(shared_pool)
             for _ in range(POOL_SIZE)
         ]
 

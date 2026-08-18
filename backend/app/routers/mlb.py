@@ -31,6 +31,14 @@ async def get_slate(
     date: str | None = Query(None, description="YYYY-MM-DD, defaults to today"),
     refresh: bool = Query(False, description="Bypass the cache"),
     hitters: bool = Query(True, description="Include per-hitter matchup scores"),
+    inhouse: bool = Query(
+        False,
+        description=(
+            "Also compute in-house FPTS projections. Off by default -- "
+            "real per-player game-log fetches for the whole slate, "
+            "adds real latency to the first call of the day."
+        ),
+    ),
 ) -> dict[str, Any]:
     """
     The full daily slate: games, environment, pitchers, and hitter edges.
@@ -40,7 +48,7 @@ async def get_slate(
     day = date or date_cls.today().isoformat()
     try:
         return await mlb_slate.build_slate(
-            day, force_refresh=refresh, include_hitters=hitters
+            day, force_refresh=refresh, include_hitters=hitters, include_inhouse=inhouse
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
