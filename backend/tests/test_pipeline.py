@@ -670,6 +670,22 @@ async def main() -> int:
         opt_hitter(9327, "M3B4", "MUL2", "3B", 3900, 10.8),
         opt_hitter(9328, "MSS4", "MUL2", "SS", 3400, 8.8),
     ]
+    mul_hitters_third_team = [
+        # A 3rd team with real hitter depth -- MUL1/MUL2 alone can never
+        # support a 3-group stack shape (4-2-2, 3-3-2 both need 3
+        # distinct teams), and with only 2 teams to split any weighting
+        # scheme between, the MAX_HITTERS_PER_TEAM=5 cap forces both the
+        # points-weighted and ownership-weighted generators into the
+        # same structural split, muting the difference between them.
+        opt_hitter(9329, "MC5", "MUL3", "C", 2600, 6.8),
+        opt_hitter(9330, "M1B5", "MUL3", "1B", 3300, 8.4),
+        opt_hitter(9331, "M2B5", "MUL3", "2B", 3000, 7.6),
+        opt_hitter(9332, "M3B5", "MUL3", "3B", 3500, 9.2),
+        opt_hitter(9333, "MSS5", "MUL3", "SS", 3100, 7.9),
+        opt_hitter(9334, "MOF9", "MUL3", "OF", 3400, 8.7),
+        opt_hitter(9335, "MOF10", "MUL3", "OF", 3200, 8.1),
+        opt_hitter(9336, "MOF11", "MUL3", "OF", 3000, 7.5),
+    ]
     mul_slate = {
         "games": [
             {
@@ -681,7 +697,7 @@ async def main() -> int:
             },
             {
                 "game_pk": 88002,
-                "home": {"abbrev": "MUL3", "hitters": [],
+                "home": {"abbrev": "MUL3", "hitters": mul_hitters_third_team,
                          "probable_pitcher": opt_pitcher(9402, "MP3", 8600, 17.0), "scratches": []},
                 "away": {"abbrev": "MUL4", "hitters": [],
                          "probable_pitcher": opt_pitcher(9403, "MP4", 8400, 16.5), "scratches": []},
@@ -1662,9 +1678,32 @@ async def main() -> int:
 
     pitcher_teams_used = {p["team"] for lu in entries for p in lu["players"][:2]}
     check("the hitter stack constraint never leaks into the 2 pitcher slots -- pitchers are drawn from "
-          "every team in the pool, including MUL3-MUL6, which have no hitters at all",
-          bool({"MUL3", "MUL4", "MUL5", "MUL6"} & pitcher_teams_used),
+          "every team in the pool, including MUL4-MUL6, which have no hitters at all",
+          bool({"MUL4", "MUL5", "MUL6"} & pitcher_teams_used),
           str(pitcher_teams_used))
+
+    # DraftKings' own roster rule: never more than 5 hitters from one
+    # team. A shape's genuine leftover/free picks (e.g. "5"'s 3
+    # unconstrained slots) could previously coincide with the
+    # already-stacked team and silently build an illegal 6+ stack --
+    # checked here across every entry and field lineup in the batches
+    # already built above, not a fresh contrived fixture, since the
+    # real bug only showed up at realistic scale.
+    def _max_hitters_from_one_team(lineups):
+        worst = 0
+        for lu in lineups:
+            counts: dict[str, int] = {}
+            for p in lu["players"][2:]:
+                counts[p["team"]] = counts.get(p["team"], 0) + 1
+            worst = max(worst, max(counts.values()))
+        return worst
+
+    check("no generate_entries lineup ever rosters more than 5 hitters from one team",
+          _max_hitters_from_one_team(entries) <= contest.MAX_HITTERS_PER_TEAM,
+          str(_max_hitters_from_one_team(entries)))
+    check("no generate_field lineup ever rosters more than 5 hitters from one team",
+          _max_hitters_from_one_team(unweighted_field) <= contest.MAX_HITTERS_PER_TEAM,
+          str(_max_hitters_from_one_team(unweighted_field)))
 
     print("\nContest generator: mass multi-entry economics (build_contest_entries)")
 
