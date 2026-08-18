@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ScoreMeter } from './ScoreMeter'
+import { localTime } from '../format'
 
 const COLUMNS = [
   { key: 'score', label: 'Matchup', sortable: true, width: 130 },
@@ -38,6 +39,43 @@ export function HitterTable({ slate, limit = 50 }) {
   const [sortDir, setSortDir] = useState('desc')
   const [minScore, setMinScore] = useState(0)
   const [search, setSearch] = useState('')
+  const [showGames, setShowGames] = useState(false)
+  const [includedGames, setIncludedGames] = useState(new Set())
+
+  // Same auto-detect-from-uploaded-DK-salary-CSV pattern already used by
+  // the Stacks/Lineups/Contest Generator tabs' own slate-game checklists.
+  const slateGames = useMemo(
+    () =>
+      (slate?.games || [])
+        .filter((g) => g.game_pk != null)
+        .map((g) => ({
+          pk: g.game_pk,
+          away: g.away?.abbrev,
+          home: g.home?.abbrev,
+          time: g.game_time_utc,
+          inSlate: g.in_slate,
+        })),
+    [slate],
+  )
+  const slateDetected = slateGames.some((g) => g.inSlate != null)
+  const slateGamePks = slateGames.map((g) => g.pk).join(',')
+
+  useEffect(() => {
+    // Purely informational tab -- if the in_slate auto-detect would
+    // leave nothing selected (e.g. a salary file loaded for a
+    // different date than today's real slate), show everything
+    // instead of silently showing nothing.
+    const detected = slateGames.filter((g) => g.inSlate !== false).map((g) => g.pk)
+    setIncludedGames(new Set(detected.length ? detected : slateGames.map((g) => g.pk)))
+  }, [slateGamePks])
+
+  function toggleGame(pk) {
+    setIncludedGames((prev) => {
+      const next = new Set(prev)
+      next.has(pk) ? next.delete(pk) : next.add(pk)
+      return next
+    })
+  }
 
   const rows = useMemo(() => {
     const out = []
@@ -48,6 +86,7 @@ export function HitterTable({ slate, limit = 50 }) {
         for (const h of team.hitters || []) {
           out.push({
             id: h.id,
+            game_pk: g.game_pk,
             name: h.name,
             position: h.position,
             bats: h.bats,
@@ -87,6 +126,7 @@ export function HitterTable({ slate, limit = 50 }) {
     const q = search.trim().toLowerCase()
     const list = rows.filter(
       (r) =>
+        (!slateGames.length || includedGames.has(r.game_pk)) &&
         r.score >= minScore &&
         (!q ||
           r.name?.toLowerCase().includes(q) ||
@@ -103,7 +143,7 @@ export function HitterTable({ slate, limit = 50 }) {
       return (av - bv) * dir
     })
     return list.slice(0, limit)
-  }, [rows, sortKey, sortDir, minScore, search, limit])
+  }, [rows, sortKey, sortDir, minScore, search, limit, includedGames, slateGames])
 
   function toggleSort(key) {
     if (key === sortKey) {
@@ -121,6 +161,11 @@ export function HitterTable({ slate, limit = 50 }) {
   return (
     <>
       <div className="controls" style={{ marginBottom: 12 }}>
+        {slateGames.length > 0 && (
+          <button onClick={() => setShowGames((s) => !s)}>
+            {showGames ? 'Hide games' : 'Games'} ({includedGames.size} of {slateGames.length})
+          </button>
+        )}
         <input
           type="text"
           placeholder="Filter by player or team…"
@@ -145,6 +190,37 @@ export function HitterTable({ slate, limit = 50 }) {
           {filtered.length} of {rows.length} hitters
         </span>
       </div>
+
+      {showGames && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="sub-line" style={{ marginBottom: 8 }}>
+            {slateDetected
+              ? 'Auto-detected from your uploaded DK salary CSV -- untick a game to leave it out, or tick one back in.'
+              : 'No DK salary CSV uploaded yet, so every game is included by default -- untick any you want to ignore.'}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {slateGames.map((g) => (
+              <label
+                key={g.pk}
+                className="dim"
+                style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}
+              >
+                <input
+                  type="checkbox"
+                  checked={includedGames.has(g.pk)}
+                  onChange={() => toggleGame(g.pk)}
+                />
+                {g.away} @ {g.home}
+                <span className="dim" style={{ fontSize: 12 }}>
+                  {localTime(g.time)}
+                </span>
+                {g.inSlate === true && <span className="badge ok">in DK slate</span>}
+                {g.inSlate === false && <span className="badge">not in DK slate</span>}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card table-wrap">
         <table>
