@@ -46,8 +46,10 @@ async function uploadFile(path, file) {
 export const api = {
   health: () => request('/api/health'),
 
-  slate: (date, { refresh = false } = {}) =>
-    request(`/api/mlb/slate?date=${date}${refresh ? '&refresh=true' : ''}`),
+  slate: (date, { refresh = false, inhouse = false } = {}) =>
+    request(
+      `/api/mlb/slate?date=${date}${refresh ? '&refresh=true' : ''}${inhouse ? '&inhouse=true' : ''}`,
+    ),
 
   stacks: (date) => request(`/api/mlb/stacks?date=${date}`),
 
@@ -75,6 +77,7 @@ export const api = {
     date,
     {
       numLineups = 1,
+      projectionSource = 'rotowire',
       stackGroups = null,
       stackTeams = null,
       maxExposurePct = null,
@@ -99,6 +102,7 @@ export const api = {
       body: JSON.stringify({
         date,
         num_lineups: numLineups,
+        projection_source: projectionSource,
         stack_groups: stackGroups,
         stack_teams: stackTeams,
         max_exposure_pct: maxExposurePct,
@@ -130,7 +134,7 @@ export const api = {
     date,
     contestType,
     lineups,
-    { fieldSize = null, sampleSize = null, includedGamePks = null } = {},
+    { projectionSource = 'rotowire', fieldSize = null, sampleSize = null, includedGamePks = null } = {},
   ) =>
     request('/api/mlb/contest-field', {
       method: 'POST',
@@ -138,6 +142,7 @@ export const api = {
         date,
         contest_type: contestType,
         lineups,
+        projection_source: projectionSource,
         field_size: fieldSize,
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
@@ -148,7 +153,13 @@ export const api = {
     date,
     contestType,
     numLineups,
-    { maxExposurePct = null, fieldSize = null, sampleSize = null, includedGamePks = null } = {},
+    {
+      projectionSource = 'rotowire',
+      maxExposurePct = null,
+      fieldSize = null,
+      sampleSize = null,
+      includedGamePks = null,
+    } = {},
   ) =>
     request('/api/mlb/contest-entries', {
       method: 'POST',
@@ -156,6 +167,7 @@ export const api = {
         date,
         contest_type: contestType,
         num_lineups: numLineups,
+        projection_source: projectionSource,
         max_exposure_pct: maxExposurePct,
         field_size: fieldSize,
         sample_size: sampleSize,
@@ -173,6 +185,7 @@ export const api = {
     contestType,
     numLineups,
     {
+      projectionSource = 'rotowire',
       maxExposurePct = null,
       fieldSize = null,
       sampleSize = null,
@@ -185,6 +198,7 @@ export const api = {
         date,
         contest_type: contestType,
         num_lineups: numLineups,
+        projection_source: projectionSource,
         max_exposure_pct: maxExposurePct,
         field_size: fieldSize,
         sample_size: sampleSize,
@@ -203,6 +217,7 @@ export const api = {
       firstPlacePct,
       payoutPct,
       shape,
+      projectionSource = 'rotowire',
       sampleSize = null,
       includedGamePks = null,
     } = {},
@@ -217,6 +232,7 @@ export const api = {
         first_place_pct: firstPlacePct,
         payout_pct: payoutPct,
         shape,
+        projection_source: projectionSource,
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
       }),

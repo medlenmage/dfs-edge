@@ -57,7 +57,13 @@ import numpy as np
 
 from app.services import variance
 from app.services.lineup_export import stack_info
-from app.services.optimizer import SALARY_CAP, SLOT_REQUIREMENTS, SLOT_TYPES, build_player_pool
+from app.services.optimizer import (
+    SALARY_CAP,
+    SLOT_REQUIREMENTS,
+    SLOT_TYPES,
+    OptimizerError,
+    build_player_pool,
+)
 
 MAX_SAMPLE_SIZE = 5000
 MAX_FIELD_SIZE = 200_000
@@ -399,14 +405,20 @@ def _sample_one_lineup(
 
 
 def _build_candidate_pool(
-    slate: dict[str, Any], included_game_pks: list[int] | None
+    slate: dict[str, Any],
+    included_game_pks: list[int] | None,
+    projection_source: str = "rotowire",
 ) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
     """Shared setup for both generators: the eligible-by-slot pool and
     the fixed 10-slot fill order, or a ContestError if either is empty."""
-    pool = build_player_pool(
-        slate,
-        included_game_pks=set(included_game_pks) if included_game_pks is not None else None,
-    )
+    try:
+        pool = build_player_pool(
+            slate,
+            included_game_pks=set(included_game_pks) if included_game_pks is not None else None,
+            projection_source=projection_source,
+        )
+    except OptimizerError as exc:
+        raise ContestError(str(exc)) from exc
     if not pool:
         if included_game_pks is not None:
             raise ContestError(
@@ -433,24 +445,29 @@ def generate_field(
     slate: dict[str, Any],
     sample_size: int,
     *,
+    projection_source: str = "rotowire",
     included_game_pks: list[int] | None = None,
     max_attempts_per_lineup: int = 25,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Build `sample_size` synthetic opponent lineups, weighted toward
-    whatever RotoWire ownership% says the public actually rosters.
-    `included_game_pks` restricts the candidate pool the same way it
-    does for the optimizer -- pass the same slate-game selection a
-    user's own lineups were built against so the field reflects the
-    actual DK slate, not every game MLB's schedule returns for the date.
+    whatever ownership% says the public actually rosters -- RotoWire's
+    by default, or `inhouse_projections.py`'s own model via
+    `projection_source="inhouse"`. `included_game_pks` restricts the
+    candidate pool the same way it does for the optimizer -- pass the
+    same slate-game selection a user's own lineups were built against
+    so the field reflects the actual DK slate, not every game MLB's
+    schedule returns for the date.
     """
     if sample_size < 1:
         raise ContestError("sample_size must be at least 1.")
     if sample_size > MAX_SAMPLE_SIZE:
         raise ContestError(f"sample_size can't exceed {MAX_SAMPLE_SIZE}.")
 
-    candidates_by_slot, slot_order = _build_candidate_pool(slate, included_game_pks)
+    candidates_by_slot, slot_order = _build_candidate_pool(
+        slate, included_game_pks, projection_source
+    )
     team_hitter_pools = _team_hitter_pools(candidates_by_slot, slot_order)
     feasible_shapes, feasible_weights = _feasible_stack_shapes(team_hitter_pools)
 
@@ -490,6 +507,7 @@ def generate_entries(
     slate: dict[str, Any],
     num_lineups: int,
     *,
+    projection_source: str = "rotowire",
     max_exposure_pct: float | None = None,
     included_game_pks: list[int] | None = None,
     max_attempts_per_lineup: int = 30,
@@ -518,7 +536,9 @@ def generate_entries(
     if num_lineups > MAX_USER_LINEUPS:
         raise ContestError(f"num_lineups can't exceed {MAX_USER_LINEUPS:,}.")
 
-    candidates_by_slot, slot_order = _build_candidate_pool(slate, included_game_pks)
+    candidates_by_slot, slot_order = _build_candidate_pool(
+        slate, included_game_pks, projection_source
+    )
     team_hitter_pools = _team_hitter_pools(candidates_by_slot, slot_order)
     feasible_shapes, feasible_weights = _feasible_stack_shapes(team_hitter_pools)
 
@@ -884,6 +904,7 @@ def build_contest_field(
     contest_type: str,
     user_lineups: list[dict[str, Any]],
     *,
+    projection_source: str = "rotowire",
     field_size: int | None = None,
     sample_size: int | None = None,
     included_game_pks: list[int] | None = None,
@@ -908,7 +929,10 @@ def build_contest_field(
         contest["field_size"] = field_size
 
     size = sample_size or min(contest["field_size"], MAX_SAMPLE_SIZE)
-    field = generate_field(slate, size, included_game_pks=included_game_pks, seed=seed)
+    field = generate_field(
+        slate, size, projection_source=projection_source,
+        included_game_pks=included_game_pks, seed=seed,
+    )
     evaluation = evaluate_field(field, user_lineups, contest)
 
     return {
@@ -924,9 +948,9 @@ def build_contest_field(
         },
         "field_exposure": field_exposure(field),
         "note": (
-            "Field lineups are sampled by RotoWire ownership%, not simulated "
-            "outcomes -- ranks and payouts are projected-points estimates, not "
-            "win probabilities."
+            f"Field lineups are sampled by {projection_source} ownership%, not "
+            "simulated outcomes -- ranks and payouts are projected-points "
+            "estimates, not win probabilities."
         ),
     }
 
@@ -936,6 +960,7 @@ def _build_entries_and_field(
     contest_type: str,
     num_lineups: int,
     *,
+    projection_source: str = "rotowire",
     max_exposure_pct: float | None,
     field_size: int | None,
     sample_size: int | None,
@@ -975,6 +1000,7 @@ def _build_entries_and_field(
     entries = generate_entries(
         slate,
         num_lineups,
+        projection_source=projection_source,
         max_exposure_pct=max_exposure_pct,
         included_game_pks=included_game_pks,
         seed=seed,
@@ -984,6 +1010,7 @@ def _build_entries_and_field(
     field = generate_field(
         slate,
         field_sample,
+        projection_source=projection_source,
         included_game_pks=included_game_pks,
         seed=(seed + 1) if seed is not None else None,
     )
@@ -995,6 +1022,7 @@ def build_contest_entries(
     contest_type: str,
     num_lineups: int,
     *,
+    projection_source: str = "rotowire",
     max_exposure_pct: float | None = None,
     field_size: int | None = None,
     sample_size: int | None = None,
@@ -1019,6 +1047,7 @@ def build_contest_entries(
         slate,
         contest_type,
         num_lineups,
+        projection_source=projection_source,
         max_exposure_pct=max_exposure_pct,
         field_size=field_size,
         sample_size=sample_size,
@@ -1079,6 +1108,7 @@ async def build_contest_entries_simulated(
     num_lineups: int,
     *,
     season: int,
+    projection_source: str = "rotowire",
     num_trials: int = 2000,
     max_exposure_pct: float | None = None,
     field_size: int | None = None,
@@ -1100,6 +1130,7 @@ async def build_contest_entries_simulated(
         slate,
         contest_type,
         num_lineups,
+        projection_source=projection_source,
         max_exposure_pct=max_exposure_pct,
         field_size=field_size,
         sample_size=sample_size,
@@ -1284,6 +1315,7 @@ async def build_dk_entries_simulated(
     field_size: int,
     prize_pool: float,
     first_place_pct: float,
+    projection_source: str = "rotowire",
     payout_pct: float = 0.20,
     shape: str = "top_heavy",
     num_trials: int = 10_000,
@@ -1316,7 +1348,10 @@ async def build_dk_entries_simulated(
         raise ContestError("field_size must be at least 1.")
 
     field_sample = sample_size or min(field_size, MAX_SAMPLE_SIZE)
-    field_lineups = generate_field(slate, field_sample, included_game_pks=included_game_pks, seed=seed)
+    field_lineups = generate_field(
+        slate, field_sample, projection_source=projection_source,
+        included_game_pks=included_game_pks, seed=seed,
+    )
 
     contest = {
         "entry_fee": entry_fee,

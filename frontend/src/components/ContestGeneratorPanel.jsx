@@ -13,7 +13,7 @@ import { localTime } from '../format'
  * Monte Carlo outcome distribution (slower, genuine cash probabilities).
  * See the caveat rendered next to the economics numbers below.
  */
-export function ContestGeneratorPanel({ date, slate }) {
+export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowire' }) {
   const [mode, setMode] = useState('generate') // 'generate' | 'dk-entries'
   const [contestTypes, setContestTypes] = useState(null)
   const [contestType, setContestType] = useState('gpp_large')
@@ -79,6 +79,7 @@ export function ContestGeneratorPanel({ date, slate }) {
     setState({ status: 'loading' })
     try {
       const opts = {
+        projectionSource,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
@@ -116,6 +117,7 @@ export function ContestGeneratorPanel({ date, slate }) {
         fieldSize: dkFieldSize,
         prizePool: dkPrizePool,
         firstPlacePct: dkFirstPlacePct,
+        projectionSource,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
       })

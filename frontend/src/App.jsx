@@ -43,6 +43,12 @@ export default function App() {
   const [projectionMsg, setProjectionMsg] = useState(null)
   const salaryInputRef = useRef(null)
   const projectionInputRef = useRef(null)
+  // Which FPTS/ownership numbers feed the optimizer and contest
+  // generator -- independent of whether the tables have fetched the
+  // in-house columns yet, since those two endpoints fetch their own
+  // in-house-augmented slate server-side when asked.
+  const [projSource, setProjSource] = useState('rotowire')
+  const [inhouseLoading, setInhouseLoading] = useState(false)
 
   const load = useCallback(
     async (refresh = false) => {
@@ -59,6 +65,21 @@ export default function App() {
     },
     [date],
   )
+
+  // In-house FPTS/ownership are opt-in on the backend (a real per-player
+  // game-log fetch for every hitter/pitcher on the slate) -- fetched only
+  // when explicitly asked for, not on every plain dashboard load.
+  const loadInhouse = useCallback(async () => {
+    setInhouseLoading(true)
+    try {
+      const data = await api.slate(date, { inhouse: true })
+      setSlate(data)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setInhouseLoading(false)
+    }
+  }, [date])
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth(null))
@@ -151,6 +172,20 @@ export default function App() {
               >
                 Upload projections
               </button>
+              <button
+                onClick={loadInhouse}
+                disabled={inhouseLoading}
+                title="Compute this app's own in-house FPTS/ownership projections for this date (real per-player game-log fetches -- takes a few seconds)"
+              >
+                {inhouseLoading ? 'Computing…' : 'Load in-house projections'}
+              </button>
+              <label className="dim" style={{ fontSize: 13 }}>
+                Optimizer/generator source{' '}
+                <select value={projSource} onChange={(e) => setProjSource(e.target.value)}>
+                  <option value="rotowire">RotoWire</option>
+                  <option value="inhouse">In-house</option>
+                </select>
+              </label>
             </>
           )}
           <button onClick={cycleTheme} title="Theme">
@@ -285,7 +320,7 @@ export default function App() {
             <h2>Lineup optimizer</h2>
             <span className="hint">DraftKings Classic MLB — one optimal lineup per click</span>
           </div>
-          <LineupsPanel date={date} slate={slate} />
+          <LineupsPanel date={date} slate={slate} projectionSource={projSource} />
         </section>
       )}
 
@@ -295,7 +330,7 @@ export default function App() {
             <h2>Contest generator</h2>
             <span className="hint">mass multi-entry — up to 10,000 of your own entries per contest</span>
           </div>
-          <ContestGeneratorPanel date={date} slate={slate} />
+          <ContestGeneratorPanel date={date} slate={slate} projectionSource={projSource} />
         </section>
       )}
 
