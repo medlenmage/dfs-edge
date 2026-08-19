@@ -16,8 +16,13 @@ module never does that.
 COST
 ----
 A full slate summary is roughly 15-30k input tokens. On Sonnet that is
-a few cents per run. The response is cached for 30 minutes so clicking
-around the dashboard doesn't re-bill you.
+a few cents per run. The response is cached for a full day (see
+_ANALYSIS_TTL) -- keyed by date, so a new day's slate always gets a
+fresh read, but reopening the app or revisiting the tab any number of
+times the same day reuses the same cached write-up instead of paying
+for a new one. The frontend's "Regenerate" button (force=True) is the
+only thing that ever triggers a genuinely fresh call within that
+window.
 """
 
 from __future__ import annotations
@@ -31,12 +36,27 @@ from app.config import get_settings
 
 log = logging.getLogger(__name__)
 
+# A full day, not 30 minutes -- the cache key is already scoped to the
+# date, so this only controls how long a SAME-day write-up survives
+# being asked for again (reopening the app, revisiting the tab). A
+# genuinely fresh read is always one "Regenerate" click away.
+_ANALYSIS_TTL = 86400
+_ASK_TTL = 86400
+
 SYSTEM_PROMPT = """You are a sharp, plain-spoken daily fantasy sports analyst \
 helping one person build MLB lineups. You are looking at a single day's slate.
 
 Ground rules:
 - Every number you cite must come from the data provided. Never recall stats \
 from memory and never invent a number. If something isn't in the data, say so.
+- A team's hitters NEVER face that same team's own starting pitcher -- \
+teammates are not each other's opponents. Each game entry's "home" and \
+"away" objects each list that side's own pitcher alongside that side's own \
+hitters purely because they play for the same team; the hitters actually \
+bat against the OTHER side's pitcher, named explicitly in each side's \
+"opposing_pitcher_these_hitters_actually_face" field. Always use that field \
+to say who a hitter is facing, never the pitcher listed in that same team's \
+object.
 - Write like you are talking to a friend who plays DFS seriously but is not a \
 statistician. Short sentences. No jargon without a quick gloss.
 - Be concrete. "Stack the Rockies" is useless. "Stack the Rockies -- 6.1 \
@@ -125,15 +145,28 @@ def _compact_slate(slate: dict[str, Any], top_n: int = 9) -> dict[str, Any]:
                 "away_ml": bet.get("away_moneyline"),
             }
 
+        # Built as two independent per-team dicts, each holding ONLY
+        # that team's own pitcher and hitters, invited a real,
+        # observed failure mode: a model reading "home: {pitcher: X,
+        # hitters: [...]}" as one sibling grouping tends to infer X
+        # faces those hitters, when X is actually THAT team's own
+        # starter -- his real opponents are the OTHER side's hitters.
+        # `opposing_pitcher` makes the actual matchup explicit on each
+        # side instead of relying on the model to cross-reference two
+        # separate objects correctly.
+        home_pitcher = (g["home"].get("probable_pitcher") or {}).get("name")
+        away_pitcher = (g["away"].get("probable_pitcher") or {}).get("name")
+
         for side in ("home", "away"):
             s = g[side]
             pitcher = s.get("probable_pitcher") or {}
+            opposing_pitcher_name = away_pitcher if side == "home" else home_pitcher
             entry[side] = {
                 "team": s.get("name"),
                 "implied_runs": s.get("implied_runs"),
                 "stack_score": s.get("stack_score"),
                 "lineup_confirmed": s.get("lineup_confirmed"),
-                "starting_pitcher": (
+                "this_teams_own_starting_pitcher_NOT_an_opponent_of_the_hitters_below": (
                     {
                         "name": pitcher.get("name"),
                         "throws": pitcher.get("throws"),
@@ -146,6 +179,7 @@ def _compact_slate(slate: dict[str, Any], top_n: int = 9) -> dict[str, Any]:
                     if pitcher
                     else None
                 ),
+                "opposing_pitcher_these_hitters_actually_face": opposing_pitcher_name,
                 "hitters": [
                     {
                         "name": h["name"],
@@ -186,7 +220,7 @@ async def analyse_slate(
         return await _call_claude(compact, question)
 
     try:
-        result = await cached(cache_key, 1800, _load, force=force)
+        result = await cached(cache_key, _ANALYSIS_TTL, _load, force=force)
     except Exception as exc:  # noqa: BLE001
         log.exception("Claude analysis failed")
         return {"available": False, "reason": f"Analysis failed: {exc}"}
@@ -270,7 +304,7 @@ async def ask_about_slate(slate: dict[str, Any], question: str) -> dict[str, Any
 
     key = f"analysis:ask:{slate.get('date')}:{abs(hash(question)) & 0xFFFFFF}"
     try:
-        result = await cached(key, 1800, _load)
+        result = await cached(key, _ASK_TTL, _load)
     except Exception as exc:  # noqa: BLE001
         return {"available": False, "reason": str(exc)}
     return {"available": True, **result}
