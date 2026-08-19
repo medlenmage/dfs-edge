@@ -148,7 +148,8 @@ async def player_outcome_pool(
 
 
 # --------------------------------------------------------------------------
-# Team correlation (Phase 3)
+# Team correlation (Phase 3) + matchup conditioning and pitcher/opponent
+# anti-correlation (Phase 6)
 # --------------------------------------------------------------------------
 #
 # A team's whole offense having a big or small day together is why
@@ -162,19 +163,46 @@ async def player_outcome_pool(
 # drawn once per Monte Carlo trial, that biases which percentile of
 # EACH of that team's hitters' own outcome pool gets sampled that
 # trial -- correlated *within* a team and trial, independent *across*
-# teams and trials. Pitchers aren't correlated to their own offense
-# this way; a start is a mostly-independent event from the team's own
-# hitting day, so Phase 4's simulator should sample a pitcher's outcome
-# uniformly from his own pool instead of through these functions.
+# teams and trials.
+#
+# Two more signals bias that same percentile target, reusing the exact
+# mechanism above rather than inventing a new one:
+#
+#   - Own matchup quality (scoring.py's `edge.composite`, already
+#     computed for every hitter and pitcher -- platoon, park, weather,
+#     opposing pitcher/bullpen quality) nudges a player toward the
+#     better or worse end of HIS OWN real history for today's specific
+#     matchup, instead of sampling blind to it. Applies to hitters and
+#     pitchers alike.
+#   - A pitcher's OWN team multiplier never applies to him (a start is
+#     a mostly-independent event from his own team's hitting day), but
+#     the OPPOSING team's multiplier does, with the opposite sign: a
+#     hot day for the lineup he's facing pulls him toward the worse end
+#     of his own history, and vice versa -- the real DFS truth that a
+#     big home run is the same at-bat scored two opposite ways for the
+#     pitcher who allowed it.
+#
+# Every value here (multiplied to a real historical outcome the player
+# actually achieved, never a fabricated point total) is still just
+# "which of his own real games gets picked this trial," biased by three
+# additive, independently-tunable pulls -- same "clearly-labeled
+# approximation" philosophy as everywhere else in this module.
 
 TEAM_MULTIPLIER_MEAN = 1.0
 TEAM_MULTIPLIER_STD = 0.28
 TEAM_MULTIPLIER_MIN = 0.25
 TEAM_MULTIPLIER_MAX = 2.25
 
-# How much a team multiplier away from 1.0 shifts which percentile of
-# a hitter's own history dominates sampling that trial.
-PERCENTILE_SENSITIVITY = 1.0
+# How much each signal, one unit away from its own neutral value (1.0),
+# shifts the target percentile of a player's own outcome pool. All
+# three are independently tunable and, like TEAM_MULTIPLIER_STD, were
+# picked as a reasonable starting point and checked against real
+# outcomes rather than derived analytically -- see the offline/live
+# verification in test_pipeline.py and the README roadmap entry for
+# the actual numbers found.
+TEAM_SENSITIVITY = 1.0
+EDGE_SENSITIVITY = 1.0
+OPPONENT_SENSITIVITY = 0.6
 
 # Stdev of random jitter around that target percentile, as a fraction
 # of the pool length -- keeps real day-to-day randomness even on a
@@ -191,23 +219,57 @@ def team_environment_multiplier(rng: random.Random) -> float:
     return max(TEAM_MULTIPLIER_MIN, min(TEAM_MULTIPLIER_MAX, m))
 
 
-def sample_correlated_outcome(
-    sorted_pool: list[float], multiplier: float, rng: random.Random
+def _target_percentile(
+    *,
+    team_multiplier: float = 1.0,
+    own_edge: float | None = None,
+    opponent_multiplier: float | None = None,
 ) -> float:
     """
-    One hitter's simulated outcome for a trial, biased toward the
-    better (multiplier > 1) or worse (multiplier < 1) end of his own
-    outcome pool.
+    Shared math for both the scalar (sample_correlated_outcome) and
+    vectorized (simulate_batch) samplers -- the target percentile of a
+    player's own outcome pool this trial, before jitter. `team_multiplier`
+    is a hitter's own team's day (1.0 = no effect, the default for
+    pitchers and for hitters with an unknown team); `own_edge` is the
+    player's own matchup-quality multiplier for hitters and pitchers
+    alike; `opponent_multiplier`, pitchers only, applies with the
+    OPPOSITE sign -- the team he's facing having a big day pulls him
+    toward the worse end of his own history.
+    """
+    delta = (team_multiplier - 1.0) * TEAM_SENSITIVITY
+    if own_edge is not None:
+        delta += (own_edge - 1.0) * EDGE_SENSITIVITY
+    if opponent_multiplier is not None:
+        delta -= (opponent_multiplier - 1.0) * OPPONENT_SENSITIVITY
+    return min(1.0, max(0.0, 0.5 + delta))
+
+
+def sample_correlated_outcome(
+    sorted_pool: list[float],
+    rng: random.Random,
+    *,
+    team_multiplier: float = 1.0,
+    own_edge: float | None = None,
+    opponent_multiplier: float | None = None,
+) -> float:
+    """
+    One player's simulated outcome for a trial, biased toward the
+    better or worse end of his own outcome pool by whichever of
+    `team_multiplier` / `own_edge` / `opponent_multiplier` apply -- see
+    the module-level note above for what each one means and who it
+    applies to.
 
     `sorted_pool` must already be sorted ascending -- sort a player's
     pool once and reuse it across every trial in a batch, rather than
-    re-sorting on every single draw, since Phase 4 will call this many
-    thousands of times per player.
+    re-sorting on every single draw, since simulate_batch() calls this
+    many thousands of times per player.
     """
     n = len(sorted_pool)
     if n <= 1:
         return sorted_pool[0] if sorted_pool else 0.0
-    target_pct = min(1.0, max(0.0, 0.5 + (multiplier - 1.0) * PERCENTILE_SENSITIVITY))
+    target_pct = _target_percentile(
+        team_multiplier=team_multiplier, own_edge=own_edge, opponent_multiplier=opponent_multiplier
+    )
     target_idx = target_pct * (n - 1)
     idx = round(target_idx + rng.gauss(0, JITTER_FRACTION * n))
     return sorted_pool[min(n - 1, max(0, idx))]
@@ -271,11 +333,18 @@ def simulate_batch(
     trial, not once per lineup containing them -- two lineups sharing 8
     of their 10 players see correlated results between them in the same
     simulated "reality", for free, rather than each lineup being
-    simulated as if it existed in isolation. Hitters on the same team
-    share that trial's `team_environment_multiplier()`; pitchers are
-    sampled independently and uniformly from their own pool (a start is
-    a mostly-independent event from the team's own hitting day -- see
-    the Phase 3 note above).
+    simulated as if it existed in isolation.
+
+    Three signals bias which percentile of a player's own outcome pool
+    gets sampled each trial (see the module-level note above
+    team_environment_multiplier() for the full rationale): hitters on
+    the same team share that trial's team multiplier; every player
+    (hitter or pitcher) gets a further pull from their own
+    `edge_composite` (today's actual matchup quality, if known); and a
+    pitcher additionally gets pulled the OPPOSITE way by the team he's
+    facing having a big or small day -- pitchers never share their own
+    team's multiplier (a start is a mostly-independent event from the
+    team's own hitting day), only react to their opponent's.
 
     `player_pools` must have an entry (from `player_outcome_pool()`) for
     every player id appearing anywhere in `entries`.
@@ -286,7 +355,13 @@ def simulate_batch(
     for players in flattened:
         for slot_index, p in enumerate(players):
             unique_players.setdefault(
-                p["id"], {"team": p.get("team"), "is_pitcher": slot_index < PITCHER_COUNT}
+                p["id"],
+                {
+                    "team": p.get("team"),
+                    "opponent": p.get("opponent"),
+                    "is_pitcher": slot_index < PITCHER_COUNT,
+                    "edge_composite": p.get("edge_composite"),
+                },
             )
 
     missing = sorted(pid for pid in unique_players if pid not in player_pools)
@@ -297,8 +372,13 @@ def simulate_batch(
 
     rng = np.random.default_rng(seed)
 
-    hitter_teams = sorted(
+    # Every team that's either a hitter's own team or a pitcher's
+    # opponent needs its own multiplier series -- a pitcher can react
+    # to a team's day even if none of that team's hitters are anywhere
+    # in this batch.
+    relevant_teams = sorted(
         {info["team"] for info in unique_players.values() if not info["is_pitcher"] and info.get("team")}
+        | {info["opponent"] for info in unique_players.values() if info["is_pitcher"] and info.get("opponent")}
     )
     team_multipliers = {
         team: np.clip(
@@ -306,7 +386,7 @@ def simulate_batch(
             TEAM_MULTIPLIER_MIN,
             TEAM_MULTIPLIER_MAX,
         )
-        for team in hitter_teams
+        for team in relevant_teams
     }
 
     player_ids = list(unique_players)
@@ -319,11 +399,26 @@ def simulate_batch(
         if n == 0:
             continue
         i = player_index[pid]
-        if info["is_pitcher"] or not info.get("team"):
+        own_edge = info.get("edge_composite")
+
+        if info["is_pitcher"]:
+            opponent_multiplier = team_multipliers.get(info.get("opponent"))
+            has_signal = own_edge is not None or opponent_multiplier is not None
+        else:
+            opponent_multiplier = None
+            has_signal = bool(info.get("team")) or own_edge is not None
+
+        if not has_signal:
             idx = rng.integers(0, n, size=num_trials)
         else:
-            multiplier = team_multipliers[info["team"]]
-            target_pct = np.clip(0.5 + (multiplier - 1.0) * PERCENTILE_SENSITIVITY, 0.0, 1.0)
+            delta = np.zeros(num_trials)
+            if not info["is_pitcher"] and info.get("team"):
+                delta = delta + (team_multipliers[info["team"]] - 1.0) * TEAM_SENSITIVITY
+            if own_edge is not None:
+                delta = delta + (own_edge - 1.0) * EDGE_SENSITIVITY
+            if info["is_pitcher"] and opponent_multiplier is not None:
+                delta = delta - (opponent_multiplier - 1.0) * OPPONENT_SENSITIVITY
+            target_pct = np.clip(0.5 + delta, 0.0, 1.0)
             target_idx = target_pct * (n - 1)
             jitter = rng.normal(0.0, JITTER_FRACTION * n, size=num_trials)
             idx = np.clip(np.round(target_idx + jitter).astype(int), 0, n - 1)
