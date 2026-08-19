@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import mlb, odds, savant, weather  # noqa: E402
+from app.clients import draftkings, mlb, odds, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     contest,
@@ -495,6 +495,113 @@ async def main() -> int:
 
     check("a CSV with no recognizable DK header returns no players rather than raising",
           salaries.parse_dk_csv("just,some,random,csv\n1,2,3,4\n") == [])
+
+    print("\nDraftKings live slate import (clients/draftkings.py) -- no manual CSV needed")
+
+    # Fixture shaped exactly like DraftKings' real lobby response
+    # (confirmed live against https://www.draftkings.com/lobby/getcontests
+    # and https://api.draftkings.com/draftgroups/v1/draftgroups/{id}/draftables
+    # while building this feature): a Classic multi-game "Early" slate,
+    # a Classic single-game slate, a Snake draft group sharing the same
+    # games (must be excluded -- different roster rules), and a slate
+    # on a different day entirely (must be excluded by date).
+    dk_lobby_fixture = {
+        "DraftGroups": [
+            {
+                "DraftGroupId": 111, "GameTypeId": 2, "GameCount": 2,
+                "StartDate": "2026-08-19T16:35:00.0000000Z",
+                "StartDateEst": "2026-08-19T12:35:00.0000000",
+                "ContestStartTimeSuffix": " (Early)", "GameSetKey": "SETA",
+            },
+            {
+                "DraftGroupId": 112, "GameTypeId": 178, "GameCount": 2,  # Snake -- excluded
+                "StartDate": "2026-08-19T16:35:00.0000000Z",
+                "StartDateEst": "2026-08-19T12:35:00.0000000",
+                "ContestStartTimeSuffix": " (Snake Early)", "GameSetKey": "SETA",
+            },
+            {
+                "DraftGroupId": 113, "GameTypeId": 114, "GameCount": 1,
+                "StartDate": "2026-08-19T22:35:00.0000000Z",
+                "StartDateEst": "2026-08-19T18:35:00.0000000",
+                "ContestStartTimeSuffix": " (NYY @ BAL)", "GameSetKey": "SETB",
+            },
+            {
+                "DraftGroupId": 114, "GameTypeId": 2, "GameCount": 3,  # wrong day -- excluded
+                "StartDate": "2026-08-20T16:35:00.0000000Z",
+                "StartDateEst": "2026-08-20T12:35:00.0000000",
+                "ContestStartTimeSuffix": None, "GameSetKey": "SETC",
+            },
+        ],
+        "GameSets": [
+            {
+                "GameSetKey": "SETA",
+                "Competitions": [
+                    {"GameId": 1, "Description": "DET @ PIT", "StartDate": "2026-08-19T16:35:00.0000000Z"},
+                    {"GameId": 2, "Description": "SD @ NYM", "StartDate": "2026-08-19T17:10:00.0000000Z"},
+                ],
+            },
+            {
+                "GameSetKey": "SETB",
+                "Competitions": [
+                    {"GameId": 3, "Description": "NYY @ BAL", "StartDate": "2026-08-19T22:35:00.0000000Z"},
+                ],
+            },
+        ],
+    }
+
+    dk_slates = draftkings._parse_slates(dk_lobby_fixture, "2026-08-19")
+    check("_parse_slates keeps only Classic slates (excludes Snake) starting on the requested day",
+          {s["draft_group_id"] for s in dk_slates} == {111, 113}, str(dk_slates))
+    early = next(s for s in dk_slates if s["draft_group_id"] == 111)
+    check("_parse_slates labels a slate from its ContestStartTimeSuffix",
+          early["label"] == "Early", str(early))
+    check("_parse_slates pulls real games (teams + start time) from the matching GameSet",
+          early["games"] == [
+              {"game_id": 1, "away": "DET", "home": "PIT", "start_time_utc": "2026-08-19T16:35:00.0000000Z"},
+              {"game_id": 2, "away": "SD", "home": "NYM", "start_time_utc": "2026-08-19T17:10:00.0000000Z"},
+          ], str(early["games"]))
+    single_game = next(s for s in dk_slates if s["draft_group_id"] == 113)
+    check("an unset ContestStartTimeSuffix falls back to a 'Main' label",
+          draftkings._parse_slates(
+              {**dk_lobby_fixture, "DraftGroups": [dk_lobby_fixture["DraftGroups"][3]]}, "2026-08-20"
+          )[0]["label"] == "Main")
+    check("_parse_slates keeps a real single-game Classic slate too",
+          single_game["game_count"] == 1, str(single_game))
+
+    dk_draftables_fixture = {
+        "draftables": [
+            {
+                "displayName": "Shohei Ohtani", "teamAbbreviation": "LAD", "position": "1B/OF",
+                "salary": 7000, "playerDkId": 999001, "isDisabled": False,
+                "competition": {"name": "LAD @ COL"},
+                "draftStatAttributes": [{"id": 408, "value": "13.2"}, {"id": -22, "value": "Both"}],
+            },
+            {
+                # No salary -- DK sometimes lists these too; must be skipped.
+                "displayName": "No Salary Guy", "teamAbbreviation": "LAD", "position": "OF",
+                "salary": None, "playerDkId": 999002, "isDisabled": False,
+                "competition": {"name": "LAD @ COL"}, "draftStatAttributes": [],
+            },
+            {
+                # isDisabled -- truly undraftable, must be skipped.
+                "displayName": "Scratched Guy", "teamAbbreviation": "LAD", "position": "SS",
+                "salary": 3000, "playerDkId": 999003, "isDisabled": True,
+                "competition": {"name": "LAD @ COL"}, "draftStatAttributes": [],
+            },
+        ]
+    }
+    dk_rows = draftkings._parse_draftables(dk_draftables_fixture)
+    check("_parse_draftables skips players with no salary and players DK flagged isDisabled",
+          len(dk_rows) == 1 and dk_rows[0]["dk_id"] == "999001", str(dk_rows))
+    check("_parse_draftables produces the exact row shape salaries.parse_dk_csv() does, "
+          "so salaries.store() accepts it with no changes downstream",
+          dk_rows[0] == {
+              "name": "Shohei Ohtani", "normalized_name": "shohei ohtani", "team": "LAD",
+              "position": "1B/OF", "salary": 7000, "avg_points": 13.2,
+              "game_info": "LAD@COL", "dk_id": "999001",
+          }, str(dk_rows[0]))
+    check("the game_info DraftKings gives us (with spaces) still matches this app's own parse_game_info()",
+          salaries.parse_game_info(dk_rows[0]["game_info"]) == ("LAD", "COL"), str(dk_rows[0]["game_info"]))
 
     def fake_salary_load_in_slate(day):
         return [salary_row("Big Righty Bat", "NYY", 4200, 9.5, game_info="NYY@BOS 08/14/2026 07:10PM ET")]
