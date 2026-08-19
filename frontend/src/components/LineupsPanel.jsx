@@ -362,11 +362,15 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
                 style={{ width: 80 }}
               />
             </label>
-            <label className="dim" style={{ fontSize: 13 }}>
-              Min unique players between lineups{' '}
+            <label
+              className="dim"
+              style={{ fontSize: 13 }}
+              title="0 allows exact duplicates -- a real GPP move (entering a signature build multiple times). Each lineup then reports how many identical copies are in the set."
+            >
+              Min unique players between lineups (0 = allow duplicates){' '}
               <input
                 type="number"
-                min="1"
+                min="0"
                 max="10"
                 placeholder="1"
                 value={minUniquePlayers}

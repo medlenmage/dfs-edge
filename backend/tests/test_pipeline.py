@@ -12,6 +12,7 @@ Run it with:
 from __future__ import annotations
 
 import asyncio
+import random
 import sys
 from pathlib import Path
 
@@ -1043,11 +1044,30 @@ async def main() -> int:
     check("min_unique_players=5 forces every pair of lineups to differ by at least 5 players",
           min_diff >= 5, str(min_diff))
 
+    # min_unique_players=0 allows exact duplicates -- a real GPP move
+    # (entering a signature build multiple times). No exposure cap here
+    # means every solve reproduces the same true optimum, so all 4
+    # should come back identical, each reporting duplicate_count == 4.
+    dup_allowed = optimizer.generate_lineups(mul_slate, num_lineups=4, min_unique_players=0)["lineups"]
+    dup_signatures = [
+        frozenset(p["id"] for slot in lu["slots"].values() for p in slot) for lu in dup_allowed
+    ]
+    check("min_unique_players=0 allows the same optimal lineup to repeat",
+          len(set(dup_signatures)) == 1, str(len(set(dup_signatures))))
+    check("duplicate_count reports how many identical copies are in the set",
+          all(lu["duplicate_count"] == 4 for lu in dup_allowed),
+          str([lu["duplicate_count"] for lu in dup_allowed]))
+
+    default_dup_counts = optimizer.generate_lineups(mul_slate, num_lineups=4, max_exposure_pct=50)["lineups"]
+    check("duplicate_count is 1 under the default (no exact repeats allowed)",
+          all(lu["duplicate_count"] == 1 for lu in default_dup_counts),
+          str([lu["duplicate_count"] for lu in default_dup_counts]))
+
     try:
-        optimizer.generate_lineups(mul_slate, min_unique_players=0)
-        check("optimizer rejects min_unique_players below 1", False)
+        optimizer.generate_lineups(mul_slate, min_unique_players=-1)
+        check("optimizer rejects a negative min_unique_players", False)
     except optimizer.OptimizerError:
-        check("optimizer rejects min_unique_players below 1", True)
+        check("optimizer rejects a negative min_unique_players", True)
 
     try:
         optimizer.generate_lineups(mul_slate, min_unique_players=optimizer.ROSTER_SIZE + 1)
@@ -1227,6 +1247,88 @@ async def main() -> int:
         check("one-off restriction rejects one_off_min_salary above one_off_max_salary", False)
     except optimizer.OptimizerError:
         check("one-off restriction rejects one_off_min_salary above one_off_max_salary", True)
+
+    print("\nLineup optimizer: default one-off slot quality preference")
+
+    # A dedicated fixture proving the *default* preference (no explicit
+    # one_off_* override) actually forces a real tradeoff, not just a
+    # restatement of what fpts-maximization would already do alone.
+    # QA/QB are manually stacked at 3 each (stack_groups=[3, 3]), using
+    # up all their own hitter depth exactly -- they have zero spare
+    # capacity, so the 2 leftover OF slots MUST come from QMISC. QMISC
+    # offers a genuine "junk" pair (cheap, low fpts, well under 80% of
+    # the OF ceiling both ways) and a "premium" pair (at the ceiling on
+    # both). QA also offers a very expensive, very high-fpts catcher
+    # upgrade that's only affordable if the OF slots go cheap (junk) --
+    # so the TRUE unconstrained fpts-max optimum genuinely prefers the
+    # junk OF pair to fund the catcher upgrade, proving this isn't a
+    # scenario where fpts-maximization alone would have avoided junk
+    # anyway.
+    q_pitcher_a = opt_pitcher(9900, "QAP", 3000, 10)
+    q_pitcher_b = opt_pitcher(9901, "QBP", 3000, 10)
+    qa_hitters = [
+        opt_hitter(9910, "QAC", "QA", "C", 3000, 8),
+        opt_hitter(9911, "QASTUD_C", "QA", "C", 15000, 25),
+        opt_hitter(9912, "QA1B", "QA", "1B", 3000, 8),
+        opt_hitter(9913, "QA2B", "QA", "2B", 3000, 8),
+    ]
+    qb_hitters = [
+        opt_hitter(9920, "QB3B", "QB", "3B", 3000, 8),
+        opt_hitter(9921, "QBSS", "QB", "SS", 3000, 8),
+        opt_hitter(9922, "QBOF", "QB", "OF", 3000, 8),
+    ]
+    qmisc_hitters = [
+        opt_hitter(9930, "QJUNK1", "QMISC", "OF", 2000, 3),
+        opt_hitter(9931, "QJUNK2", "QMISC", "OF", 2000, 3),
+        opt_hitter(9932, "QPREM1", "QMISC", "OF", 9000, 9),
+        opt_hitter(9933, "QPREM2", "QMISC", "OF", 9000, 9),
+    ]
+    quality_slate = {
+        "games": [
+            {
+                "home": {"abbrev": "QA", "hitters": qa_hitters,
+                         "probable_pitcher": q_pitcher_a, "scratches": []},
+                "away": {"abbrev": "QX", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
+            {
+                "home": {"abbrev": "QB", "hitters": qb_hitters,
+                         "probable_pitcher": q_pitcher_b, "scratches": []},
+                "away": {"abbrev": "QY", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
+            {
+                "home": {"abbrev": "QMISC", "hitters": qmisc_hitters,
+                         "probable_pitcher": None, "scratches": []},
+                "away": {"abbrev": "QZ", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
+        ]
+    }
+
+    junk_ids = {9930, 9931}
+    prem_ids = {9932, 9933}
+    stud_c_id = 9911
+
+    # Bypasses the default via a trivial, non-restrictive explicit
+    # one_off_min_salary=0 -- confirms the TRUE unconstrained optimum
+    # really does use the junk OF pair to fund the catcher upgrade.
+    quality_baseline = optimizer.generate_lineups(
+        quality_slate, stack_groups=[3, 3], stack_teams=["QA", "QB"], one_off_min_salary=0,
+    )["lineups"][0]
+    baseline_ids = hitter_ids(quality_baseline)
+    # The true optimum turns out to mix one junk + one premium OF pick
+    # (higher combined fpts than either extreme) to help fund the
+    # catcher upgrade -- at least one non-qualifying junk pick is what
+    # matters here, not necessarily both.
+    check("without the default, the true optimum funds a catcher upgrade with a junk OF pick",
+          bool(junk_ids & baseline_ids) and stud_c_id in baseline_ids, str(baseline_ids))
+
+    quality_default = optimizer.generate_lineups(
+        quality_slate, stack_groups=[3, 3], stack_teams=["QA", "QB"],
+    )["lineups"][0]
+    default_ids = hitter_ids(quality_default)
+    check("the default one-off quality preference blocks the junk OF pair entirely",
+          not (junk_ids & default_ids), str(default_ids))
+    check("...forcing the premium OF pair in instead, even at a real fpts cost",
+          prem_ids <= default_ids, str(default_ids))
 
     print("\nLineup optimizer: cumulative ownership")
 
@@ -1740,6 +1842,60 @@ async def main() -> int:
           all(lu["salary_used"] >= 45000 for lu in floored_entries),
           str(min(lu["salary_used"] for lu in floored_entries)))
 
+    check("duplicate_count is 1 for every entry under the default distinctness guarantee",
+          all(lu["duplicate_count"] == 1 for lu in entries),
+          str({lu["duplicate_count"] for lu in entries}))
+
+    # A dedicated single-solution fixture: TA (5 hitters, exactly one
+    # per required slot) and TB (3 OF, exactly the 3 OF slots) are in
+    # separate games (so each team's own pitcher is always safe to use
+    # against the other -- unlike opt_slate, which has only one hitting
+    # team and would need all 8 of its hitters, violating contest.py's
+    # own MAX_HITTERS_PER_TEAM=5 cap). With zero depth or choice
+    # anywhere, every successful attempt can only ever land on the same
+    # 10 players -- a deterministic way to prove allow_duplicates
+    # actually lets exact repeats through.
+    ta_hitters = [
+        opt_hitter(9940, "TAC", "TA", "C", 3000, 8),
+        opt_hitter(9941, "TA1B", "TA", "1B", 3000, 8),
+        opt_hitter(9942, "TA2B", "TA", "2B", 3000, 8),
+        opt_hitter(9943, "TA3B", "TA", "3B", 3000, 8),
+        opt_hitter(9944, "TASS", "TA", "SS", 3000, 8),
+    ]
+    tb_hitters = [
+        opt_hitter(9950, "TBOF1", "TB", "OF", 3000, 8),
+        opt_hitter(9951, "TBOF2", "TB", "OF", 3000, 8),
+        opt_hitter(9952, "TBOF3", "TB", "OF", 3000, 8),
+    ]
+    single_solution_slate = {
+        "games": [
+            {
+                "home": {"abbrev": "TA", "hitters": ta_hitters,
+                         "probable_pitcher": opt_pitcher(9960, "TAP", 3000, 10), "scratches": []},
+                "away": {"abbrev": "TX", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
+            {
+                "home": {"abbrev": "TB", "hitters": tb_hitters,
+                         "probable_pitcher": opt_pitcher(9961, "TBP", 3000, 10), "scratches": []},
+                "away": {"abbrev": "TY", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
+        ]
+    }
+
+    no_dupes = contest.generate_entries(single_solution_slate, 3, seed=1)
+    check("without allow_duplicates, a single-solution pool returns only 1 entry",
+          len(no_dupes) == 1, str(len(no_dupes)))
+
+    dupes_allowed = contest.generate_entries(single_solution_slate, 3, allow_duplicates=True, seed=1)
+    check("allow_duplicates lets a single-solution pool return the full requested count",
+          len(dupes_allowed) == 3, str(len(dupes_allowed)))
+    dupe_signatures = {frozenset(p["id"] for p in lu["players"]) for lu in dupes_allowed}
+    check("...all 3 are exact copies of the same lineup",
+          len(dupe_signatures) == 1, str(len(dupe_signatures)))
+    check("...each reports duplicate_count == 3",
+          all(lu["duplicate_count"] == 3 for lu in dupes_allowed),
+          str([lu["duplicate_count"] for lu in dupes_allowed]))
+
     unweighted_field = contest.generate_field(mul_slate, 40, seed=13)
     avg_entry_points = sum(lu["projected_points"] for lu in entries) / len(entries)
     avg_field_points = sum(lu["projected_points"] for lu in unweighted_field) / len(unweighted_field)
@@ -1905,6 +2061,105 @@ async def main() -> int:
         check("build_contest_entries rejects num_lineups < 1", False)
     except contest.ContestError:
         check("build_contest_entries rejects num_lineups < 1", True)
+
+    print("\nContest generator: default one-off slot quality preference")
+
+    # A minimal, fully-controlled candidates_by_slot (built directly,
+    # bypassing build_player_pool) with exactly one feasible stack team
+    # (STK, exactly 5 hitters -- DK's own MAX_HITTERS_PER_TEAM cap, and
+    # no ambiguity in _pick_stack_teams' random team choice) and a 2nd
+    # team (MISC) offering 2 "junk" (cheap, low fpts, HIGH ownership)
+    # and 2 "premium" (expensive, high fpts, LOW ownership) OF options
+    # for the 3 leftover one-off OF slots (leftover = 8 - 5 = 3,
+    # required = min(2, 3) = 2). Ownership-weighted sampling (the
+    # field's own weight_fn) would prefer junk by a wide margin on
+    # ownership alone -- proving the quality restriction is a real,
+    # ownership-blind override, not just something high-fpts sampling
+    # would have done anyway.
+    def cq(pid, name, team, salary, fpts, own):
+        return {
+            "id": pid, "name": name, "team": team, "salary": salary,
+            "projected_fpts": fpts, "ownership_pct": own, "opponent": "",
+        }
+
+    quality_candidates_by_slot = {
+        "P": [cq(9970, "PA", "PTEAM1", 3000, 10, 5), cq(9971, "PB", "PTEAM2", 3000, 10, 5)],
+        "C": [cq(9972, "C1", "STK", 3000, 8, 5)],
+        "1B": [cq(9973, "1B1", "STK", 3000, 8, 5)],
+        "2B": [cq(9974, "2B1", "STK", 3000, 8, 5)],
+        "3B": [cq(9975, "3B1", "STK", 3000, 8, 5)],
+        "SS": [cq(9976, "SS1", "STK", 3000, 8, 5)],
+        "OF": [
+            cq(9980, "JUNK1", "MISC", 2000, 3, 80),
+            cq(9981, "JUNK2", "MISC", 2000, 3, 80),
+            cq(9982, "PREM1", "MISC", 9000, 9, 1),
+            cq(9983, "PREM2", "MISC", 9000, 9, 1),
+        ],
+    }
+    quality_slot_order = ["P", "P", "C", "1B", "2B", "3B", "SS", "OF", "OF", "OF"]
+    quality_team_pools = contest._team_hitter_pools(quality_candidates_by_slot, quality_slot_order)
+    quality_ids = contest._one_off_quality_ids(quality_candidates_by_slot)
+    check("_one_off_quality_ids correctly identifies the premium OF pair, not the junk pair",
+          quality_ids >= {9982, 9983} and not ({9980, 9981} & quality_ids), str(quality_ids))
+
+    junk_ids = {9980, 9981}
+    prem_ids = {9982, 9983}
+
+    no_pref_rng = random.Random(3)
+    junk_seen = False
+    for _ in range(30):
+        lu = contest._sample_one_lineup(
+            quality_candidates_by_slot, quality_slot_order, no_pref_rng, contest._ownership_weight,
+            team_hitter_pools=quality_team_pools, stack_groups=[5],
+        )
+        if lu and (junk_ids & lu["player_ids"]):
+            junk_seen = True
+            break
+    check("without the preference, ownership-weighted sampling picks junk OF (chalk) at least sometimes",
+          junk_seen, f"junk_seen={junk_seen}")
+
+    pref_rng = random.Random(3)
+    for _ in range(10):
+        lu = contest._sample_one_lineup(
+            quality_candidates_by_slot, quality_slot_order, pref_rng, contest._ownership_weight,
+            team_hitter_pools=quality_team_pools, stack_groups=[5], one_off_quality_ids=quality_ids,
+        )
+        check("with the preference active, at least 2 of the 3 leftover OF slots are premium",
+              lu is not None and len(prem_ids & lu["player_ids"]) >= 2,
+              str(lu["player_ids"] if lu else None))
+
+    print("\nContest generator: duplicate lineups split their combined payout")
+
+    # Direct unit test of the redistribution logic: 3 entries where the
+    # first 2 are exact duplicates (same 10 players) and the 3rd is
+    # different. Simulates what the rank-assignment walk would have
+    # already produced -- consecutive individual payouts for the tied
+    # pair (as if each claimed its own adjacent rank) -- and confirms
+    # averaging reproduces exactly what DK's real tie-splitting rule
+    # would pay each duplicate: the combined value of the ranks they
+    # occupy, split evenly.
+    dup_players = [{"id": pid} for pid in range(100, 110)]
+    other_players = [{"id": pid} for pid in range(200, 210)]
+    split_entries = [
+        {"players": dup_players},
+        {"players": dup_players},
+        {"players": other_players},
+    ]
+    split_results = [
+        {"estimated_payout": 40.0, "estimated_profit": 30.0},
+        {"estimated_payout": 35.0, "estimated_profit": 25.0},
+        {"estimated_payout": 10.0, "estimated_profit": 0.0},
+    ]
+    contest._split_duplicate_payouts(split_entries, split_results, ["estimated_payout", "estimated_profit"])
+    check("duplicate entries split their combined payout evenly (DK's real tie-payout rule)",
+          split_results[0]["estimated_payout"] == 37.5 and split_results[1]["estimated_payout"] == 37.5,
+          str(split_results[:2]))
+    check("...and their profit the same way",
+          split_results[0]["estimated_profit"] == 27.5 and split_results[1]["estimated_profit"] == 27.5,
+          str(split_results[:2]))
+    check("the non-duplicate entry's own payout is untouched",
+          split_results[2]["estimated_payout"] == 10.0 and split_results[2]["estimated_profit"] == 0.0,
+          str(split_results[2]))
 
     print("\nContest generator: per-player projected_fpts/ownership_pct on each entry")
 

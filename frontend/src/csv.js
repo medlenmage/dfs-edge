@@ -45,7 +45,10 @@ function stackInfo(lineup) {
  * downloaded optimizer CSV and a downloaded contest-generator CSV line up. */
 export function lineupsToCsv(lineups) {
   const labels = slotLabels()
-  const header = ['lineup_index', 'salary_used', 'stack_type', 'stack', 'projected_points', 'total_ownership_pct']
+  const header = [
+    'lineup_index', 'salary_used', 'stack_type', 'stack', 'projected_points',
+    'total_ownership_pct', 'duplicate_count',
+  ]
   for (const label of labels) {
     header.push(`${label}_name`)
   }
@@ -63,6 +66,7 @@ export function lineupsToCsv(lineups) {
       stack,
       lineup.projected_points,
       lineup.total_ownership_pct,
+      lineup.duplicate_count ?? 1,
     ]
     for (const label of labels) {
       const slot = label.replace(/\d+$/, '')

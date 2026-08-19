@@ -175,6 +175,7 @@ export const api = {
       includedGamePks = null,
       minSalary = 47000,
       maxSalary = 50000,
+      allowDuplicates = false,
     } = {},
   ) =>
     request('/api/mlb/contest-entries', {
@@ -190,6 +191,7 @@ export const api = {
         included_game_pks: includedGamePks,
         min_salary: minSalary,
         max_salary: maxSalary,
+        allow_duplicates: allowDuplicates,
       }),
     }),
 
@@ -210,6 +212,7 @@ export const api = {
       includedGamePks = null,
       minSalary = 47000,
       maxSalary = 50000,
+      allowDuplicates = false,
     } = {},
   ) =>
     request('/api/mlb/contest-entries-simulated', {
@@ -225,6 +228,7 @@ export const api = {
         included_game_pks: includedGamePks,
         min_salary: minSalary,
         max_salary: maxSalary,
+        allow_duplicates: allowDuplicates,
       }),
     }),
 

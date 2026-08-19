@@ -50,6 +50,7 @@ for the date.
 from __future__ import annotations
 
 import random
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -58,6 +59,9 @@ import numpy as np
 from app.services import variance
 from app.services.lineup_export import stack_info
 from app.services.optimizer import (
+    MAX_HITTERS,
+    ONE_OFF_QUALITY_MIN,
+    ONE_OFF_QUALITY_RATIO,
     SALARY_CAP,
     SLOT_REQUIREMENTS,
     SLOT_TYPES,
@@ -168,6 +172,79 @@ def _validate_salary_range(min_salary: int, max_salary: int) -> None:
         raise ContestError(f"max_salary ({max_salary}) can't be more than the ${SALARY_CAP} salary cap.")
     if min_salary > max_salary:
         raise ContestError("min_salary can't be more than max_salary.")
+
+
+def _one_off_quality_ids(candidates_by_slot: dict[str, list[dict[str, Any]]]) -> frozenset[int]:
+    """
+    Same "payup or high-FPTS" definition as optimizer.py's own
+    _one_off_quality_ids() (salary or projected FPTS within
+    ONE_OFF_QUALITY_RATIO of the best available at that slot type),
+    computed from this module's per-slot candidate lists instead of
+    optimizer.py's flat pool shape.
+    """
+    hitter_slot_types = set(SLOT_TYPES) - {"P"}
+    best_salary = {s: max((p["salary"] for p in candidates_by_slot[s]), default=0) for s in hitter_slot_types}
+    best_fpts = {
+        s: max((p["projected_fpts"] for p in candidates_by_slot[s]), default=0) for s in hitter_slot_types
+    }
+    qualifying: set[int] = set()
+    for slot in hitter_slot_types:
+        for p in candidates_by_slot[slot]:
+            if (
+                p["salary"] >= ONE_OFF_QUALITY_RATIO * best_salary[slot]
+                or p["projected_fpts"] >= ONE_OFF_QUALITY_RATIO * best_fpts[slot]
+            ):
+                qualifying.add(p["id"])
+    return frozenset(qualifying)
+
+
+def _attach_duplicate_counts(lineups: list[dict[str, Any]]) -> None:
+    """
+    How many identical copies of each exact lineup (same 10 players)
+    ended up in this set -- attached to each lineup as
+    `duplicate_count`. Always 1 for generate_entries() under its
+    default distinctness guarantee; meaningful once allow_duplicates
+    lets exact repeats through, and generate_field() already allows
+    duplicates by design (real chalk-heavy fields cluster that way).
+    """
+    signatures = [frozenset(p["id"] for p in lu["players"]) for lu in lineups]
+    counts = Counter(signatures)
+    for lu, sig in zip(lineups, signatures):
+        lu["duplicate_count"] = counts[sig]
+
+
+def _split_duplicate_payouts(
+    entries: list[dict[str, Any]], results: list[dict[str, Any]], fields: list[str]
+) -> None:
+    """
+    Real DK entries that are exact duplicates (same 10 players) always
+    score identically in the real world -- they genuinely tie for
+    whichever consecutive block of ranks they land in, and DK's own
+    tie-breaking rule splits the combined payout across those ranks
+    evenly among the tied entries, rather than each claiming a full
+    individual payout as if it alone occupied its rank.
+
+    The rank-assignment already run before this is called places
+    duplicate entries at consecutive ranks (identical projected/
+    simulated scores always sort adjacent to each other), so each
+    duplicate's individually-computed value in `fields` already
+    reflects the payout for one specific rank in that contiguous block
+    -- averaging those values across the group reproduces exactly the
+    "split the block's combined payout evenly" result, with no need to
+    touch the rank-assignment logic itself.
+    """
+    signatures = [frozenset(p["id"] for p in lu["players"]) for lu in entries]
+    groups: dict[frozenset[int], list[int]] = {}
+    for i, sig in enumerate(signatures):
+        groups.setdefault(sig, []).append(i)
+
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        for field in fields:
+            shared = sum(results[i][field] for i in idxs) / len(idxs)
+            for i in idxs:
+                results[i][field] = round(shared, 2)
 
 
 def _ownership_weight(p: dict[str, Any]) -> float:
@@ -300,6 +377,7 @@ def _sample_one_lineup(
     stack_groups: list[int] | None = None,
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
+    one_off_quality_ids: frozenset[int] | None = None,
 ) -> dict[str, Any] | None:
     """
     Build one randomly-weighted lineup within the salary cap (and the
@@ -333,10 +411,28 @@ def _sample_one_lineup(
     every slot is walked, the whole attempt fails just like any other
     infeasible random walk here.
 
+    `one_off_quality_ids`, if given (a partial shape's default "prefer
+    payup or high-FPTS" behavior -- see optimizer.py's own version of
+    this), restricts the first min(2, leftover) genuine one-off hitter
+    picks (slots where no stack group still needs filling) to that set,
+    falling back to the ordinary unrestricted pool if the restricted
+    one is empty for that slot -- a soft preference, not a hard
+    constraint, since a failed restriction here just means one retry
+    attempt didn't get a top-quality pick, not that no legal lineup
+    exists at all (unlike optimizer.py's exact solve, this sampler has
+    no way to know in advance whether the restriction is even
+    satisfiable, so it degrades gracefully instead of burning retries
+    on a guaranteed failure).
+
     Returns None if this particular random walk couldn't complete; the
     caller just retries.
     """
     stack_remaining: dict[str, int] = {}
+    one_off_required = 0
+    if stack_groups is not None and one_off_quality_ids is not None:
+        leftover = MAX_HITTERS - sum(stack_groups)
+        one_off_required = min(ONE_OFF_QUALITY_MIN, leftover) if leftover > 0 else 0
+    one_off_filled = 0
     if stack_groups is not None and team_hitter_pools is not None:
         assignment = _pick_stack_teams(team_hitter_pools, stack_groups, weight_fn, rng)
         if assignment is None:
@@ -363,6 +459,7 @@ def _sample_one_lineup(
         if not eligible:
             return None
 
+        needed_teams: set[str] = set()
         if slot != "P":
             eligible = [p for p in eligible if team_hitter_count.get(p["team"], 0) < MAX_HITTERS_PER_TEAM]
             if not eligible:
@@ -377,6 +474,10 @@ def _sample_one_lineup(
                 restricted = [p for p in eligible if p["team"] in needed_teams]
                 if restricted:
                     eligible = restricted
+            elif one_off_filled < one_off_required:
+                quality_eligible = [p for p in eligible if p["id"] in one_off_quality_ids]
+                if quality_eligible:
+                    eligible = quality_eligible
 
         min_cost_of_rest = sum(
             min(
@@ -405,6 +506,8 @@ def _sample_one_lineup(
                 banned_hitter_teams.add(pick["opponent"])
         else:
             team_hitter_count[pick["team"]] = team_hitter_count.get(pick["team"], 0) + 1
+            if not needed_teams and one_off_quality_ids and pick["id"] in one_off_quality_ids:
+                one_off_filled += 1
         if stack_remaining.get(pick["team"], 0) > 0:
             stack_remaining[pick["team"]] -= 1
 
@@ -506,6 +609,7 @@ def generate_field(
     )
     team_hitter_pools = _team_hitter_pools(candidates_by_slot, slot_order)
     feasible_shapes, feasible_weights = _feasible_stack_shapes(team_hitter_pools)
+    one_off_quality_ids = _one_off_quality_ids(candidates_by_slot)
 
     rng = random.Random(seed)
     field: list[dict[str, Any]] = []
@@ -527,6 +631,7 @@ def generate_field(
                 stack_groups=shape,
                 min_salary=min_salary,
                 max_salary=max_salary,
+                one_off_quality_ids=one_off_quality_ids,
             )
             if lineup is not None:
                 break
@@ -538,6 +643,7 @@ def generate_field(
             "Couldn't build any legal field lineups from this pool -- the salary "
             "cap or slot requirements may be too tight for the players available."
         )
+    _attach_duplicate_counts(field)
     return field
 
 
@@ -551,15 +657,17 @@ def generate_entries(
     max_attempts_per_lineup: int = 30,
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
+    allow_duplicates: bool = False,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Build up to `num_lineups` of the user's OWN entries for a contest --
     each one individually strong (players picked with a heavy lean
-    toward higher projected points, via `_fpts_weight`) but genuinely
-    distinct from every other entry in the batch, unlike `generate_field`'s
-    opponent model, which deliberately allows duplicate/near-duplicate
-    lineups to represent real chalk clustering.
+    toward higher projected points, via `_fpts_weight`) but, by
+    default, genuinely distinct from every other entry in the batch,
+    unlike `generate_field`'s opponent model, which deliberately allows
+    duplicate/near-duplicate lineups to represent real chalk
+    clustering.
 
     `max_exposure_pct`, if given, caps how often any one player can
     appear across the whole batch -- same idea as optimizer.py's own
@@ -570,10 +678,15 @@ def generate_entries(
     (unconstrained by default here; the HTTP API applies a $47,000
     floor unless overridden).
 
+    `allow_duplicates`, if set, lets exact repeats of an earlier entry
+    in this batch through -- a real, sometimes-deliberate GPP move
+    (entering a signature build multiple times). Every entry carries a
+    `duplicate_count` reporting how many identical copies ended up in
+    the batch (always 1 under the default distinctness guarantee).
+
     If the pool or the exposure cap can't support the full count
-    requested, returns as many distinct legal entries as it could
-    build rather than failing the whole request -- only an empty
-    result raises.
+    requested, returns as many legal entries as it could build rather
+    than failing the whole request -- only an empty result raises.
     """
     if num_lineups < 1:
         raise ContestError("num_lineups must be at least 1.")
@@ -586,6 +699,7 @@ def generate_entries(
     )
     team_hitter_pools = _team_hitter_pools(candidates_by_slot, slot_order)
     feasible_shapes, feasible_weights = _feasible_stack_shapes(team_hitter_pools)
+    one_off_quality_ids = _one_off_quality_ids(candidates_by_slot)
 
     def _cap_to_count(pct: float) -> int:
         return max(1, round(pct / 100 * num_lineups))
@@ -612,13 +726,16 @@ def generate_entries(
                 stack_groups=shape,
                 min_salary=min_salary,
                 max_salary=max_salary,
+                one_off_quality_ids=one_off_quality_ids,
             )
-            if candidate is None or candidate["player_ids"] in seen_signatures:
+            if candidate is None:
+                continue
+            if not allow_duplicates and candidate["player_ids"] in seen_signatures:
                 continue
             lineup = candidate
             break
         if lineup is None:
-            break  # ran out of room for more distinct, legal, exposure-legal entries
+            break  # ran out of room for more legal, exposure-legal entries
 
         seen_signatures.add(lineup.pop("player_ids"))
         entries.append(lineup)
@@ -633,6 +750,7 @@ def generate_entries(
             "Couldn't build any legal entries from this pool -- the salary cap, "
             "slot requirements, or exposure cap may be too tight for the players available."
         )
+    _attach_duplicate_counts(entries)
     return entries
 
 
@@ -812,6 +930,8 @@ def _evaluate_batch_against_field(
             "estimated_profit": round(payout - entry_fee, 2),
         }
 
+    _split_duplicate_payouts(entries, results, ["estimated_payout", "estimated_profit"])
+
     return {
         "field_size": field_size,
         "sample_size": sample_size,
@@ -935,6 +1055,15 @@ async def evaluate_batch_simulated(
             }
         )
 
+    _split_duplicate_payouts(
+        entries,
+        results,
+        [
+            "cash_probability_pct", "first_place_pct", "top_1pct_pct", "top_10pct_pct",
+            "expected_payout", "payout_p10", "payout_p90", "roi_pct",
+        ],
+    )
+
     return {
         "field_size": field_size,
         "sample_size": sample_size,
@@ -1017,6 +1146,7 @@ def _build_entries_and_field(
     included_game_pks: list[int] | None,
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
+    allow_duplicates: bool = False,
     seed: int | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """
@@ -1057,6 +1187,7 @@ def _build_entries_and_field(
         included_game_pks=included_game_pks,
         min_salary=min_salary,
         max_salary=max_salary,
+        allow_duplicates=allow_duplicates,
         seed=seed,
     )
 
@@ -1085,6 +1216,7 @@ def build_contest_entries(
     included_game_pks: list[int] | None = None,
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
+    allow_duplicates: bool = False,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """
@@ -1112,6 +1244,7 @@ def build_contest_entries(
         included_game_pks=included_game_pks,
         min_salary=min_salary,
         max_salary=max_salary,
+        allow_duplicates=allow_duplicates,
         seed=seed,
     )
     evaluation = _evaluate_batch_against_field(entries, field, contest)
@@ -1176,6 +1309,7 @@ async def build_contest_entries_simulated(
     included_game_pks: list[int] | None = None,
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
+    allow_duplicates: bool = False,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """
@@ -1199,6 +1333,7 @@ async def build_contest_entries_simulated(
         included_game_pks=included_game_pks,
         min_salary=min_salary,
         max_salary=max_salary,
+        allow_duplicates=allow_duplicates,
         seed=seed,
     )
     evaluation = await evaluate_batch_simulated(
@@ -1359,6 +1494,15 @@ async def evaluate_field_mirrored(
                 "simulated_points_ceiling": round(float(row.max()), 2),
             }
         )
+
+    _split_duplicate_payouts(
+        field_lineups,
+        results,
+        [
+            "cash_probability_pct", "first_place_pct", "top_1pct_pct", "top_10pct_pct",
+            "expected_payout", "payout_p10", "payout_p90", "roi_pct",
+        ],
+    )
 
     return {
         "field_size": field_size,
