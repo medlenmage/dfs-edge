@@ -430,6 +430,7 @@ async def _build_game(
             confirmed=lineups.get("home") or [],
             team_abbrev=home_abbrev, salary_lookup=salary_lookup,
             projection_lookup=projection_lookup,
+            own_pitcher_id=home_pp.get("id"),
         ),
         _team_hitters(
             away_t.get("id"), season, data, baselines, env,
@@ -439,6 +440,7 @@ async def _build_game(
             confirmed=lineups.get("away") or [],
             team_abbrev=away_t.get("abbreviation") or "", salary_lookup=salary_lookup,
             projection_lookup=projection_lookup,
+            own_pitcher_id=away_pp.get("id"),
         ),
         mlb.get_team_injuries(home_t.get("id"), season),
         mlb.get_team_injuries(away_t.get("id"), season),
@@ -641,6 +643,7 @@ async def _team_hitters(
     team_abbrev: str = "",
     salary_lookup: dict[tuple[str, str], dict[str, Any]] | None = None,
     projection_lookup: dict[tuple[str, str], dict[str, Any]] | None = None,
+    own_pitcher_id: int | None = None,
 ) -> list[dict[str, Any]]:
     if not team_id:
         return []
@@ -667,8 +670,15 @@ async def _team_hitters(
         bio = bios.get(pid)
         if not bio:
             continue
-        if (bio.get("position") or "") in PITCHER_POSITIONS:
-            continue
+        position = bio.get("position") or ""
+        if position in PITCHER_POSITIONS:
+            # A two-way player (Ohtani's official MLB position is "TWP"
+            # year-round) is a real hitter on every day he isn't THIS
+            # team's own starting pitcher -- a blanket position
+            # exclusion would otherwise erase him from the Hitters tab
+            # entirely, including his DH-only days.
+            if position != "TWP" or pid == own_pitcher_id:
+                continue
 
         season_stat = data["hit_season"].get(pid)
         # Skip players with almost no playing time -- they add noise.
