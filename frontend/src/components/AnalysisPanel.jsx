@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 
 /**
@@ -59,8 +59,14 @@ export function AnalysisPanel({ date, enabled }) {
   const [question, setQuestion] = useState('')
   const [answer, setAnswer] = useState(null)
   const [asking, setAsking] = useState(false)
+  // Guards against firing the same date's fetch twice -- React 18's dev
+  // StrictMode intentionally double-invokes effects, and without this a
+  // date with no cached analysis yet would trigger two real (paid)
+  // Claude calls back to back instead of one.
+  const inFlightForDate = useRef(null)
 
   async function run(refresh = false) {
+    inFlightForDate.current = date
     setState({ status: 'loading' })
     try {
       const data = await api.analysis(date, { refresh })
@@ -73,6 +79,25 @@ export function AnalysisPanel({ date, enabled }) {
       setState({ status: 'error', message: err.message })
     }
   }
+
+  // Auto-load whatever's already there instead of making the user
+  // click "Analyse this slate" every single time the tab is revisited
+  // -- the backend caches a day's write-up for a full day (see
+  // analysis.py's _ANALYSIS_TTL), so this is free (no new Claude call,
+  // no extra tokens) whenever a same-day analysis already exists, and
+  // only pays for a real call the first time a given date is opened.
+  useEffect(() => {
+    setAnswer(null)
+    setQuestion('')
+    if (enabled && date) {
+      if (inFlightForDate.current !== date) {
+        run(false)
+      }
+    } else {
+      setState({ status: 'idle' })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date, enabled])
 
   async function ask(e) {
     e.preventDefault()

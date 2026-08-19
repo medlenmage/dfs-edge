@@ -3007,6 +3007,32 @@ async def main() -> int:
           len(json.dumps(compact, default=str)) < len(json.dumps(slate, default=str)),
           f"{len(json.dumps(compact, default=str)):,} vs {len(json.dumps(slate, default=str)):,} bytes")
 
+    # Regression for a real, observed AI-analysis failure mode: the
+    # model read a team's own pitcher and own hitters -- nested
+    # together in one JSON object purely because they share a team --
+    # as if the pitcher faced those hitters, when he's actually their
+    # teammate and faces the OTHER side's hitters instead. Each side's
+    # explicit opposing_pitcher_these_hitters_actually_face field must
+    # name the OTHER side's starter, never its own.
+    compact_game = compact["games"][0]
+    home_own_pitcher = compact_game["home"][
+        "this_teams_own_starting_pitcher_NOT_an_opponent_of_the_hitters_below"
+    ]
+    away_own_pitcher = compact_game["away"][
+        "this_teams_own_starting_pitcher_NOT_an_opponent_of_the_hitters_below"
+    ]
+    check("a home team's hitters are shown facing the AWAY pitcher, not their own team's pitcher",
+          compact_game["home"]["opposing_pitcher_these_hitters_actually_face"]
+          == (away_own_pitcher or {}).get("name"),
+          str((compact_game["home"]["opposing_pitcher_these_hitters_actually_face"], away_own_pitcher)))
+    check("an away team's hitters are shown facing the HOME pitcher, not their own team's pitcher",
+          compact_game["away"]["opposing_pitcher_these_hitters_actually_face"]
+          == (home_own_pitcher or {}).get("name"),
+          str((compact_game["away"]["opposing_pitcher_these_hitters_actually_face"], home_own_pitcher)))
+    check("the home and away starting pitchers are two different real players in this fixture",
+          (home_own_pitcher or {}).get("name") != (away_own_pitcher or {}).get("name"),
+          str(((home_own_pitcher or {}).get("name"), (away_own_pitcher or {}).get("name"))))
+
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
     if FAILED:
