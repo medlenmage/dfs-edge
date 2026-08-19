@@ -1,6 +1,6 @@
 """
-In-house DK FPTS projection v1 (Phase 2 of the projections/history plan
--- see .claude/plans/clever-strolling-hearth.md for the full roadmap).
+In-house DK FPTS projection (Phase 2 of the projections/history plan --
+see .claude/plans/clever-strolling-hearth.md for the full roadmap).
 
 Every "Proj FPTS" in this app has come from an uploaded RotoWire CSV
 until now -- there was no in-house model. This builds one from data
@@ -29,11 +29,35 @@ that returns a bootstrap resampling POOL for Monte Carlo simulation,
 not a single point estimate a projection needs. This computes its own
 blended rate from the same underlying game log instead.
 
-Batting-order-driven PA volume (only known once lineups are confirmed,
-typically 2-4h before lock) isn't modeled separately here -- before
-that, a player's own season-average PA/game already has playing time
-baked in, which is a real, stated precision limitation, not an
-oversight.
+TWO VOLUME/MARKET CORRECTIONS (v2)
+-----------------------------------
+The multiply-by-composite model above assumes a player gets his own
+typical share of playing time today. Two real, independently-available
+signals say otherwise often enough to be worth a targeted correction,
+applied on top of the v1 baseline rather than replacing it:
+
+  1. Hitters: `edge.composite` has no PA-volume signal in it at all --
+     it's entirely about the QUALITY of each plate appearance (platoon,
+     park, weather, ...), not how MANY he gets. Batting order is a real,
+     already-fetched signal for this (mlb_slate.py's `_team_hitters()`
+     already attaches `batting_order` once lineups confirm) -- a
+     leadoff hitter gets meaningfully more PA per game than a 9-hole
+     hitter. `_BATTING_ORDER_PA_FACTOR` scales the baseline rate by
+     that gap. Before lineups confirm (`batting_order` is None), this
+     is a no-op (factor 1.0) -- same real, stated limitation as before.
+
+  2. Pitchers: DK's +4 win bonus is a discrete team-dependent event, not
+     a per-inning rate -- `baseline_dk_points()` bakes in this pitcher's
+     own HISTORICAL win rate (however many of his starts this season
+     turned into wins), which says nothing about whether HIS TEAM is
+     favoured tonight. The betting market's moneyline (already fetched
+     alongside the game total/spread) is a genuine, independent signal
+     for that. `win_ev_delta()` is a small correction -- today's
+     market-implied win probability minus his own season win rate,
+     times DK's +4 -- added on top, not a full separate win-bonus term
+     (that would double-count the win rate the baseline already has
+     baked in). Zero when no moneyline is loaded, same "unaffected
+     unless the signal exists" convention as the batting-order factor.
 """
 
 from __future__ import annotations
@@ -90,28 +114,102 @@ async def baseline_dk_points(player_id: int, position: str, season: int) -> floa
     return round(prior + (blended - prior) * trust, 2)
 
 
-def project_fpts(baseline: float, composite: float) -> float:
-    """inhouse_fpts = baseline rate x today's matchup-quality multiplier."""
-    return round(baseline * composite, 2)
+def project_fpts(
+    baseline: float,
+    composite: float,
+    *,
+    pa_factor: float = 1.0,
+    win_ev_delta: float = 0.0,
+) -> float:
+    """
+    inhouse_fpts = baseline rate x today's matchup-quality multiplier,
+    x a PA-volume correction (hitters, defaults to a no-op), + a
+    win-odds correction (pitchers, defaults to a no-op).
+    """
+    return round(baseline * composite * pa_factor + win_ev_delta, 2)
+
+
+# Plate appearances by batting-order slot, relative to a hitter's own
+# typical PA/game -- a widely-cited real gap (leadoff hitters bat
+# roughly one extra time per week versus a 9-hole hitter over a full
+# season) applied as a multiplier on top of THIS player's own baseline
+# rate, not a league-flat number, so it respects a platoon/part-time
+# player's own normal workload. Approximate by design -- no historical
+# PA-by-slot dataset exists in this app to fit against yet.
+_BATTING_ORDER_PA_FACTOR = {
+    1: 1.09, 2: 1.06, 3: 1.04, 4: 1.02, 5: 1.00,
+    6: 0.98, 7: 0.96, 8: 0.94, 9: 0.91,
+}
+
+
+async def pitcher_win_rate(player_id: int, season: int) -> float | None:
+    """
+    Wins per start this season -- what a pitcher's own win-odds
+    correction (win_ev_delta) measures TODAY's market-implied win
+    probability against. None with no starts logged yet (nothing to
+    compare a market number to).
+    """
+    game_log = await mlb.get_player_game_log(player_id, season, group="pitching")
+    starts = [g for g in game_log if g.get("outs", 0) > 0]
+    if not starts:
+        return None
+    return sum(g.get("wins", 0) or 0 for g in starts) / len(starts)
+
+
+def win_ev_delta(win_probability_pct: float | None, own_win_rate: float | None) -> float:
+    """
+    DK points to add/subtract for today's market-implied win odds vs.
+    this pitcher's own historical win rate per start -- a CORRECTION on
+    top of baseline_dk_points (which already has his historical win
+    rate baked in), not a standalone win-bonus term, so a favourite
+    pitching poorly all season nets a real boost and a good pitcher on
+    a bad team nets a real penalty. Zero (no correction) when either
+    side of the comparison is missing -- no moneyline loaded, or no
+    starts logged yet this season.
+    """
+    if win_probability_pct is None or own_win_rate is None:
+        return 0.0
+    today_prob = win_probability_pct / 100
+    return round((today_prob - own_win_rate) * 4, 2)
 
 
 async def inhouse_fpts_batch(players: list[dict[str, Any]], season: int) -> dict[int, float]:
     """
     inhouse_fpts for every unique player id in `players` (each needs at
     least id/position/edge.composite -- hitters and pitchers straight
-    out of mlb_slate.py's build). Fetches every player's baseline
-    concurrently, same asyncio.gather concurrency pattern as
-    variance.py's player_pools_for_entries().
+    out of mlb_slate.py's build; a hitter's optional `batting_order` and
+    a pitcher's optional `win_probability_pct` feed the v2 corrections
+    above when present). Fetches every player's baseline concurrently,
+    same asyncio.gather concurrency pattern as variance.py's
+    player_pools_for_entries(); pitcher win rates (needed only for
+    pitchers that actually have a moneyline loaded) are fetched the
+    same way as a second, smaller batch.
     """
     unique = {p["id"]: p for p in players if p.get("id")}
     ids = list(unique.values())
     baselines = await asyncio.gather(
         *(baseline_dk_points(p["id"], p["position"], season) for p in ids)
     )
-    return {
-        p["id"]: project_fpts(baseline, p["edge"]["composite"])
-        for p, baseline in zip(ids, baselines)
-    }
+
+    win_rate_ids = [
+        p["id"] for p in ids
+        if p["position"] == "P" and p.get("win_probability_pct") is not None
+    ]
+    win_rates = dict(zip(
+        win_rate_ids,
+        await asyncio.gather(*(pitcher_win_rate(pid, season) for pid in win_rate_ids)),
+    ))
+
+    result: dict[int, float] = {}
+    for p, baseline in zip(ids, baselines):
+        composite = p["edge"]["composite"]
+        if p["position"] == "P":
+            delta = win_ev_delta(p.get("win_probability_pct"), win_rates.get(p["id"]))
+            result[p["id"]] = project_fpts(baseline, composite, win_ev_delta=delta)
+        else:
+            pa_factor = _BATTING_ORDER_PA_FACTOR.get(p.get("batting_order"), 1.0)
+            result[p["id"]] = project_fpts(baseline, composite, pa_factor=pa_factor)
+    return result
 
 
 # --------------------------------------------------------------------------
