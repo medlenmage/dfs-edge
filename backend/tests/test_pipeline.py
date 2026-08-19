@@ -425,6 +425,27 @@ async def main() -> int:
     check("a RotoWire row with an empty SAL column is skipped, not treated as $0",
           salaries.from_rotowire_rows(rw_no_sal) == [])
 
+    print("\nMatching a RotoWire upload against an already-loaded DK slate")
+    dk_rows = [
+        salary_row("Shohei Ohtani", "LAD", 7000, 0),
+        salary_row("Bobby Witt Jr.", "KC", 6000, 0),   # RotoWire drops the "Jr." below
+        salary_row("Nicholas Castellanos", "CIN", 5000, 0),  # RotoWire uses "Nick" below
+    ]
+    dk_lookup = salaries.build_lookup(dk_rows)
+    rw_upload = projections.parse_rotowire_csv(
+        "PLAYER,RW Pick,TEAM,SAL,POS,VAL,RST%,OPP,LINEUP,FPTS,MIN EXP,MAX EXP\n"
+        "Shohei Ohtani,-,LAD,7000,1B/OF,1.89,14.43,COL,1,13.21,0,100\n"
+        "Bobby Witt,-,KC,6000,SS,1.84,16.14,ATH,2,11.05,0,100\n"
+        "Nick Castellanos,-,CIN,5000,OF,1.20,10.00,PIT,1,9.50,0,100\n"
+        "Totally Unrostered Guy,-,LAD,3000,OF,1.00,5.00,COL,1,6.00,0,100\n"
+    )
+    bad = player_match.unmatched(rw_upload, dk_lookup, fuzzy=True)
+    check("suffix drop (Jr.) and nickname (Nick/Nicholas) both match the DK slate via player_match",
+          bad == ["Totally Unrostered Guy"], str(bad))
+    check("the same report, expressed as an upload response would show it",
+          {"matched_to_slate": len(rw_upload) - len(bad), "unmatched": bad}
+          == {"matched_to_slate": 3, "unmatched": ["Totally Unrostered Guy"]})
+
     print("\nInjuries")
     check("Red Sox injury report includes the hurt reliever",
           any(p["name"] == "Hurt Reliever" for p in game["home"]["injuries"]))
@@ -440,6 +461,42 @@ async def main() -> int:
           player_match.match(ari_rows, "Geraldo Perdomo", "AZ") is not None)
     check("querying with the uploader's own ARI still matches too",
           player_match.match(ari_rows, "Geraldo Perdomo", "ARI") is not None)
+
+    print("\nName matching across sources that spell a player differently")
+    check("nickname vs. legal first name normalise the same way",
+          player_match.normalize_name("Nick Castellanos") == player_match.normalize_name("Nicholas Castellanos"))
+    check("nickname folding doesn't touch an unrelated last name",
+          player_match.normalize_name("Mike Trout") != player_match.normalize_name("Mike Moustakas"))
+
+    cin_rows = player_match.build_lookup(
+        [{"name": "Nicholas Castellanos", "normalized_name": player_match.normalize_name("Nicholas Castellanos"),
+          "team": "CIN", "value": "example"}]
+    )
+    check("a row filed under the legal first name matches a nickname query, no fuzzy needed",
+          player_match.match(cin_rows, "Nick Castellanos", "CIN") is not None)
+
+    cle_rows = player_match.build_lookup(
+        [{"name": "Jose Ramirez", "normalized_name": player_match.normalize_name("Jose Ramirez"),
+          "team": "CLE", "value": "example"}]
+    )
+    check("a real typo doesn't match without fuzzy=True",
+          player_match.match(cle_rows, "Jose Ramires", "CLE") is None)
+    check("the same typo matches with fuzzy=True (same-team, close edit distance)",
+          player_match.match(cle_rows, "Jose Ramires", "CLE", fuzzy=True) is not None)
+    check("fuzzy=True still returns None when nothing on the team is close",
+          player_match.match(cle_rows, "Someone Completely Different", "CLE", fuzzy=True) is None)
+    check("fuzzy=True never matches across teams -- a same-named typo on another team stays unmatched",
+          player_match.match(cle_rows, "Jose Ramires", "NYY", fuzzy=True) is None)
+
+    unmatched_rows = [
+        {"name": "Jose Ramirez", "team": "CLE"},   # exact
+        {"name": "Jose Ramires", "team": "CLE"},   # typo, needs fuzzy
+        {"name": "Nobody Here", "team": "CLE"},    # genuine non-match
+    ]
+    check("unmatched() reports only genuine non-matches once fuzzy is on",
+          player_match.unmatched(unmatched_rows, cle_rows, fuzzy=True) == ["Nobody Here"])
+    check("unmatched() without fuzzy also flags the typo (strict mode)",
+          player_match.unmatched(unmatched_rows, cle_rows) == ["Jose Ramires", "Nobody Here"])
 
     print("\nDK slate detection (Game Info column -> which games are in this slate)")
     check("parse_game_info extracts the away@home pair, ignoring date/time",
@@ -488,7 +545,8 @@ async def main() -> int:
           len(wide_rows) == 2, str(wide_rows))
     check("wide-export rows are parsed correctly despite the leading empty columns",
           wide_rows[0] == {
-              "name": "Chris Sale", "normalized_name": "chris sale", "team": "ATL",
+              # "chris" folds to "christopher" -- see player_match.NICKNAMES
+              "name": "Chris Sale", "normalized_name": "christopher sale", "team": "ATL",
               "position": "SP", "salary": 10300, "avg_points": 23.26,
               "game_info": "ATL@MIN 08/17/2026 07:40PM ET", "dk_id": "43854626",
           }, str(wide_rows[0]))
