@@ -2381,8 +2381,12 @@ async def main() -> int:
     import random as random_module
 
     check("sample_correlated_outcome leans toward the top of a pool when the multiplier is high",
-          variance.sample_correlated_outcome([1.0, 5.0, 10.0, 15.0, 20.0], 2.0, random_module.Random(1))
-          >= variance.sample_correlated_outcome([1.0, 5.0, 10.0, 15.0, 20.0], 0.3, random_module.Random(1)))
+          variance.sample_correlated_outcome(
+              [1.0, 5.0, 10.0, 15.0, 20.0], random_module.Random(1), team_multiplier=2.0
+          )
+          >= variance.sample_correlated_outcome(
+              [1.0, 5.0, 10.0, 15.0, 20.0], random_module.Random(1), team_multiplier=0.3
+          ))
     check("team_environment_multiplier stays within its clamped bounds",
           all(
               variance.TEAM_MULTIPLIER_MIN
@@ -2418,12 +2422,15 @@ async def main() -> int:
     for _ in range(NUM_CORRELATION_TRIALS):
         team_a_multiplier = variance.team_environment_multiplier(corr_rng)
         stacked_totals.append(
-            sum(variance.sample_correlated_outcome(pool, team_a_multiplier, corr_rng) for pool in stack_pools)
+            sum(
+                variance.sample_correlated_outcome(pool, corr_rng, team_multiplier=team_a_multiplier)
+                for pool in stack_pools
+            )
         )
         unstacked_totals.append(
             sum(
                 variance.sample_correlated_outcome(
-                    pool, variance.team_environment_multiplier(corr_rng), corr_rng
+                    pool, corr_rng, team_multiplier=variance.team_environment_multiplier(corr_rng)
                 )
                 for pool in unstacked_pools
             )
@@ -2502,6 +2509,67 @@ async def main() -> int:
     except ValueError as exc:
         check("simulate_batch raises a clear error when a player's outcome pool is missing",
               "outcome pool" in str(exc), str(exc))
+
+    print("\nMatchup conditioning + pitcher/opponent anti-correlation (variance.py)")
+
+    import numpy as np_module
+
+    def _sim_player_full(pid, team, *, opponent=None, edge=None):
+        return {
+            "id": pid, "name": f"P{pid}", "team": team, "opponent": opponent,
+            "salary": 5000, "projected_fpts": 10.0, "ownership_pct": 0,
+            "edge_composite": edge,
+        }
+
+    def _sim_entry(players):
+        return {"salary_used": 50000, "projected_points": 100.0, "total_ownership_pct": 0.0, "players": players}
+
+    # Same wide pool as the team-correlation section above (mean 10,
+    # values only 0 or 20) -- a real edge shift should be easy to spot
+    # against it. No team on either side, so this isolates the
+    # own-edge signal from the team-multiplier one entirely.
+    edge_hi_ids = list(range(96001, 96011))
+    edge_lo_ids = list(range(96011, 96021))
+    for pid in edge_hi_ids + edge_lo_ids:
+        sim_pools[pid] = [0.0, 20.0] * 100
+
+    edge_hi_entry = _sim_entry([_sim_player_full(pid, None, edge=1.3) for pid in edge_hi_ids])
+    edge_lo_entry = _sim_entry([_sim_player_full(pid, None, edge=0.7) for pid in edge_lo_ids])
+    edge_sim = variance.simulate_batch([edge_hi_entry, edge_lo_entry], sim_pools, num_trials=3000, seed=321)
+    edge_hi_mean, edge_lo_mean = float(edge_sim[0].mean()), float(edge_sim[1].mean())
+    check("a player's own edge_composite shifts their simulated mean, even with an identical outcome pool and no team",
+          edge_hi_mean > edge_lo_mean, str((round(edge_hi_mean, 2), round(edge_lo_mean, 2))))
+
+    # A pitcher (plus 9 always-zero fillers, so the lineup total is
+    # effectively just his own simulated value) alongside a full
+    # 10-hitter stack of his real opponent, "OPP", in the SAME
+    # simulate_batch() call -- both share the same underlying RNG draws
+    # for OPP's team multiplier, so the stack's own simulated total is
+    # a clean, already-validated proxy for "how good was OPP's day"
+    # (see the team-correlation section above). Correlating the two
+    # lineups' totals across trials tests the real end-to-end pitcher-
+    # vs-opponent effect through the public API, not an internal.
+    opp_hitter_ids = list(range(97001, 97011))
+    for pid in opp_hitter_ids:
+        sim_pools[pid] = [0.0, 20.0] * 100
+    anti_corr_pitcher_id = 97100
+    anti_corr_filler_ids = list(range(97101, 97110))
+    sim_pools[anti_corr_pitcher_id] = [0.0, 20.0] * 100
+    for pid in anti_corr_filler_ids:
+        sim_pools[pid] = [0.0]
+
+    anti_corr_pitcher_entry = _sim_entry([
+        _sim_player_full(anti_corr_pitcher_id, None, opponent="OPP"),
+        *[_sim_player_full(pid, None) for pid in anti_corr_filler_ids],
+    ])
+    opp_stack_entry = _sim_entry([_sim_player_full(pid, "OPP") for pid in opp_hitter_ids])
+    anti_corr_sim = variance.simulate_batch(
+        [anti_corr_pitcher_entry, opp_stack_entry], sim_pools, num_trials=3000, seed=4242
+    )
+    pitcher_totals, opp_totals = anti_corr_sim[0], anti_corr_sim[1]
+    pitcher_opp_corr = float(np_module.corrcoef(pitcher_totals, opp_totals)[0, 1])
+    check("a pitcher's simulated outcome trends negatively with the opposing team having a big day",
+          pitcher_opp_corr < -0.1, str(round(pitcher_opp_corr, 3)))
 
     print("\nContest generator: simulated economics (contest.py evaluate_batch_simulated)")
 

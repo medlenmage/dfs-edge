@@ -403,6 +403,12 @@ def build_player_pool(
     pool from -- `"rotowire"` (the default, `projection.fpts`) or
     `"inhouse"` (`projection.inhouse_fpts`, only present when the slate
     was built with `include_inhouse=True`).
+
+    Each pool entry also carries `edge_composite` -- scoring.py's own
+    matchup-quality multiplier, used only by variance.py's simulator to
+    condition each player's Monte Carlo outcome on today's actual
+    matchup rather than sampling blind to it. Not used by either
+    lineup-building engine's own optimization objective.
     """
     if projection_source not in PROJECTION_SOURCES:
         raise OptimizerError(
@@ -450,6 +456,16 @@ def build_player_pool(
                         "projected_fpts": proj_info[fpts_key],
                         "ownership_pct": proj_info.get(ownership_key) or 0,
                         "slots": slots,
+                        # scoring.py's matchup-quality multiplier (1.0 =
+                        # dead average), reused by variance.py's Monte
+                        # Carlo engine to condition each player's
+                        # simulated outcome on today's actual matchup --
+                        # platoon, park, weather, opposing pitcher/bullpen
+                        # quality -- rather than sampling blind to it.
+                        # None (not 1.0) when no edge was computed, so
+                        # the simulator can tell "no signal" apart from
+                        # "confirmed neutral."
+                        "edge_composite": (p.get("edge") or {}).get("composite"),
                     }
                 )
     return pool
@@ -584,6 +600,7 @@ def _solve_one(
                         "salary": p["salary"],
                         "projected_fpts": p["projected_fpts"],
                         "ownership_pct": p["ownership_pct"],
+                        "edge_composite": p["edge_composite"],
                     }
                 )
                 salary_used += p["salary"]

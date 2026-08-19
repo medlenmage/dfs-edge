@@ -531,6 +531,7 @@ def _sample_one_lineup(
                 "salary": p["salary"],
                 "projected_fpts": p["projected_fpts"],
                 "ownership_pct": p["ownership_pct"],
+                "edge_composite": p.get("edge_composite"),
             }
             for p in picks
         ],
