@@ -11,6 +11,7 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, Response, Uploa
 import asyncio
 
 from app import cache, history_db
+from app.clients import draftkings
 from app.services import analysis, contest, dk_entries, lineup_export, mlb_slate, optimizer, projections, salaries
 
 # How long a generated contest-entries batch stays downloadable as CSV
@@ -236,6 +237,54 @@ async def get_salaries(date: str | None = Query(None)) -> dict[str, Any]:
     day = date or date_cls.today().isoformat()
     rows = salaries.load(day)
     return {"date": day, "loaded": bool(rows), "players": rows}
+
+
+@router.get("/dk-slates")
+async def get_dk_slates(
+    date: str | None = Query(None, description="Slate date, defaults to today"),
+    refresh: bool = Query(False, description="Bypass the 15-minute cache and re-pull from DraftKings"),
+) -> dict[str, Any]:
+    """
+    Every real Classic MLB slate DraftKings has live for a date (Early,
+    Main, Night, single-game pools, ...), pulled from DraftKings' own
+    public lobby feed -- no manual salary CSV needed. Pick one and pass
+    its draft_group_id to POST /dk-slates/load to pull that specific
+    slate's players and salaries.
+    """
+    day = date or date_cls.today().isoformat()
+    try:
+        slates = await draftkings.get_slates(day, force=refresh)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Couldn't reach DraftKings: {exc}") from exc
+    return {"date": day, "slates": slates}
+
+
+@router.post("/dk-slates/load")
+async def load_dk_slate(
+    date: str | None = Body(None, embed=True),
+    draft_group_id: int = Body(..., embed=True, description="From GET /dk-slates' draft_group_id"),
+    refresh: bool = Body(
+        False, embed=True, description="Bypass the 10-minute cache and re-pull live -- use for late scratches/swaps close to lock"
+    ),
+) -> dict[str, Any]:
+    """
+    Pull players + salaries for one specific DraftKings slate directly
+    from their live API and store it the same way a manual salary CSV
+    upload would -- everything downstream (in_slate detection, the
+    optimizer, the contest generator) works unchanged either way.
+    """
+    day = date or date_cls.today().isoformat()
+    try:
+        rows = await draftkings.get_draftables(draft_group_id, force=refresh)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Couldn't reach DraftKings: {exc}") from exc
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No players found for that slate -- it may not be live yet, or the draft_group_id is stale (re-fetch GET /dk-slates).",
+        )
+    salaries.store(day, rows)
+    return {"date": day, "draft_group_id": draft_group_id, "players_loaded": len(rows)}
 
 
 @router.post("/projections")

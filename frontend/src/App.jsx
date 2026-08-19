@@ -10,6 +10,7 @@ import { LineupsPanel } from './components/LineupsPanel'
 import { ContestGeneratorPanel } from './components/ContestGeneratorPanel'
 import { NflPanel } from './components/NflPanel'
 import { ScoreLegend } from './components/ScoreMeter'
+import { DkSlatePicker } from './components/DkSlatePicker'
 
 const TABS = [
   { id: 'stacks', label: 'Stacks' },
@@ -146,6 +147,7 @@ export default function App() {
               <button onClick={() => load(true)} disabled={loading}>
                 {loading ? 'Loading…' : 'Refresh'}
               </button>
+              <DkSlatePicker date={date} onLoaded={() => load(true)} />
               <input
                 ref={salaryInputRef}
                 type="file"

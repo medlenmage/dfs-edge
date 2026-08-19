@@ -64,6 +64,15 @@ export const api = {
 
   uploadProjections: (date, file) => uploadFile(`/api/mlb/projections?date=${date}`, file),
 
+  dkSlates: (date, { refresh = false } = {}) =>
+    request(`/api/mlb/dk-slates?date=${date}${refresh ? '&refresh=true' : ''}`),
+
+  loadDkSlate: (date, draftGroupId, { refresh = false } = {}) =>
+    request('/api/mlb/dk-slates/load', {
+      method: 'POST',
+      body: JSON.stringify({ date, draft_group_id: draftGroupId, refresh }),
+    }),
+
   analysis: (date, { refresh = false } = {}) =>
     request(`/api/mlb/analysis?date=${date}${refresh ? '&refresh=true' : ''}`),
 
