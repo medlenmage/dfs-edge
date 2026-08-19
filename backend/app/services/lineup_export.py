@@ -126,7 +126,10 @@ def lineups_to_csv(
     first) should sort before calling this.
     """
     buf = io.StringIO()
-    fieldnames = ["lineup_index", "salary_used", "stack_type", "stack", "projected_points", "total_ownership_pct"]
+    fieldnames = [
+        "lineup_index", "salary_used", "stack_type", "stack", "projected_points",
+        "total_ownership_pct", "duplicate_count",
+    ]
     fieldnames += [f"{label}_name" for label in SLOT_LABELS]
     simulated = bool(results) and "cash_probability_pct" in results[0]
     if results is not None:
@@ -151,6 +154,7 @@ def lineups_to_csv(
             "stack": stack,
             "projected_points": lineup.get("projected_points"),
             "total_ownership_pct": lineup.get("total_ownership_pct"),
+            "duplicate_count": lineup.get("duplicate_count", 1),
         }
         for label, p in zip(SLOT_LABELS, players):
             row[f"{label}_name"] = p.get("name")

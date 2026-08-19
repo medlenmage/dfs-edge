@@ -32,6 +32,14 @@ export function LineupsTable({ lineup }) {
         {lineup.total_ownership_pct != null && (
           <span className="badge">{lineup.total_ownership_pct.toFixed(1)}% cumulative ownership</span>
         )}
+        {lineup.duplicate_count > 1 && (
+          <span
+            className="badge"
+            title="This exact lineup (same 10 players) appears more than once in the generated set -- a real DK contest would tie and split whatever payout the ranks it occupies are worth."
+          >
+            ×{lineup.duplicate_count} duplicate
+          </span>
+        )}
       </div>
       <table>
         <thead>

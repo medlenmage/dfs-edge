@@ -32,6 +32,7 @@ joint MILP.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Callable
 
 import pulp
@@ -198,6 +199,128 @@ def _one_off_constraints(
             prob += picked == 0
 
 
+# A player qualifies as a "payup or high-FPTS" pick for one-off slots
+# if their salary or projected FPTS is within this fraction of the
+# best available at their own slot type in today's pool.
+ONE_OFF_QUALITY_RATIO = 0.8
+# How many of a partial stack's leftover one-off slots must go to a
+# qualifying player -- a floor, not a fraction, so a shape with a lot
+# of leftover slots (e.g. a lone "5" stack, 3 free) still only needs 2
+# of them to be strong, not all of them.
+ONE_OFF_QUALITY_MIN = 2
+
+
+def _one_off_quality_ids(pool: list[dict[str, Any]]) -> set[int]:
+    """
+    Which hitters count as "payup or high-FPTS" for one-off-slot
+    purposes: salary or projected FPTS within ONE_OFF_QUALITY_RATIO of
+    the best available at their own slot type (a catcher is judged
+    against the best available catcher, not the best available
+    outfielder) among today's whole pool -- not scoped to any
+    particular lineup's actual candidates, so it's stable across every
+    solve in a multi-lineup batch.
+    """
+    best_salary: dict[str, float] = {}
+    best_fpts: dict[str, float] = {}
+    for p in pool:
+        if "P" in p["slots"]:
+            continue
+        for slot in p["slots"]:
+            best_salary[slot] = max(best_salary.get(slot, 0), p["salary"])
+            best_fpts[slot] = max(best_fpts.get(slot, 0), p["projected_fpts"])
+
+    qualifying: set[int] = set()
+    for p in pool:
+        if "P" in p["slots"]:
+            continue
+        if any(
+            p["salary"] >= ONE_OFF_QUALITY_RATIO * best_salary[slot]
+            or p["projected_fpts"] >= ONE_OFF_QUALITY_RATIO * best_fpts[slot]
+            for slot in p["slots"]
+        ):
+            qualifying.add(p["id"])
+    return qualifying
+
+
+def _one_off_quality_constraint(
+    prob: pulp.LpProblem,
+    x: dict[tuple[int, str], pulp.LpVariable],
+    usable: list[dict[str, Any]],
+    stack_groups: list[int],
+    stack_teams: list[str | None],
+    stack_auto_y: dict[tuple[int, str], pulp.LpVariable],
+    banned_stack_teams: set[str],
+    qualifying_ids: set[int],
+) -> None:
+    """
+    Default preference for a partial stack's leftover one-off slots:
+    at least ONE_OFF_QUALITY_MIN of them must go to a qualifying
+    ("payup or high-FPTS") player. Only called when the caller hasn't
+    already given an explicit one-off restriction (one_off_group_ids /
+    one_off_min_salary / one_off_max_salary) -- that's a stronger,
+    deliberate override and takes priority over this default.
+
+    Mirrors _one_off_constraints' own team-exemption logic (a hitter on
+    a stack-assigned team is never a "one-off" pick regardless of
+    whether they personally qualify) -- a genuine one-off pick from an
+    auto-assigned team needs its own binary indicator per player (the
+    standard AND linearization: is_one_off <= picked, is_one_off <=
+    1 - team_stacked, is_one_off >= picked - team_stacked) since
+    whether that team ends up stack-assigned isn't known until the
+    solve.
+
+    A flat "qualifying one-offs >= required" floor would make an
+    ordinary 2-team manual stack with plenty of depth on both teams
+    (e.g. a 5-3 between two juicy offenses) INFEASIBLE whenever it's
+    cheapest to pad both stacks past their minimums rather than reach
+    for a 3rd team -- every leftover slot would then be exempt stack
+    padding, with zero genuine one-off picks to ever satisfy the floor.
+    Relaxed instead: `qualifying_one_offs >= required - (leftover -
+    total_one_offs)`, i.e. the floor drops by exactly one for every
+    leftover slot that turns out to be stack padding rather than a
+    genuine one-off pick -- if every leftover slot ends up as padding,
+    the floor relaxes to 0 (trivially satisfied); if all `leftover`
+    slots are genuine one-offs, it's the full `required`.
+    """
+    leftover = MAX_HITTERS - sum(stack_groups)
+    if leftover <= 0:
+        return
+    required = min(ONE_OFF_QUALITY_MIN, leftover)
+
+    all_teams = sorted({p["team"] for p in usable})
+    manual_teams = {t for t in stack_teams if t is not None}
+    auto_teams = [t for t in all_teams if t not in manual_teams and t not in banned_stack_teams]
+    auto_group_idx = [i for i, t in enumerate(stack_teams) if t is None]
+
+    total_one_off_terms = []
+    qualifying_one_off_terms = []
+    for p in usable:
+        if "P" in p["slots"]:
+            continue
+        t = p["team"]
+        if t in manual_teams:
+            continue  # always a stack pick on this team, never a one-off pick
+        picked = pulp.lpSum(x[(p["id"], slot)] for slot in p["slots"])
+        if t in auto_teams:
+            team_stacked = pulp.lpSum(
+                stack_auto_y[(i, t)] for i in auto_group_idx if (i, t) in stack_auto_y
+            )
+            is_one_off = pulp.LpVariable(f"oneoff_{p['id']}", cat="Binary")
+            prob += is_one_off <= picked
+            prob += is_one_off <= 1 - team_stacked
+            prob += is_one_off >= picked - team_stacked
+        else:
+            is_one_off = picked  # never a candidate for any stack group -- always exempt-free
+        total_one_off_terms.append(is_one_off)
+        if p["id"] in qualifying_ids:
+            qualifying_one_off_terms.append(is_one_off)
+
+    prob += (
+        pulp.lpSum(qualifying_one_off_terms) - pulp.lpSum(total_one_off_terms)
+        >= required - leftover
+    )
+
+
 def _team_count_constraints(
     prob: pulp.LpProblem,
     x: dict[tuple[int, str], pulp.LpVariable],
@@ -347,6 +470,7 @@ def _solve_one(
     min_teams_per_lineup: int | None = None,
     max_teams_per_lineup: int | None = None,
     one_off_eligible: Callable[[dict[str, Any]], bool] | None = None,
+    one_off_quality_ids: set[int] | None = None,
     min_ownership_pct: float | None = None,
     max_ownership_pct: float | None = None,
 ) -> dict[str, Any] | None:
@@ -419,6 +543,11 @@ def _solve_one(
             _one_off_constraints(
                 prob, x, usable, stack_groups, stack_teams, stack_auto_y,
                 banned_stack_teams, one_off_eligible,
+            )
+        elif one_off_quality_ids is not None:
+            _one_off_quality_constraint(
+                prob, x, usable, stack_groups, stack_teams, stack_auto_y,
+                banned_stack_teams, one_off_quality_ids,
             )
 
     if min_teams_per_lineup is not None or max_teams_per_lineup is not None:
@@ -558,7 +687,11 @@ def generate_lineups(
     `min_unique_players`, if given (default 1), is how many of a
     lineup's 10 players must differ from every earlier lineup in the
     set -- 1 is today's default behavior (just not an exact repeat); a
-    higher value forces more genuinely different builds.
+    higher value forces more genuinely different builds. 0 allows exact
+    duplicates -- a real, sometimes-deliberate GPP move (e.g. entering
+    a signature build multiple times) -- with each returned lineup
+    carrying a `duplicate_count` reporting how many identical copies
+    ended up in the set.
 
     `min_teams_per_lineup` / `max_teams_per_lineup`, if given, bound how
     many distinct teams appear among a single lineup's 10 players.
@@ -575,6 +708,14 @@ def generate_lineups(
     answer the same question. Requires a partial `stack_groups` shape
     (one summing to fewer than the 8 hitter slots); a full shape has no
     leftover slots for this to apply to.
+
+    When none of those three are given but the shape is still partial,
+    a default preference kicks in instead: at least `min(2, leftover)`
+    one-off slots must go to a "payup or high-FPTS" player (salary or
+    projected FPTS within 80% of the best available at that slot type
+    in today's pool) -- a cheap punt play filling every leftover slot
+    is rarely the right GPP construction. An explicit restriction above
+    always overrides this default rather than stacking with it.
 
     `min_ownership_pct` / `max_ownership_pct`, if given, bound each
     lineup's cumulative ownership -- the sum of the 10 rostered
@@ -686,8 +827,8 @@ def generate_lineups(
     if min_salary is not None and max_salary is not None and min_salary > max_salary:
         raise OptimizerError("min_salary can't be more than max_salary.")
 
-    if not (1 <= min_unique_players <= ROSTER_SIZE):
-        raise OptimizerError(f"min_unique_players must be between 1 and {ROSTER_SIZE}.")
+    if not (0 <= min_unique_players <= ROSTER_SIZE):
+        raise OptimizerError(f"min_unique_players must be between 0 and {ROSTER_SIZE}.")
 
     for label, value in (
         ("min_teams_per_lineup", min_teams_per_lineup),
@@ -741,6 +882,14 @@ def generate_lineups(
             hi = one_off_max_salary if one_off_max_salary is not None else SALARY_CAP
             one_off_eligible = lambda p: lo <= p["salary"] <= hi  # noqa: E731
 
+    # Default preference (not an opt-in): a partial stack's leftover
+    # one-off slots lean toward "payup or high-FPTS" players unless the
+    # caller already gave an explicit one-off restriction above (a
+    # stronger, deliberate override that always wins).
+    one_off_quality_ids: set[int] | None = None
+    if stack_groups and sum(stack_groups) < MAX_HITTERS and not one_off_active:
+        one_off_quality_ids = _one_off_quality_ids(pool)
+
     if (
         min_ownership_pct is not None
         and max_ownership_pct is not None
@@ -773,6 +922,7 @@ def generate_lineups(
             min_teams_per_lineup=min_teams_per_lineup,
             max_teams_per_lineup=max_teams_per_lineup,
             one_off_eligible=one_off_eligible,
+            one_off_quality_ids=one_off_quality_ids,
             min_ownership_pct=min_ownership_pct,
             max_ownership_pct=max_ownership_pct,
         )
@@ -826,5 +976,13 @@ def generate_lineups(
         {"team": t, "count": count, "pct": round(100 * count / len(lineups), 1)}
         for t, count in sorted(team_stack_count.items(), key=lambda kv: -kv[1])
     ]
+
+    # How many identical copies of each exact lineup ended up in the
+    # set -- always 1 under the default min_unique_players>=1 (no exact
+    # repeats allowed), meaningful once min_unique_players=0 lets them
+    # through.
+    signature_counts = Counter(frozenset(ids) for ids in no_good_cuts)
+    for lu, ids in zip(lineups, no_good_cuts):
+        lu["duplicate_count"] = signature_counts[frozenset(ids)]
 
     return {"lineups": lineups, "exposure": exposure, "team_exposure": team_exposure}

@@ -349,7 +349,7 @@ async def generate_lineups(
         None, embed=True, description="Ceiling on total lineup salary, below the fixed $50,000 cap"
     ),
     min_unique_players: int = Body(
-        1, embed=True, description="Minimum number of players that must differ between any two lineups"
+        1, embed=True, description="Minimum number of players that must differ between any two lineups. 0 allows exact duplicates"
     ),
     min_teams_per_lineup: int | None = Body(
         None, embed=True, description="Minimum distinct teams among a single lineup's 10 players"
@@ -504,6 +504,11 @@ async def build_contest_entries(
     max_salary: int = Body(
         optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's salary"
     ),
+    allow_duplicates: bool = Body(
+        False,
+        embed=True,
+        description="Allow exact duplicate entries in the batch (a real GPP move -- entering a signature build multiple times). Each entry reports duplicate_count",
+    ),
 ) -> dict[str, Any]:
     """
     The mass multi-entry contest generator: build up to MAX_USER_LINEUPS
@@ -539,6 +544,7 @@ async def build_contest_entries(
             included_game_pks=included_game_pks,
             min_salary=min_salary,
             max_salary=max_salary,
+            allow_duplicates=allow_duplicates,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -586,6 +592,11 @@ async def build_contest_entries_simulated(
     max_salary: int = Body(
         optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's salary"
     ),
+    allow_duplicates: bool = Body(
+        False,
+        embed=True,
+        description="Allow exact duplicate entries in the batch (a real GPP move -- entering a signature build multiple times). Duplicates' cash probability/payout/ROI are averaged across the tied group, matching DK's real tie-payout split. Each entry reports duplicate_count",
+    ),
 ) -> dict[str, Any]:
     """
     Like POST /contest-entries, but ranks the batch against a genuine
@@ -617,6 +628,7 @@ async def build_contest_entries_simulated(
             included_game_pks=included_game_pks,
             min_salary=min_salary,
             max_salary=max_salary,
+            allow_duplicates=allow_duplicates,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

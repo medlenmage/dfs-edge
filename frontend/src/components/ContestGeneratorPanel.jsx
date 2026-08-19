@@ -23,6 +23,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   // almost always leaving real projected points on the table.
   const [minSalary, setMinSalary] = useState('47000')
   const [maxSalary, setMaxSalary] = useState('')
+  const [allowDuplicates, setAllowDuplicates] = useState(false)
   const [simulate, setSimulate] = useState(false)
   const [showSlateGames, setShowSlateGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
@@ -87,6 +88,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
         minSalary: minSalary.trim() ? Number(minSalary) : 0,
         maxSalary: maxSalary.trim() ? Number(maxSalary) : 50000,
+        allowDuplicates,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
       }
@@ -210,6 +212,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             onChange={(e) => setMaxSalary(e.target.value)}
             style={{ width: 80 }}
           />
+        </label>
+        <label
+          className="dim"
+          style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}
+          title="Allow exact duplicate entries in the batch -- a real GPP move (entering a signature build multiple times). Duplicates report how many identical copies are in the batch, and their cash probability/payout/ROI are averaged across the tied group, matching how DK actually splits a payout between literally identical lineups."
+        >
+          <input
+            type="checkbox"
+            checked={allowDuplicates}
+            onChange={(e) => setAllowDuplicates(e.target.checked)}
+          />
+          Allow duplicates
         </label>
         <label
           className="dim"
@@ -525,6 +539,12 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                 <thead>
                   <tr>
                     <th className="num">#</th>
+                    <th
+                      className="num"
+                      title="How many exact copies of this lineup (same 10 players) are in the batch -- only ever more than 1 when Allow duplicates is on"
+                    >
+                      Dup
+                    </th>
                     <th className="num">Salary</th>
                     <th title="Stack shape, e.g. 5-3 = 5 hitters from one team + 3 from another">Stack</th>
                     <th title="Teams in the stack, largest group first (primary, secondary, tertiary...)">Teams</th>
@@ -571,6 +591,13 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                     return (
                       <tr key={i}>
                         <td className="num">{i + 1}</td>
+                        <td className="num">
+                          {e.duplicate_count > 1 ? (
+                            <span className="badge">×{e.duplicate_count}</span>
+                          ) : (
+                            <span className="dim">—</span>
+                          )}
+                        </td>
                         <td className="num">${e.salary_used.toLocaleString()}</td>
                         <td>{e.stack_type || <span className="dim">—</span>}</td>
                         <td>{e.stack || <span className="dim">—</span>}</td>
