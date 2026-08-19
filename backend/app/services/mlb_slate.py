@@ -232,7 +232,16 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
             all_players.extend(g[side]["hitters"])
             pitcher = g[side]["probable_pitcher"]
             if pitcher and pitcher.get("edge"):
-                all_players.append({**pitcher, "position": "P"})
+                # This pitcher's own team's market-implied win probability
+                # (moneyline, already fetched alongside the game's total/
+                # spread) -- inhouse_fpts_batch() uses it to correct the
+                # baseline's own historical win rate toward what the
+                # market thinks TODAY, rather than assuming his season-
+                # long average win rate applies to every start.
+                win_probability_pct = odds.american_to_probability(g[side].get("moneyline"))
+                all_players.append(
+                    {**pitcher, "position": "P", "win_probability_pct": win_probability_pct}
+                )
 
     inhouse = await inhouse_projections.inhouse_fpts_batch(all_players, season)
     if not inhouse:
@@ -387,6 +396,7 @@ async def _build_game(
             "abbrev": home_abbrev,
             "name": home_t.get("name"),
             "implied_runs": (line or {}).get("home_implied_runs"),
+            "moneyline": (line or {}).get("home_moneyline"),
             "probable_pitcher": home_pitcher,
         },
         "away": {
@@ -394,6 +404,7 @@ async def _build_game(
             "abbrev": away_t.get("abbreviation"),
             "name": away_t.get("name"),
             "implied_runs": (line or {}).get("away_implied_runs"),
+            "moneyline": (line or {}).get("away_moneyline"),
             "probable_pitcher": away_pitcher,
         },
     }

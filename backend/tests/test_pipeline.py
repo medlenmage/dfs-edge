@@ -3094,6 +3094,79 @@ async def main() -> int:
           "not stuck at his own tiny sample's rate",
           thin_baseline < 7.0, str(thin_baseline))
 
+    print("\nIn-house FPTS v2: batting-order PA volume + pitcher win-odds corrections")
+
+    check("project_fpts applies an explicit pa_factor multiplicatively",
+          inhouse_projections.project_fpts(10.0, 1.0, pa_factor=1.1) == 11.0)
+    check("project_fpts adds an explicit win_ev_delta on top, after the pa_factor multiply",
+          inhouse_projections.project_fpts(10.0, 1.0, win_ev_delta=1.5) == 11.5)
+    check("project_fpts with neither kwarg reproduces the plain baseline x composite result",
+          inhouse_projections.project_fpts(10.0, 1.2) == 12.0)
+
+    # A full-trust (60-game, >= the 50-game hitter threshold) flat 7.0
+    # pts/game hitter isolates the batting-order factor from the shared
+    # position-pool shrink -- at full trust the shrink term collapses to
+    # exactly the player's own blended rate regardless of what earlier
+    # tests in this section left in the pool.
+    inhouse_game_logs[80020] = [_single_rbi_run_game() for _ in range(60)]
+    leadoff_batch = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80020, "position": "OF", "edge": {"composite": 1.0}, "batting_order": 1}], INHOUSE_SEASON
+    )
+    ninth_batch = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80020, "position": "OF", "edge": {"composite": 1.0}, "batting_order": 9}], INHOUSE_SEASON
+    )
+    no_order_batch = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80020, "position": "OF", "edge": {"composite": 1.0}}], INHOUSE_SEASON
+    )
+    check("a leadoff (batting_order=1) hitter's inhouse_fpts is scaled up by the PA factor",
+          leadoff_batch[80020] == round(7.0 * 1.09, 2), str(leadoff_batch))
+    check("a 9-hole (batting_order=9) hitter's inhouse_fpts is scaled down by the PA factor",
+          ninth_batch[80020] == round(7.0 * 0.91, 2), str(ninth_batch))
+    check("no confirmed batting order leaves inhouse_fpts unchanged (factor 1.0, matches pre-v2 behavior)",
+          no_order_batch[80020] == 7.0, str(no_order_batch))
+    check("a leadoff hitter genuinely outprojects the same player batting 9th",
+          leadoff_batch[80020] > no_order_batch[80020] > ninth_batch[80020])
+
+    def _pitcher_start(win: int = 0):
+        return {
+            "outs": 18, "strikeouts": 6, "wins": win, "earned_runs": 2,
+            "hits_against": 5, "walks_against": 2, "hit_batsmen": 0,
+            "complete_games": 0, "shutouts": 0,
+        }
+
+    # 10 identical starts (so season avg == recent-15 avg, isolating the
+    # win-odds correction from the recent-form blend) with exactly 3
+    # decisions won -- pitcher_win_rate() should read that back as 0.3.
+    pitcher_starts = [_pitcher_start(win=1) for _ in range(3)] + [_pitcher_start(win=0) for _ in range(7)]
+    inhouse_game_logs[80010] = pitcher_starts
+    own_win_rate = await inhouse_projections.pitcher_win_rate(80010, INHOUSE_SEASON)
+    check("pitcher_win_rate reads back wins/starts from the game log",
+          own_win_rate == 0.3, str(own_win_rate))
+    check("pitcher_win_rate returns None for a pitcher with no starts logged yet",
+          await inhouse_projections.pitcher_win_rate(80011, INHOUSE_SEASON) is None, "")
+
+    check("win_ev_delta is a positive correction when today's market win odds beat his own season rate",
+          inhouse_projections.win_ev_delta(60.0, 0.3) == round((0.6 - 0.3) * 4, 2))
+    check("win_ev_delta is a negative correction when today's market win odds trail his own season rate",
+          inhouse_projections.win_ev_delta(10.0, 0.3) == round((0.1 - 0.3) * 4, 2))
+    check("win_ev_delta is zero with no moneyline loaded",
+          inhouse_projections.win_ev_delta(None, 0.3) == 0.0)
+    check("win_ev_delta is zero with no starts logged yet (nothing to compare the market number against)",
+          inhouse_projections.win_ev_delta(60.0, None) == 0.0)
+
+    pitcher_baseline = round((3 * 4 + 10 * (18 * 0.75 + 6 * 2 - 2 * 2 - 5 * 0.6 - 2 * 0.6)) / 10, 2)
+    with_moneyline = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80010, "position": "P", "edge": {"composite": 1.0}, "win_probability_pct": 60.0}], INHOUSE_SEASON
+    )
+    check("a pitcher with a market win probability above his own season rate gets a real boost",
+          with_moneyline[80010] == round(pitcher_baseline + (0.6 - 0.3) * 4, 2), str(with_moneyline))
+
+    without_moneyline = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80010, "position": "P", "edge": {"composite": 1.0}}], INHOUSE_SEASON
+    )
+    check("a pitcher with no moneyline loaded reproduces the plain baseline x composite result (no correction)",
+          without_moneyline[80010] == pitcher_baseline, str(without_moneyline))
+
     print("\nIn-house ownership% (inhouse_projections.py)")
 
     check("project_ownership returns an empty result for an empty pool",
