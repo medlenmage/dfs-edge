@@ -19,6 +19,10 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [contestType, setContestType] = useState('gpp_large')
   const [numLineups, setNumLineups] = useState(500)
   const [maxExposure, setMaxExposure] = useState('')
+  // Defaults to $47,000 -- a lineup with a lot of unspent salary is
+  // almost always leaving real projected points on the table.
+  const [minSalary, setMinSalary] = useState('47000')
+  const [maxSalary, setMaxSalary] = useState('')
   const [simulate, setSimulate] = useState(false)
   const [showSlateGames, setShowSlateGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
@@ -81,6 +85,8 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
       const opts = {
         projectionSource,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
+        minSalary: minSalary.trim() ? Number(minSalary) : 0,
+        maxSalary: maxSalary.trim() ? Number(maxSalary) : 50000,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
       }
@@ -178,6 +184,32 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
               </option>
             ))}
           </select>
+        </label>
+        <label className="dim" style={{ fontSize: 13 }}>
+          Min salary{' '}
+          <input
+            type="number"
+            min="0"
+            max={50000}
+            step="500"
+            placeholder="—"
+            value={minSalary}
+            onChange={(e) => setMinSalary(e.target.value)}
+            style={{ width: 80 }}
+          />
+        </label>
+        <label className="dim" style={{ fontSize: 13 }}>
+          Max salary{' '}
+          <input
+            type="number"
+            min="0"
+            max={50000}
+            step="500"
+            placeholder="—"
+            value={maxSalary}
+            onChange={(e) => setMaxSalary(e.target.value)}
+            style={{ width: 80 }}
+          />
         </label>
         <label
           className="dim"

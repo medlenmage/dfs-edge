@@ -51,7 +51,11 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
   const [slotExposure, setSlotExposure] = useState({})
   const [teamExposure, setTeamExposure] = useState([])
   const [newTeamCap, setNewTeamCap] = useState({ team: '', pct: '' })
-  const [minSalary, setMinSalary] = useState('')
+  // Defaults to $47,000 -- a lineup with a lot of unspent salary is
+  // almost always leaving real projected points on the table. Clear it
+  // to disable the floor entirely.
+  const [minSalary, setMinSalary] = useState('47000')
+  const [maxSalary, setMaxSalary] = useState('')
   const [minUniquePlayers, setMinUniquePlayers] = useState('')
   const [minTeams, setMinTeams] = useState('')
   const [maxTeams, setMaxTeams] = useState('')
@@ -198,6 +202,7 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
         lockedIds: locked.size ? [...locked] : null,
         excludedIds: excluded.size ? [...excluded] : null,
         minSalary: minSalary.trim() ? Number(minSalary) : null,
+        maxSalary: maxSalary.trim() ? Number(maxSalary) : null,
         minUniquePlayers: minUniquePlayers.trim() ? Number(minUniquePlayers) : 1,
         minTeamsPerLineup: minTeams.trim() ? Number(minTeams) : null,
         maxTeamsPerLineup: maxTeams.trim() ? Number(maxTeams) : null,
@@ -273,13 +278,19 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
         </button>
         <button onClick={() => setShowRules((v) => !v)}>
           {showRules ? 'Hide lineup rules' : 'Lineup rules'}
-          {[minSalary, minUniquePlayers, minTeams, maxTeams, minOwnership, maxOwnership].filter(
+          {[minSalary, maxSalary, minUniquePlayers, minTeams, maxTeams, minOwnership, maxOwnership].filter(
             (v) => v.trim(),
           ).length > 0
             ? ` (${
-                [minSalary, minUniquePlayers, minTeams, maxTeams, minOwnership, maxOwnership].filter(
-                  (v) => v.trim(),
-                ).length
+                [
+                  minSalary,
+                  maxSalary,
+                  minUniquePlayers,
+                  minTeams,
+                  maxTeams,
+                  minOwnership,
+                  maxOwnership,
+                ].filter((v) => v.trim()).length
               })`
             : ''}
         </button>
@@ -335,6 +346,19 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
                 placeholder="—"
                 value={minSalary}
                 onChange={(e) => setMinSalary(e.target.value)}
+                style={{ width: 80 }}
+              />
+            </label>
+            <label className="dim" style={{ fontSize: 13 }}>
+              Max salary{' '}
+              <input
+                type="number"
+                min="0"
+                max={50000}
+                step="500"
+                placeholder="—"
+                value={maxSalary}
+                onChange={(e) => setMaxSalary(e.target.value)}
                 style={{ width: 80 }}
               />
             </label>
