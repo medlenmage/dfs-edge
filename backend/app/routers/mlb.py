@@ -12,7 +12,17 @@ import asyncio
 
 from app import cache, history_db
 from app.clients import draftkings
-from app.services import analysis, contest, dk_entries, lineup_export, mlb_slate, optimizer, projections, salaries
+from app.services import (
+    analysis,
+    contest,
+    dk_entries,
+    lineup_export,
+    mlb_slate,
+    optimizer,
+    player_match,
+    projections,
+    salaries,
+)
 
 # How long a generated contest-entries batch stays downloadable as CSV
 # after the fact -- long enough to cover "generate, look it over, then
@@ -322,7 +332,19 @@ async def upload_projections(
     asyncio.create_task(history_db.archive_slate_projections(day, rows))
     result = {"date": day, "players_loaded": len(rows)}
 
-    if not salaries.load(day):
+    existing_salaries = salaries.load(day)
+    if existing_salaries:
+        # A DK slate is already loaded for this date -- run the same
+        # name-matching used for the live slate now, at upload time, so
+        # a RotoWire/DraftKings spelling mismatch (nicknames, accents,
+        # a real typo) shows up immediately instead of silently leaving
+        # that player's projection blank on the Hitters/Pitchers tabs.
+        lookup = salaries.build_lookup(existing_salaries)
+        bad = player_match.unmatched(rows, lookup, fuzzy=True)
+        result["matched_to_slate"] = len(rows) - len(bad)
+        if bad:
+            result["unmatched"] = bad
+    else:
         derived = salaries.from_rotowire_rows(rows)
         if derived:
             salaries.store(day, derived)

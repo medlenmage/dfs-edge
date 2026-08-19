@@ -89,9 +89,9 @@ export function DkSlatePicker({ date, onLoaded }) {
         <button
           onClick={refresh}
           disabled={refreshing}
-          title="Re-pull this slate's players/salaries live -- use close to lock for late scratches or swaps"
+          title="Re-pull THIS slate's players/salaries live from DraftKings -- use close to lock for late scratches or swaps. Doesn't touch matchup data (scores, weather, lines) -- that's the header's own Refresh matchups button"
         >
-          {refreshing ? 'Refreshing…' : 'Refresh'}
+          {refreshing ? 'Refreshing salaries…' : 'Refresh DK salaries'}
         </button>
       )}
 

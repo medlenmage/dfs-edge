@@ -495,7 +495,7 @@ def _projection_info(
     touches the edge score."""
     if not lookup or not name:
         return None
-    row = projections.match(lookup, name, team_abbrev)
+    row = projections.match(lookup, name, team_abbrev, fuzzy=True)
     if not row:
         return None
     return {"fpts": row["fpts"], "ownership_pct": row["ownership_pct"]}
@@ -511,7 +511,7 @@ def _salary_info(
     for this date or the name/team didn't match anything in it."""
     if not lookup or not name:
         return None
-    row = salaries.match(lookup, name, team_abbrev)
+    row = salaries.match(lookup, name, team_abbrev, fuzzy=True)
     if not row:
         return None
     return {

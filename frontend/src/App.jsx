@@ -40,9 +40,7 @@ export default function App() {
   const [theme, setTheme] = useState(
     () => document.documentElement.dataset.theme || 'auto',
   )
-  const [salaryMsg, setSalaryMsg] = useState(null)
   const [projectionMsg, setProjectionMsg] = useState(null)
-  const salaryInputRef = useRef(null)
   const projectionInputRef = useRef(null)
   // Which FPTS/ownership numbers feed the optimizer and contest
   // generator -- independent of whether the tables have fetched the
@@ -103,7 +101,12 @@ export default function App() {
         const derived = result.salaries_derived
           ? ` (salaries pulled from the same file for ${result.salaries_derived} of them)`
           : ''
-        setMsg(`Loaded ${result.players_loaded} ${label}${derived}`)
+        const unmatched = result.unmatched?.length
+          ? ` -- ${result.unmatched.length} didn't match today's DK slate by name (${result.unmatched
+              .slice(0, 5)
+              .join(', ')}${result.unmatched.length > 5 ? ', …' : ''})`
+          : ''
+        setMsg(`Loaded ${result.players_loaded} ${label}${derived}${unmatched}`)
         load(true)
       } catch (err) {
         setMsg(`Upload failed: ${err.message}`)
@@ -111,7 +114,6 @@ export default function App() {
     }
   }
 
-  const handleSalaryUpload = makeUploadHandler(api.uploadSalaries, setSalaryMsg, 'salaries')
   const handleProjectionUpload = makeUploadHandler(api.uploadProjections, setProjectionMsg, 'projections')
 
   function cycleTheme() {
@@ -144,23 +146,14 @@ export default function App() {
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
               />
-              <button onClick={() => load(true)} disabled={loading}>
-                {loading ? 'Loading…' : 'Refresh'}
+              <button
+                onClick={() => load(true)}
+                disabled={loading}
+                title="Reload matchup data -- scores, park/weather, betting lines, lineups. Does not touch DraftKings salaries; use DkSlatePicker's own refresh for those"
+              >
+                {loading ? 'Loading…' : 'Refresh matchups'}
               </button>
               <DkSlatePicker date={date} onLoaded={() => load(true)} />
-              <input
-                ref={salaryInputRef}
-                type="file"
-                accept=".csv"
-                onChange={handleSalaryUpload}
-                style={{ display: 'none' }}
-              />
-              <button
-                onClick={() => salaryInputRef.current?.click()}
-                title="Upload a DraftKings salary CSV for this date"
-              >
-                Upload salaries
-              </button>
               <input
                 ref={projectionInputRef}
                 type="file"
@@ -200,9 +193,9 @@ export default function App() {
 
       {sport === 'mlb' && (
         <>
-      {(salaryMsg || projectionMsg) && (
+      {projectionMsg && (
         <div className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
-          {[salaryMsg, projectionMsg].filter(Boolean).join(' · ')}
+          {projectionMsg}
         </div>
       )}
 

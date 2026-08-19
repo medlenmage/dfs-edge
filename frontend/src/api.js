@@ -60,8 +60,6 @@ export const api = {
 
   injuries: (date) => request(`/api/mlb/injuries?date=${date}`),
 
-  uploadSalaries: (date, file) => uploadFile(`/api/mlb/salaries?date=${date}`, file),
-
   uploadProjections: (date, file) => uploadFile(`/api/mlb/projections?date=${date}`, file),
 
   dkSlates: (date, { refresh = false } = {}) =>
