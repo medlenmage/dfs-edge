@@ -163,6 +163,13 @@ class ContestError(ValueError):
     """Bad contest params or nothing to build a field from -- routed to an HTTP 400."""
 
 
+def _validate_salary_range(min_salary: int, max_salary: int) -> None:
+    if max_salary > SALARY_CAP:
+        raise ContestError(f"max_salary ({max_salary}) can't be more than the ${SALARY_CAP} salary cap.")
+    if min_salary > max_salary:
+        raise ContestError("min_salary can't be more than max_salary.")
+
+
 def _ownership_weight(p: dict[str, Any]) -> float:
     return max(p["ownership_pct"], _OWNERSHIP_FLOOR)
 
@@ -291,10 +298,18 @@ def _sample_one_lineup(
     excluded_ids: frozenset[int] = frozenset(),
     team_hitter_pools: dict[str, list[dict[str, Any]]] | None = None,
     stack_groups: list[int] | None = None,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
 ) -> dict[str, Any] | None:
     """
-    Build one randomly-weighted lineup within the salary cap. At each
-    slot, the pick is weighted by `weight_fn` (ownership% for the
+    Build one randomly-weighted lineup within the salary cap (and the
+    narrower [min_salary, max_salary] range, if given -- checked once
+    the full lineup is built rather than budgeted for slot-by-slot,
+    since the existing remaining-budget affordability check already
+    keeps every attempt salary-legal; a lineup outside the requested
+    range just fails and the caller retries, same as any other
+    infeasible random walk here). At each slot, the pick is weighted by
+    `weight_fn` (ownership% for the
     opponent field, projected points for the user's own entries) but
     constrained to what still leaves enough budget for the cheapest
     possible player at every remaining slot -- a standard feasible
@@ -332,6 +347,13 @@ def _sample_one_lineup(
     picks: list[dict[str, Any]] = []
     salary_so_far = 0
     team_hitter_count: dict[str, int] = {}
+    # Teams whose hitters can't join once the pitcher facing them is
+    # picked -- a real strikeout/home run is the same at-bat scored two
+    # opposite ways, so pairing them is a strict handicap, never a real
+    # strategy. Both "P" slots are always filled first (slot_order's own
+    # ordering), so this is fully populated before any hitter slot is
+    # decided.
+    banned_hitter_teams: set[str] = set()
 
     for i, slot in enumerate(slot_order):
         remaining_slots = slot_order[i + 1 :]
@@ -345,6 +367,10 @@ def _sample_one_lineup(
             eligible = [p for p in eligible if team_hitter_count.get(p["team"], 0) < MAX_HITTERS_PER_TEAM]
             if not eligible:
                 return None
+            if banned_hitter_teams:
+                eligible = [p for p in eligible if p["team"] not in banned_hitter_teams]
+                if not eligible:
+                    return None
 
             needed_teams = {t for t, n in stack_remaining.items() if n > 0}
             if needed_teams:
@@ -374,13 +400,18 @@ def _sample_one_lineup(
         picks.append(pick)
         used_ids.add(pick["id"])
         salary_so_far += pick["salary"]
-        if slot != "P":
+        if slot == "P":
+            if pick.get("opponent"):
+                banned_hitter_teams.add(pick["opponent"])
+        else:
             team_hitter_count[pick["team"]] = team_hitter_count.get(pick["team"], 0) + 1
         if stack_remaining.get(pick["team"], 0) > 0:
             stack_remaining[pick["team"]] -= 1
 
     if any(n > 0 for n in stack_remaining.values()):
         return None  # couldn't fully satisfy the chosen shape's team groups -- caller retries
+    if not (min_salary <= salary_so_far <= max_salary):
+        return None  # outside the requested salary range -- caller retries
 
     stack_type, stack = stack_info({"players": picks})
     return {
@@ -448,6 +479,8 @@ def generate_field(
     projection_source: str = "rotowire",
     included_game_pks: list[int] | None = None,
     max_attempts_per_lineup: int = 25,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -458,12 +491,15 @@ def generate_field(
     candidate pool the same way it does for the optimizer -- pass the
     same slate-game selection a user's own lineups were built against
     so the field reflects the actual DK slate, not every game MLB's
-    schedule returns for the date.
+    schedule returns for the date. `min_salary`/`max_salary` bound each
+    sampled lineup's total salary (unconstrained by default here; the
+    HTTP API applies a $47,000 floor unless overridden).
     """
     if sample_size < 1:
         raise ContestError("sample_size must be at least 1.")
     if sample_size > MAX_SAMPLE_SIZE:
         raise ContestError(f"sample_size can't exceed {MAX_SAMPLE_SIZE}.")
+    _validate_salary_range(min_salary, max_salary)
 
     candidates_by_slot, slot_order = _build_candidate_pool(
         slate, included_game_pks, projection_source
@@ -489,6 +525,8 @@ def generate_field(
                 _ownership_weight,
                 team_hitter_pools=team_hitter_pools,
                 stack_groups=shape,
+                min_salary=min_salary,
+                max_salary=max_salary,
             )
             if lineup is not None:
                 break
@@ -511,6 +549,8 @@ def generate_entries(
     max_exposure_pct: float | None = None,
     included_game_pks: list[int] | None = None,
     max_attempts_per_lineup: int = 30,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -526,6 +566,10 @@ def generate_entries(
     exposure cap, tracked as a running count and enforced by excluding
     a capped player from the candidate pool for the rest of the batch.
 
+    `min_salary`/`max_salary` bound each entry's total salary
+    (unconstrained by default here; the HTTP API applies a $47,000
+    floor unless overridden).
+
     If the pool or the exposure cap can't support the full count
     requested, returns as many distinct legal entries as it could
     build rather than failing the whole request -- only an empty
@@ -535,6 +579,7 @@ def generate_entries(
         raise ContestError("num_lineups must be at least 1.")
     if num_lineups > MAX_USER_LINEUPS:
         raise ContestError(f"num_lineups can't exceed {MAX_USER_LINEUPS:,}.")
+    _validate_salary_range(min_salary, max_salary)
 
     candidates_by_slot, slot_order = _build_candidate_pool(
         slate, included_game_pks, projection_source
@@ -565,6 +610,8 @@ def generate_entries(
                 excluded_ids=frozenset(capped_ids),
                 team_hitter_pools=team_hitter_pools,
                 stack_groups=shape,
+                min_salary=min_salary,
+                max_salary=max_salary,
             )
             if candidate is None or candidate["player_ids"] in seen_signatures:
                 continue
@@ -908,6 +955,8 @@ def build_contest_field(
     field_size: int | None = None,
     sample_size: int | None = None,
     included_game_pks: list[int] | None = None,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """
@@ -931,7 +980,8 @@ def build_contest_field(
     size = sample_size or min(contest["field_size"], MAX_SAMPLE_SIZE)
     field = generate_field(
         slate, size, projection_source=projection_source,
-        included_game_pks=included_game_pks, seed=seed,
+        included_game_pks=included_game_pks, min_salary=min_salary, max_salary=max_salary,
+        seed=seed,
     )
     evaluation = evaluate_field(field, user_lineups, contest)
 
@@ -965,6 +1015,8 @@ def _build_entries_and_field(
     field_size: int | None,
     sample_size: int | None,
     included_game_pks: list[int] | None,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
     seed: int | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """
@@ -1003,6 +1055,8 @@ def _build_entries_and_field(
         projection_source=projection_source,
         max_exposure_pct=max_exposure_pct,
         included_game_pks=included_game_pks,
+        min_salary=min_salary,
+        max_salary=max_salary,
         seed=seed,
     )
 
@@ -1012,6 +1066,8 @@ def _build_entries_and_field(
         field_sample,
         projection_source=projection_source,
         included_game_pks=included_game_pks,
+        min_salary=min_salary,
+        max_salary=max_salary,
         seed=(seed + 1) if seed is not None else None,
     )
     return contest, entries, field
@@ -1027,6 +1083,8 @@ def build_contest_entries(
     field_size: int | None = None,
     sample_size: int | None = None,
     included_game_pks: list[int] | None = None,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """
@@ -1052,6 +1110,8 @@ def build_contest_entries(
         field_size=field_size,
         sample_size=sample_size,
         included_game_pks=included_game_pks,
+        min_salary=min_salary,
+        max_salary=max_salary,
         seed=seed,
     )
     evaluation = _evaluate_batch_against_field(entries, field, contest)
@@ -1114,6 +1174,8 @@ async def build_contest_entries_simulated(
     field_size: int | None = None,
     sample_size: int | None = None,
     included_game_pks: list[int] | None = None,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """
@@ -1135,6 +1197,8 @@ async def build_contest_entries_simulated(
         field_size=field_size,
         sample_size=sample_size,
         included_game_pks=included_game_pks,
+        min_salary=min_salary,
+        max_salary=max_salary,
         seed=seed,
     )
     evaluation = await evaluate_batch_simulated(
@@ -1321,6 +1385,8 @@ async def build_dk_entries_simulated(
     num_trials: int = 10_000,
     sample_size: int | None = None,
     included_game_pks: list[int] | None = None,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
     seed: int | None = None,
 ) -> dict[str, Any]:
     """
@@ -1350,7 +1416,8 @@ async def build_dk_entries_simulated(
     field_sample = sample_size or min(field_size, MAX_SAMPLE_SIZE)
     field_lineups = generate_field(
         slate, field_sample, projection_source=projection_source,
-        included_game_pks=included_game_pks, seed=seed,
+        included_game_pks=included_game_pks, min_salary=min_salary, max_salary=max_salary,
+        seed=seed,
     )
 
     contest = {

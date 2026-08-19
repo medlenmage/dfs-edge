@@ -341,7 +341,12 @@ async def generate_lineups(
         None, embed=True, description="Player ids removed from the pool entirely"
     ),
     min_salary: int | None = Body(
-        None, embed=True, description="Floor on total lineup salary, symmetric with the $50,000 cap"
+        optimizer.DEFAULT_MIN_SALARY,
+        embed=True,
+        description="Floor on total lineup salary, symmetric with the $50,000 cap. Defaults to $47,000 -- pass 0 to disable.",
+    ),
+    max_salary: int | None = Body(
+        None, embed=True, description="Ceiling on total lineup salary, below the fixed $50,000 cap"
     ),
     min_unique_players: int = Body(
         1, embed=True, description="Minimum number of players that must differ between any two lineups"
@@ -392,6 +397,7 @@ async def generate_lineups(
             locked_ids=locked_ids,
             excluded_ids=excluded_ids,
             min_salary=min_salary,
+            max_salary=max_salary,
             min_unique_players=min_unique_players,
             min_teams_per_lineup=min_teams_per_lineup,
             max_teams_per_lineup=max_teams_per_lineup,
@@ -432,6 +438,14 @@ async def build_contest_field(
     included_game_pks: list[int] | None = Body(
         None, embed=True, description="Restrict the field's player pool to these games -- pass the same selection used to build `lineups`"
     ),
+    min_salary: int = Body(
+        optimizer.DEFAULT_MIN_SALARY,
+        embed=True,
+        description="Floor on each sampled field lineup's salary. Defaults to $47,000 -- pass 0 to disable.",
+    ),
+    max_salary: int = Body(
+        optimizer.SALARY_CAP, embed=True, description="Ceiling on each sampled field lineup's salary"
+    ),
 ) -> dict[str, Any]:
     """
     Build a synthetic public field for a named contest type, sampled by
@@ -454,6 +468,8 @@ async def build_contest_field(
             field_size=field_size,
             sample_size=sample_size,
             included_game_pks=included_game_pks,
+            min_salary=min_salary,
+            max_salary=max_salary,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -479,6 +495,14 @@ async def build_contest_entries(
     ),
     included_game_pks: list[int] | None = Body(
         None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
+    ),
+    min_salary: int = Body(
+        optimizer.DEFAULT_MIN_SALARY,
+        embed=True,
+        description="Floor on each entry's salary. Defaults to $47,000 -- pass 0 to disable.",
+    ),
+    max_salary: int = Body(
+        optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's salary"
     ),
 ) -> dict[str, Any]:
     """
@@ -513,6 +537,8 @@ async def build_contest_entries(
             field_size=field_size,
             sample_size=sample_size,
             included_game_pks=included_game_pks,
+            min_salary=min_salary,
+            max_salary=max_salary,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -552,6 +578,14 @@ async def build_contest_entries_simulated(
     included_game_pks: list[int] | None = Body(
         None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
     ),
+    min_salary: int = Body(
+        optimizer.DEFAULT_MIN_SALARY,
+        embed=True,
+        description="Floor on each entry's salary. Defaults to $47,000 -- pass 0 to disable.",
+    ),
+    max_salary: int = Body(
+        optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's salary"
+    ),
 ) -> dict[str, Any]:
     """
     Like POST /contest-entries, but ranks the batch against a genuine
@@ -581,6 +615,8 @@ async def build_contest_entries_simulated(
             field_size=field_size,
             sample_size=sample_size,
             included_game_pks=included_game_pks,
+            min_salary=min_salary,
+            max_salary=max_salary,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -679,6 +715,14 @@ async def simulate_dk_entries(
     included_game_pks: list[int] | None = Body(
         None, embed=True, description="Restrict the pool to these games only"
     ),
+    min_salary: int = Body(
+        optimizer.DEFAULT_MIN_SALARY,
+        embed=True,
+        description="Floor on each sampled field lineup's salary. Defaults to $47,000 -- pass 0 to disable.",
+    ),
+    max_salary: int = Body(
+        optimizer.SALARY_CAP, embed=True, description="Ceiling on each sampled field lineup's salary"
+    ),
 ) -> dict[str, Any]:
     """
     Mirror and simulate a real contest's whole field from an uploaded
@@ -725,6 +769,8 @@ async def simulate_dk_entries(
             num_trials=_SIM_TRIALS,
             sample_size=sample_size,
             included_game_pks=included_game_pks,
+            min_salary=min_salary,
+            max_salary=max_salary,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

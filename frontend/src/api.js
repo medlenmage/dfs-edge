@@ -85,7 +85,11 @@ export const api = {
       teamExposureCap = null,
       lockedIds = null,
       excludedIds = null,
-      minSalary = null,
+      // Defaults to $47,000 unless a caller explicitly overrides it
+      // (pass 0 to disable the floor entirely) -- matches the HTTP
+      // API's own default, so a caller that omits this still gets it.
+      minSalary = 47000,
+      maxSalary = null,
       minUniquePlayers = 1,
       minTeamsPerLineup = null,
       maxTeamsPerLineup = null,
@@ -111,6 +115,7 @@ export const api = {
         locked_ids: lockedIds,
         excluded_ids: excludedIds,
         min_salary: minSalary,
+        max_salary: maxSalary,
         min_unique_players: minUniquePlayers,
         min_teams_per_lineup: minTeamsPerLineup,
         max_teams_per_lineup: maxTeamsPerLineup,
@@ -134,7 +139,14 @@ export const api = {
     date,
     contestType,
     lineups,
-    { projectionSource = 'rotowire', fieldSize = null, sampleSize = null, includedGamePks = null } = {},
+    {
+      projectionSource = 'rotowire',
+      fieldSize = null,
+      sampleSize = null,
+      includedGamePks = null,
+      minSalary = 47000,
+      maxSalary = 50000,
+    } = {},
   ) =>
     request('/api/mlb/contest-field', {
       method: 'POST',
@@ -146,6 +158,8 @@ export const api = {
         field_size: fieldSize,
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
+        min_salary: minSalary,
+        max_salary: maxSalary,
       }),
     }),
 
@@ -159,6 +173,8 @@ export const api = {
       fieldSize = null,
       sampleSize = null,
       includedGamePks = null,
+      minSalary = 47000,
+      maxSalary = 50000,
     } = {},
   ) =>
     request('/api/mlb/contest-entries', {
@@ -172,6 +188,8 @@ export const api = {
         field_size: fieldSize,
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
+        min_salary: minSalary,
+        max_salary: maxSalary,
       }),
     }),
 
@@ -190,6 +208,8 @@ export const api = {
       fieldSize = null,
       sampleSize = null,
       includedGamePks = null,
+      minSalary = 47000,
+      maxSalary = 50000,
     } = {},
   ) =>
     request('/api/mlb/contest-entries-simulated', {
@@ -203,6 +223,8 @@ export const api = {
         field_size: fieldSize,
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
+        min_salary: minSalary,
+        max_salary: maxSalary,
       }),
     }),
 
@@ -220,6 +242,8 @@ export const api = {
       projectionSource = 'rotowire',
       sampleSize = null,
       includedGamePks = null,
+      minSalary = 47000,
+      maxSalary = 50000,
     } = {},
   ) =>
     request('/api/mlb/dk-entries/simulate', {

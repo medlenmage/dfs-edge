@@ -38,6 +38,11 @@ import pulp
 
 # DraftKings Classic MLB: one salary cap, ten roster slots.
 SALARY_CAP = 50_000
+# Applied automatically unless the caller overrides it (0 disables the
+# floor entirely) -- a lineup with a lot of unspent salary is almost
+# always leaving real projected points on the table, so this is a
+# sensible default rather than an opt-in.
+DEFAULT_MIN_SALARY = 47_000
 SLOT_REQUIREMENTS = {
     "P": 2,
     "C": 1,
@@ -222,6 +227,33 @@ def _team_count_constraints(
         prob += total_teams <= max_teams
 
 
+def _opposing_pitcher_constraints(
+    prob: pulp.LpProblem,
+    x: dict[tuple[int, str], pulp.LpVariable],
+    usable: list[dict[str, Any]],
+) -> None:
+    """
+    A lineup can never roster a hitter alongside the pitcher he's
+    actually facing that day -- a real strikeout or a real home run is
+    the same at-bat scored two opposite ways, so pairing them is a
+    strict handicap, never a legitimate build. Enforced as a pairwise
+    x_pitcher + x_hitter <= 1 for every (pitcher, opposing hitter) pair
+    rather than one aggregate constraint -- CBC handles a larger number
+    of simple binary pairs just as easily, and it reads as exactly what
+    it is. A pitcher's OWN team's hitters are untouched (stacking your
+    own pitcher's offense is a normal, encouraged strategy).
+    """
+    pitchers = [p for p in usable if "P" in p["slots"]]
+    hitters_by_team: dict[str, list[dict[str, Any]]] = {}
+    for h in usable:
+        if "P" not in h["slots"]:
+            hitters_by_team.setdefault(h["team"], []).append(h)
+
+    for pitcher in pitchers:
+        for h in hitters_by_team.get(pitcher.get("opponent") or "", []):
+            prob += x[(pitcher["id"], "P")] + pulp.lpSum(x[(h["id"], s)] for s in h["slots"]) <= 1
+
+
 PROJECTION_SOURCES = {
     "rotowire": ("fpts", "ownership_pct"),
     "inhouse": ("inhouse_fpts", "inhouse_ownership_pct"),
@@ -263,6 +295,8 @@ def build_player_pool(
         for side in ("home", "away"):
             team = game[side]
             abbrev = team.get("abbrev") or team.get("name") or ""
+            opp_team = game["away" if side == "home" else "home"]
+            opp_abbrev = opp_team.get("abbrev") or opp_team.get("name") or ""
             scratched_ids = {s.get("player_id") for s in (team.get("scratches") or [])}
 
             candidates = list(team.get("hitters") or [])
@@ -288,6 +322,7 @@ def build_player_pool(
                         "id": pid,
                         "name": p.get("name"),
                         "team": abbrev,
+                        "opponent": opp_abbrev,
                         "salary": salary_info["salary"],
                         "projected_fpts": proj_info[fpts_key],
                         "ownership_pct": proj_info.get(ownership_key) or 0,
@@ -307,6 +342,7 @@ def _solve_one(
     locked_ids: set[int],
     banned_stack_teams: set[str],
     min_salary: int | None = None,
+    max_salary: int | None = None,
     min_unique_players: int = 1,
     min_teams_per_lineup: int | None = None,
     max_teams_per_lineup: int | None = None,
@@ -354,15 +390,16 @@ def _solve_one(
         eligible = [p for p in usable if slot in p["slots"]]
         prob += pulp.lpSum(x[(p["id"], slot)] for p in eligible) == count
 
-    prob += (
-        pulp.lpSum(p["salary"] * x[(p["id"], slot)] for p in usable for slot in p["slots"])
-        <= SALARY_CAP
+    _opposing_pitcher_constraints(prob, x, usable)
+
+    total_salary = pulp.lpSum(
+        p["salary"] * x[(p["id"], slot)] for p in usable for slot in p["slots"]
     )
+    prob += total_salary <= SALARY_CAP
     if min_salary is not None:
-        prob += (
-            pulp.lpSum(p["salary"] * x[(p["id"], slot)] for p in usable for slot in p["slots"])
-            >= min_salary
-        )
+        prob += total_salary >= min_salary
+    if max_salary is not None:
+        prob += total_salary <= max_salary
 
     if min_ownership_pct is not None or max_ownership_pct is not None:
         total_ownership = pulp.lpSum(
@@ -455,6 +492,7 @@ def generate_lineups(
     locked_ids: list[int] | None = None,
     excluded_ids: list[int] | None = None,
     min_salary: int | None = None,
+    max_salary: int | None = None,
     min_unique_players: int = 1,
     min_teams_per_lineup: int | None = None,
     max_teams_per_lineup: int | None = None,
@@ -509,7 +547,13 @@ def generate_lineups(
     shows up in more than half the lineups.
 
     `min_salary`, if given, is a floor on total lineup salary, symmetric
-    with the fixed $50,000 cap.
+    with the fixed $50,000 cap -- unset (None) here means no floor, same
+    as every other optional constraint on this function; the HTTP API
+    (routers/mlb.py) applies a $47,000 default unless the caller
+    overrides it, but this library function itself stays opt-in.
+    `max_salary`, if given, is an additional ceiling below the fixed
+    $50,000 cap (e.g. to deliberately leave room under a punt-heavy
+    build's actual spend).
 
     `min_unique_players`, if given (default 1), is how many of a
     lineup's 10 players must differ from every earlier lineup in the
@@ -635,6 +679,12 @@ def generate_lineups(
         raise OptimizerError(
             f"min_salary ({min_salary}) can't be more than the ${SALARY_CAP} salary cap."
         )
+    if max_salary is not None and max_salary > SALARY_CAP:
+        raise OptimizerError(
+            f"max_salary ({max_salary}) can't be more than the ${SALARY_CAP} salary cap."
+        )
+    if min_salary is not None and max_salary is not None and min_salary > max_salary:
+        raise OptimizerError("min_salary can't be more than max_salary.")
 
     if not (1 <= min_unique_players <= ROSTER_SIZE):
         raise OptimizerError(f"min_unique_players must be between 1 and {ROSTER_SIZE}.")
@@ -718,6 +768,7 @@ def generate_lineups(
             locked_ids=locked,
             banned_stack_teams=banned_stack_teams,
             min_salary=min_salary,
+            max_salary=max_salary,
             min_unique_players=min_unique_players,
             min_teams_per_lineup=min_teams_per_lineup,
             max_teams_per_lineup=max_teams_per_lineup,

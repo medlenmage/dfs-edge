@@ -603,7 +603,21 @@ async def main() -> int:
                     "probable_pitcher": opt_pitcher(9201, "OP2", 8500, 17),
                     "scratches": [],
                 },
-            }
+            },
+            # A second, unrelated game supplying a filler 2nd pitcher --
+            # OPT's own 8 hitters exactly fill the 8 hitter slots, but
+            # OP2 (OPP's pitcher) opposes those same OPT hitters, so the
+            # opposing-pitcher rule correctly rules OP2 out. Without this
+            # filler, the fixture would have no legal way to fill both P
+            # slots at all.
+            {
+                "home": {
+                    "abbrev": "FIL", "hitters": [],
+                    "probable_pitcher": opt_pitcher(9202, "FILLER", 4000, 6),
+                    "scratches": [],
+                },
+                "away": {"abbrev": "FOE", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
         ]
     }
 
@@ -616,6 +630,12 @@ async def main() -> int:
           slot_counts == optimizer.SLOT_REQUIREMENTS, str(slot_counts))
     check("optimizer never rosters a scratched player, even a huge-projection one",
           9106 not in all_ids, str(all_ids))
+    # OP2 (id 9201) is OPP's pitcher, facing OPT's hitters -- every one
+    # of the 8 rostered hitters is on OPT, so using OP2 alongside them
+    # would violate the opposing-pitcher rule. Only the filler pitcher
+    # (9202) should ever fill the 2nd P slot here.
+    check("optimizer never pairs a pitcher with a hitter from the team he's facing",
+          9201 not in all_ids, str(all_ids))
 
     # Stack-shape behavior (manual/auto team assignment, partial shapes,
     # validation) gets its own dedicated section below with a deeper
@@ -979,7 +999,18 @@ async def main() -> int:
                     "probable_pitcher": vp(9502, "PV2", "P", 3000, 19),
                     "scratches": [],
                 },
-            }
+            },
+            # Filler 2nd game so the solver has a 2nd pitcher option that
+            # doesn't oppose VAL's hitters -- see opt_slate's matching
+            # comment above for why PV2 alone would make this infeasible.
+            {
+                "home": {
+                    "abbrev": "VFIL", "hitters": [],
+                    "probable_pitcher": vp(9503, "PFILLER", "P", 3000, 5),
+                    "scratches": [],
+                },
+                "away": {"abbrev": "VFOE", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
         ]
     }
 
@@ -1027,9 +1058,14 @@ async def main() -> int:
     def lineup_teams(lu):
         return {p["team"] for slot in lu["slots"].values() for p in slot}
 
+    # MP1 and MP2 (MUL1's and MUL2's pitchers, the two highest-fpts
+    # options) oppose each other's team -- the opposing-pitcher rule
+    # means picking both would ban both teams' hitters at once, so the
+    # unconstrained solve naturally spreads across more teams than it
+    # would have before that rule existed.
     default_teams = optimizer.generate_lineups(mul_slate)["lineups"][0]
-    check("without a team-count bound, the unconstrained solve naturally uses 2 teams",
-          len(lineup_teams(default_teams)) == 2, str(lineup_teams(default_teams)))
+    check("without a team-count bound, the unconstrained solve naturally spans more than 2 teams",
+          len(lineup_teams(default_teams)) > 2, str(lineup_teams(default_teams)))
 
     min3 = optimizer.generate_lineups(mul_slate, min_teams_per_lineup=3)["lineups"][0]
     check("min_teams_per_lineup=3 forces a third team's pitcher into the lineup",
@@ -1102,6 +1138,19 @@ async def main() -> int:
                          "probable_pitcher": opt_pitcher(9752, "OCP", 8000, 15.0), "scratches": []},
                 "away": {"abbrev": "OD", "hitters": [],
                          "probable_pitcher": opt_pitcher(9753, "ODP", 7800, 14.5), "scratches": []},
+            },
+            # A 3rd game supplying a 2nd pitcher option that opposes
+            # neither OA, OB, nor OC -- without it, the only two
+            # pitchers that don't oppose the forced OA/OB stack are
+            # OCP and ODP, and ODP opposes OC, which would wrongly rule
+            # OC's hitters out of every one-off scenario below (not
+            # because of the salary/group restriction being tested, but
+            # as an unrelated side effect of there being no other
+            # pitcher choice).
+            {
+                "home": {"abbrev": "OE", "hitters": [],
+                         "probable_pitcher": opt_pitcher(9754, "OEP", 7600, 14.0), "scratches": []},
+                "away": {"abbrev": "OF", "hitters": [], "probable_pitcher": None, "scratches": []},
             },
         ]
     }
@@ -1205,7 +1254,11 @@ async def main() -> int:
             hitters.append(own_hitter(pid, f"OFcontra{i}", "OF", 4000, 9.5 - d, 5))
             pid += 1
         pitcher_chalk = opt_pitcher(9850, "Pchalk1", 6000, 15 + d, own=40)
-        pitcher_contra = opt_pitcher(9852, "Pcontra1", 6000, 14.5 - d, own=5)
+        # Every other pitcher candidate lives on OWN too (not OWO) --
+        # the opposing-pitcher rule would otherwise ban OWN's own
+        # hitters whenever OWO's pitcher gets picked, unrelated to the
+        # fpts-vs-ownership comparison this fixture actually tests.
+        hitters.append(opt_pitcher(9852, "Pcontra1", 6000, 14.5 - d, own=5))
         hitters.append(opt_pitcher(9851, "Pchalk2", 6000, 15 + d, own=40))
         hitters.append(opt_pitcher(9853, "Pcontra2", 6000, 14.5 - d, own=5))
         return {
@@ -1213,8 +1266,7 @@ async def main() -> int:
                 {
                     "home": {"abbrev": "OWN", "hitters": hitters,
                              "probable_pitcher": pitcher_chalk, "scratches": []},
-                    "away": {"abbrev": "OWO", "hitters": [],
-                             "probable_pitcher": pitcher_contra, "scratches": []},
+                    "away": {"abbrev": "OWO", "hitters": [], "probable_pitcher": None, "scratches": []},
                 }
             ]
         }
@@ -1266,6 +1318,24 @@ async def main() -> int:
     baseline = optimizer.generate_lineups(mul_slate)["lineups"][0]
     check("including every game reproduces the fully unconstrained result",
           all_included == baseline, str(all_included))
+
+    check("mul_slate's unconstrained baseline naturally spends the full salary cap",
+          baseline["salary_used"] == optimizer.SALARY_CAP, str(baseline["salary_used"]))
+    max_capped = optimizer.generate_lineups(mul_slate, max_salary=45000)["lineups"][0]
+    check("max_salary caps total lineup salary below the fixed $50,000 cap",
+          max_capped["salary_used"] <= 45000, str(max_capped["salary_used"]))
+
+    try:
+        optimizer.generate_lineups(mul_slate, max_salary=optimizer.SALARY_CAP + 1)
+        check("optimizer rejects a max_salary above the salary cap", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects a max_salary above the salary cap", True)
+
+    try:
+        optimizer.generate_lineups(mul_slate, min_salary=40000, max_salary=30000)
+        check("optimizer rejects min_salary above max_salary", False)
+    except optimizer.OptimizerError:
+        check("optimizer rejects min_salary above max_salary", True)
 
     try:
         optimizer.generate_lineups(mul_slate, included_game_pks=[88003])
@@ -1486,6 +1556,43 @@ async def main() -> int:
     check("every field lineup has exactly ROSTER_SIZE distinct players",
           all(len({p["id"] for p in lu["players"]}) == optimizer.ROSTER_SIZE for lu in field))
 
+    # mul_slate's known opponent pairs: MUL1 vs MUL2, MUL3 vs MUL4, MUL5
+    # vs MUL6. Pitcher ids are known (MP1-MP6 = 9400-9405); anything
+    # else in a field lineup is a hitter.
+    MUL_OPPONENT = {"MUL1": "MUL2", "MUL2": "MUL1", "MUL3": "MUL4", "MUL4": "MUL3", "MUL5": "MUL6", "MUL6": "MUL5"}
+    MUL_PITCHER_IDS = {9400, 9401, 9402, 9403, 9404, 9405}
+
+    def has_opposing_pitcher_hitter_pair(lu):
+        pitcher_teams = {p["team"] for p in lu["players"] if p["id"] in MUL_PITCHER_IDS}
+        hitter_teams = {p["team"] for p in lu["players"] if p["id"] not in MUL_PITCHER_IDS}
+        return any(MUL_OPPONENT.get(t) in hitter_teams for t in pitcher_teams)
+
+    check("generate_field never pairs a pitcher with a hitter from the team he's facing",
+          not any(has_opposing_pitcher_hitter_pair(lu) for lu in field),
+          str([lu["players"] for lu in field if has_opposing_pitcher_hitter_pair(lu)][:1]))
+
+    floored_field = contest.generate_field(mul_slate, 20, min_salary=45000, seed=9)
+    check("generate_field's min_salary floors every sampled lineup's salary",
+          all(lu["salary_used"] >= 45000 for lu in floored_field),
+          str(min(lu["salary_used"] for lu in floored_field)))
+
+    capped_field = contest.generate_field(mul_slate, 20, max_salary=45000, seed=9)
+    check("generate_field's max_salary caps every sampled lineup's salary",
+          all(lu["salary_used"] <= 45000 for lu in capped_field),
+          str(max(lu["salary_used"] for lu in capped_field)))
+
+    try:
+        contest.generate_field(mul_slate, 10, max_salary=optimizer.SALARY_CAP + 1)
+        check("generate_field rejects a max_salary above the salary cap", False)
+    except contest.ContestError:
+        check("generate_field rejects a max_salary above the salary cap", True)
+
+    try:
+        contest.generate_field(mul_slate, 10, min_salary=40000, max_salary=30000)
+        check("generate_field rejects min_salary above max_salary", False)
+    except contest.ContestError:
+        check("generate_field rejects min_salary above max_salary", True)
+
     field_again = contest.generate_field(mul_slate, 60, seed=7)
     same_ids = [frozenset(p["id"] for p in lu["players"]) for lu in field]
     again_ids = [frozenset(p["id"] for p in lu["players"]) for lu in field_again]
@@ -1504,10 +1611,17 @@ async def main() -> int:
     check("field_exposure percentages are computed against the sample size",
           exposure[0]["pct"] == round(100 * exposure[0]["count"] / len(field), 1))
 
-    restricted = contest.generate_field(mul_slate, 30, included_game_pks=[88001], seed=3)
+    # Includes game 88003 (MUL5/MUL6, no hitters at all) alongside
+    # 88001 -- a single 2-team game alone is no longer buildable here:
+    # its only 2 real pitchers each oppose the other's hitters, so
+    # using both (the only pitcher option with just 2 candidates) would
+    # ban every hitter. MUL5/MUL6 exist purely as a legal 2nd-pitcher
+    # source; the real thing being proven is that MUL3/MUL4 (excluded
+    # from included_game_pks) never appear.
+    restricted = contest.generate_field(mul_slate, 30, included_game_pks=[88001, 88003], seed=3)
     restricted_teams = {p["team"] for lu in restricted for p in lu["players"]}
-    check("included_game_pks restricts the field to only that game's teams",
-          restricted_teams <= {"MUL1", "MUL2"}, str(restricted_teams))
+    check("included_game_pks restricts the field to only those games' teams",
+          restricted_teams <= {"MUL1", "MUL2", "MUL5", "MUL6"}, str(restricted_teams))
 
     try:
         contest.generate_field(mul_slate, 0)
@@ -1617,6 +1731,14 @@ async def main() -> int:
     signatures = [frozenset(p["id"] for p in lu["players"]) for lu in entries]
     check("every entry in the batch is genuinely distinct (no exact duplicates)",
           len(signatures) == len(set(signatures)), str(len(set(signatures))))
+    check("generate_entries never pairs a pitcher with a hitter from the team he's facing",
+          not any(has_opposing_pitcher_hitter_pair(lu) for lu in entries),
+          str([lu["players"] for lu in entries if has_opposing_pitcher_hitter_pair(lu)][:1]))
+
+    floored_entries = contest.generate_entries(mul_slate, 15, min_salary=45000, seed=9)
+    check("generate_entries' min_salary floors every entry's salary",
+          all(lu["salary_used"] >= 45000 for lu in floored_entries),
+          str(min(lu["salary_used"] for lu in floored_entries)))
 
     unweighted_field = contest.generate_field(mul_slate, 40, seed=13)
     avg_entry_points = sum(lu["projected_points"] for lu in entries) / len(entries)
