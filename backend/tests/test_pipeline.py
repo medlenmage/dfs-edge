@@ -498,6 +498,56 @@ async def main() -> int:
     check("unmatched() without fuzzy also flags the typo (strict mode)",
           player_match.unmatched(unmatched_rows, cle_rows) == ["Jose Ramires", "Nobody Here"])
 
+    print("\nTwo-way player (bio position 'TWP', e.g. Ohtani) shown as a hitter except on his own start day")
+
+    TWP_ID = 9010
+    twp_bio = {TWP_ID: {"id": TWP_ID, "name": "Shohei Otani", "throws": "R", "position": "TWP", "bats": "L"}}
+    twp_season = {TWP_ID: hit(500, 0.900, 0.300, 0.600, 40, sb=15)}
+
+    async def fake_people_twp(ids):
+        return {i: twp_bio[i] for i in ids if i in twp_bio}
+
+    twp_data = {
+        "bullpen": {},
+        "hit_season": twp_season,
+        "hit_vl": {}, "hit_vr": {}, "hit_home": {}, "hit_away": {},
+        "hit_recent": {},
+        "savant_hit": {},
+    }
+    twp_baselines = {
+        "hitter_ops_vl": 0.750, "hitter_ops_vr": 0.750,
+        "pitcher_ops_vl": 0.700, "pitcher_ops_vr": 0.700,
+        "hitter_barrel": None, "hitter_hard_hit": None, "hitter_xwoba": None,
+        "hitter_sb_per_pa": 0.02,
+        "bullpen_era": 4.0,
+    }
+    twp_env = {
+        "park": parks.get_park("LAD"), "roof_closed": True, "temp_fx": None, "wind_fx": None,
+    }
+
+    original_get_people = mlb.get_people
+    mlb.get_people = fake_people_twp
+
+    hitters_on_dh_day = await mlb_slate._team_hitters(
+        119, 2026, twp_data, twp_baselines, twp_env,
+        opposing_pitcher=None, opponent_team_id=None, is_home=True,
+        implied_runs=4.4, confirmed=[TWP_ID], team_abbrev="LAD",
+        own_pitcher_id=None,  # someone else is starting for LAD today
+    )
+    hitters_on_start_day = await mlb_slate._team_hitters(
+        119, 2026, twp_data, twp_baselines, twp_env,
+        opposing_pitcher=None, opponent_team_id=None, is_home=True,
+        implied_runs=4.4, confirmed=[TWP_ID], team_abbrev="LAD",
+        own_pitcher_id=TWP_ID,  # he himself is today's starter
+    )
+
+    mlb.get_people = original_get_people
+
+    check("a two-way player appears in the hitters list on a day he isn't his team's own starter",
+          any(h["id"] == TWP_ID for h in hitters_on_dh_day), str(hitters_on_dh_day))
+    check("the same two-way player is excluded from hitters on his own start day",
+          not any(h["id"] == TWP_ID for h in hitters_on_start_day), str(hitters_on_start_day))
+
     print("\nDK slate detection (Game Info column -> which games are in this slate)")
     check("parse_game_info extracts the away@home pair, ignoring date/time",
           salaries.parse_game_info("NYY@BOS 08/16/2026 07:05PM ET") == ("NYY", "BOS"))
