@@ -11,6 +11,7 @@ const COLUMNS = [
   { key: 'season_ops', label: 'Season OPS', sortable: true, num: true },
   { key: 'sb', label: 'SB', sortable: true, num: true },
   { key: 'xwoba', label: 'xwOBA', sortable: true, num: true },
+  { key: 'hrChance', label: 'HR%', sortable: true, num: true },
   { key: 'implied_runs', label: 'Team runs', sortable: true, num: true },
   { key: 'salary', label: 'Salary', sortable: true, num: true },
   { key: 'value', label: 'Value', sortable: true, num: true },
@@ -31,6 +32,7 @@ const DRIVER_LABELS = {
   bullpen: 'the opposing bullpen',
   park: 'the ballpark',
   weather: 'weather',
+  home_run: 'his home-run chance',
   form: 'recent form',
   home_road: 'home/road split',
 }
@@ -110,6 +112,7 @@ export function HitterTable({ slate, limit = 50 }) {
             vs_hand_pa: h.vs_hand?.pa ?? null,
             xwoba: h.edge.components.contact_quality?.xwoba ?? null,
             barrel_pct: h.edge.components.contact_quality?.barrel_pct ?? null,
+            hrChance: h.edge.components.home_run?.probability_pct ?? null,
             implied_runs: team.implied_runs ?? null,
             salary: h.salary?.salary ?? null,
             value: h.salary?.value ?? null,
@@ -288,6 +291,9 @@ export function HitterTable({ slate, limit = 50 }) {
                   {r.barrel_pct != null && (
                     <div className="sub-line">{r.barrel_pct}% barrels</div>
                   )}
+                </td>
+                <td className="num">
+                  {r.hrChance != null ? `${r.hrChance.toFixed(1)}%` : '—'}
                 </td>
                 <td className="num">
                   {r.implied_runs != null ? r.implied_runs.toFixed(1) : '—'}

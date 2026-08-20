@@ -129,6 +129,8 @@ async def build_slate(
         "pitcher_k9": scoring.league_average(data["pit_season"], "k_per_9", 20, "ip"),
         "hitter_k_pct": scoring.league_average(data["hit_season"], "k_pct", 80, "pa"),
         "hitter_sb_per_pa": scoring.league_average(data["hit_season"], "sb_per_pa", 100, "pa"),
+        "hitter_hr_per_pa": scoring.league_average(data["hit_season"], "hr_per_pa", 80, "pa"),
+        "pitcher_hr_per_9": scoring.league_average(data["pit_season"], "hr_per_9", 20, "ip"),
         # Savant's leaderboard is already filtered to a minimum sample
         # (see clients/savant.py), so no further sample-size gate here.
         "hitter_barrel": scoring.league_average(data["savant_hit"], "barrel_pct", 0, "barrel_pct"),
@@ -740,6 +742,13 @@ async def _team_hitters(
         )
 
         park = env["park"]
+        hr_factor = hr_factor_for_hand(park, bats)
+        weather_hr_mult = (
+            scoring.NEUTRAL
+            if env["roof_closed"]
+            else (env["temp_fx"] or {}).get("hr_multiplier", scoring.NEUTRAL)
+            * (env["wind_fx"] or {}).get("hr_multiplier", scoring.NEUTRAL)
+        )
         components = {
             "platoon": scoring.platoon_component(split_stat, hitter_baseline),
             "pitcher": scoring.pitcher_component(pitcher_split, pitcher_baseline),
@@ -757,11 +766,17 @@ async def _team_hitters(
             "bullpen_workload": scoring.bullpen_workload_component(
                 opp_bullpen_workload, baselines["bullpen_workload_outs"], mlb.BULLPEN_WORKLOAD_WINDOW_DAYS
             ),
-            "park": scoring.park_component(
-                hr_factor_for_hand(park, bats), park["runs"]
-            ),
+            "park": scoring.park_component(hr_factor, park["runs"]),
             "weather": scoring.weather_component(
                 env["temp_fx"], env["wind_fx"], env["roof_closed"]
+            ),
+            "home_run": scoring.home_run_component(
+                season_stat,
+                baselines["hitter_hr_per_pa"],
+                hr_factor,
+                weather_hr_mult,
+                ((opposing_pitcher or {}).get("season") or {}).get("hr_per_9"),
+                baselines["pitcher_hr_per_9"],
             ),
             "form": scoring.form_component(
                 data["hit_recent"].get(pid), season_stat
