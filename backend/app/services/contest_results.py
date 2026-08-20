@@ -153,3 +153,55 @@ def find_my_entry(
             if base == handle_lower:
                 return e
     return None
+
+
+def outcome_percentile(actual_value: float, pool: list[float]) -> float:
+    """
+    Where a real observed value falls within a modeled outcome pool, as
+    a percentile (0-100). Standard "probability integral transform"
+    machinery for checking whether a probabilistic model is honest: if
+    `pool` is a well-calibrated distribution for what actually happened,
+    the real value should land anywhere in [0, 100] with roughly EQUAL
+    likelihood across many independent checks -- clustered near 50 means
+    the model's spread is too wide (real outcomes always land near the
+    middle), clustered near the edges means it's too narrow (real
+    outcomes keep landing in the tails), and a systematic skew toward
+    one end means the model's mean itself is biased in that direction.
+    See calibration_summary() for what that check looks like aggregated
+    across many real observations.
+    """
+    if not pool:
+        return 50.0
+    below = sum(1 for v in pool if v <= actual_value)
+    return round(100 * below / len(pool), 2)
+
+
+def calibration_summary(percentiles: list[float]) -> dict[str, Any]:
+    """
+    Aggregates many outcome_percentile() results into a single
+    calibration report. For a genuinely well-calibrated model, real
+    percentiles should be roughly UNIFORMLY distributed across [0, 100]:
+    `mean_percentile` should sit near 50 (no systematic over/under-
+    projection bias), and `pct_within_10_90`/`pct_within_25_75` should
+    land near 80%/50% respectively (a uniform distribution puts exactly
+    that much of its mass inside those bands by construction) -- if real
+    outcomes are landing inside the middle band far MORE often than
+    that, the model's spread is too wide (overconfident about variance
+    existing when it doesn't); far LESS often means the model is too
+    narrow (real results keep surprising it in the tails, understating
+    real-world variance).
+    """
+    if not percentiles:
+        return {
+            "n": 0, "mean_percentile": None,
+            "pct_within_10_90": None, "pct_within_25_75": None,
+        }
+    n = len(percentiles)
+    within_10_90 = sum(1 for p in percentiles if 10.0 <= p <= 90.0)
+    within_25_75 = sum(1 for p in percentiles if 25.0 <= p <= 75.0)
+    return {
+        "n": n,
+        "mean_percentile": round(sum(percentiles) / n, 2),
+        "pct_within_10_90": round(100 * within_10_90 / n, 1),
+        "pct_within_25_75": round(100 * within_25_75 / n, 1),
+    }
