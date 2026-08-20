@@ -1087,6 +1087,126 @@ async def main() -> int:
     except optimizer.OptimizerError:
         check("optimizer rejects num_lineups above MAX_LINEUPS", True)
 
+    print("\nLate swap: re-optimize only the still-open slots")
+
+    # A "locked" game (deep past game_time_utc) supplying a pitcher +
+    # 5 single-position hitters, and TWO "swappable" games (deep future
+    # game_time_utc) each supplying one candidate pitcher (kept apart so
+    # neither opposes the other's hitters) plus 6 OF-eligible hitters --
+    # 3 deliberately worse (the ones "already picked") and 3 clearly
+    # better, so a real swap has an obvious right answer to check
+    # against.
+    late_swap_slate = {
+        "games": [
+            {
+                "game_pk": 77701, "game_time_utc": "2020-01-01T00:00:00Z",  # deep past -- locked
+                "home": {
+                    "abbrev": "LOCKED",
+                    "hitters": [
+                        opt_hitter(97010, "LC1", "LOCKED", "C", 3000, 8.0),
+                        opt_hitter(97011, "L1B1", "LOCKED", "1B", 4000, 10.0),
+                        opt_hitter(97012, "L2B1", "LOCKED", "2B", 3500, 9.0),
+                        opt_hitter(97013, "L3B1", "LOCKED", "3B", 4500, 12.0),
+                        opt_hitter(97014, "LSS1", "LOCKED", "SS", 3800, 9.5),
+                    ],
+                    "probable_pitcher": opt_pitcher(97001, "LP1", 8000, 15.0),
+                    "scratches": [],
+                },
+                "away": {"abbrev": "LOCKEDOPP", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
+            {
+                "game_pk": 77702, "game_time_utc": "2099-01-01T00:00:00Z",  # deep future -- swappable
+                "home": {
+                    "abbrev": "SWAP",
+                    "hitters": [
+                        opt_hitter(97020, "SOF1", "SWAP", "OF", 3000, 6.0),
+                        opt_hitter(97021, "SOF2", "SWAP", "OF", 3000, 6.0),
+                        opt_hitter(97022, "SOF3", "SWAP", "OF", 3000, 6.0),
+                        opt_hitter(97023, "SOF4", "SWAP", "OF", 3200, 15.0),
+                        opt_hitter(97024, "SOF5", "SWAP", "OF", 3200, 15.0),
+                        opt_hitter(97025, "SOF6", "SWAP", "OF", 3200, 15.0),
+                    ],
+                    "probable_pitcher": opt_pitcher(97002, "SP1", 6000, 10.0),
+                    "scratches": [],
+                },
+                "away": {"abbrev": "SWAPOPP", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
+            {
+                "game_pk": 77703, "game_time_utc": "2099-01-01T00:00:00Z",  # deep future -- swappable
+                "home": {
+                    "abbrev": "PGOOD", "hitters": [],
+                    "probable_pitcher": opt_pitcher(97003, "SP2", 6500, 20.0),
+                    "scratches": [],
+                },
+                "away": {"abbrev": "PBAD", "hitters": [], "probable_pitcher": None, "scratches": []},
+            },
+        ]
+    }
+
+    def _pick(pid, game_pk):
+        return {"player_id": pid, "game_pk": game_pk}
+
+    original_picks = [
+        _pick(97001, 77701), _pick(97002, 77702),  # P, P (LP1 locked, SP1 the worse swappable option)
+        _pick(97010, 77701),  # C
+        _pick(97011, 77701),  # 1B
+        _pick(97012, 77701),  # 2B
+        _pick(97013, 77701),  # 3B
+        _pick(97014, 77701),  # SS
+        _pick(97020, 77702), _pick(97021, 77702), _pick(97022, 77702),  # OF, OF, OF (the 3 worse options)
+    ]
+
+    swap_result = optimizer.late_swap(late_swap_slate, original_picks)
+    check("late_swap reports the batch as changed when a genuinely better swap exists",
+          swap_result["changed"] is True, str(swap_result.get("changed")))
+    check("late_swap identifies exactly the 6 locked (already-started) players",
+          sorted(swap_result["locked_player_ids"]) == [97001, 97010, 97011, 97012, 97013, 97014],
+          str(sorted(swap_result["locked_player_ids"])))
+    check("every locked player is still in the new lineup, untouched",
+          {97001, 97010, 97011, 97012, 97013, 97014} <=
+          {p["id"] for slot in swap_result["lineup"]["slots"].values() for p in slot},
+          str(swap_result["lineup"]["slots"]))
+    check("the worse swappable pitcher (SP1) got swapped out for the better one (SP2)",
+          97002 in swap_result["removed_player_ids"] and 97003 in swap_result["added_player_ids"],
+          str((swap_result["removed_player_ids"], swap_result["added_player_ids"])))
+    check("the 3 worse swappable OF picks got swapped for the 3 better ones",
+          {97020, 97021, 97022} <= set(swap_result["removed_player_ids"])
+          and {97023, 97024, 97025} <= set(swap_result["added_player_ids"]),
+          str((swap_result["removed_player_ids"], swap_result["added_player_ids"])))
+    check("late_swap never touches a locked player -- removed/added only ever come from the swappable slots",
+          set(swap_result["removed_player_ids"]) <= {97002, 97020, 97021, 97022}
+          and not set(swap_result["removed_player_ids"]) & {97001, 97010, 97011, 97012, 97013, 97014},
+          str(swap_result["removed_player_ids"]))
+
+    # Every player's game already started -- nothing left to swap.
+    all_locked_picks = [
+        _pick(97001, 77701), _pick(97002, 77702),
+        _pick(97010, 77701), _pick(97011, 77701), _pick(97012, 77701),
+        _pick(97013, 77701), _pick(97014, 77701),
+        _pick(97020, 77702), _pick(97021, 77702), _pick(97022, 77702),
+    ]
+    for pick in all_locked_picks:
+        pick["game_pk"] = 77701  # pretend every pick's game is the locked one
+    all_locked_result = optimizer.late_swap(late_swap_slate, all_locked_picks)
+    check("late_swap reports nothing changed when every game has already started",
+          all_locked_result["changed"] is False, str(all_locked_result))
+
+    # A pick whose game_pk doesn't exist anywhere in the current slate
+    # (postponement, bad id, ...) is conservatively treated as locked,
+    # not silently swapped.
+    unknown_game_picks = list(original_picks)
+    unknown_game_picks[0] = _pick(97001, 999999)  # LP1, but with a bogus game_pk
+    unknown_result = optimizer.late_swap(late_swap_slate, unknown_game_picks)
+    check("a pick with an unresolvable game_pk is treated as locked, not silently swapped",
+          97001 in unknown_result["locked_player_ids"] and 97001 in unknown_result["unresolved_player_ids"],
+          str((unknown_result["locked_player_ids"], unknown_result["unresolved_player_ids"])))
+
+    try:
+        optimizer.late_swap(late_swap_slate, original_picks[:9])
+        check("late_swap rejects a picks list that isn't exactly ROSTER_SIZE entries", False)
+    except optimizer.OptimizerError:
+        check("late_swap rejects a picks list that isn't exactly ROSTER_SIZE entries", True)
+
     print("\nLineup optimizer: named stack shapes")
 
     def team_hitter_counts(lu):

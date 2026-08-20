@@ -32,6 +32,20 @@ function teamsOnSlate(slate) {
 const ROSTER_SLOTS = ['P', 'C', '1B', '2B', '3B', 'SS', 'OF']
 const MAX_HITTERS = 8
 
+// Same fixed display/roster order LineupsTable.jsx flattens `slots`
+// into -- late swap needs the identical order to build its `picks`.
+const SLOT_ORDER = ['P', 'P', 'C', '1B', '2B', '3B', 'SS', 'OF', 'OF', 'OF']
+
+function lineupToPicks(lineup) {
+  const used = {}
+  return SLOT_ORDER.map((slotType) => {
+    const idx = used[slotType] || 0
+    used[slotType] = idx + 1
+    const player = (lineup.slots[slotType] || [])[idx]
+    return { player_id: player?.id, game_pk: player?.game_pk }
+  })
+}
+
 /**
  * Generates one or many optimal DraftKings Classic MLB lineups from
  * whatever salary + projections CSVs are loaded for the date.
@@ -67,6 +81,7 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
   const [maxOwnership, setMaxOwnership] = useState('')
   const [showSlateGames, setShowSlateGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
+  const [lateSwapState, setLateSwapState] = useState({ status: 'idle' })
 
   const teams = useMemo(() => teamsOnSlate(slate), [slate])
   const groups = STACK_SHAPES[stackShape]
@@ -220,9 +235,39 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
         includedGamePks: includedGamePksParam,
       })
       setSelected(0)
+      setLateSwapState({ status: 'idle' })
       setState({ status: 'ready', ...result })
     } catch (err) {
       setState({ status: 'error', message: err.message })
+    }
+  }
+
+  async function runLateSwap() {
+    const lineup = state.lineups[selected]
+    if (!lineup) return
+    setLateSwapState({ status: 'loading' })
+    try {
+      const picks = lineupToPicks(lineup)
+      // Captured before the swap so removed players' names are still
+      // displayable afterward -- they won't be in the new lineup anymore.
+      const namesById = {}
+      for (const players of Object.values(lineup.slots)) {
+        for (const p of players) namesById[p.id] = p.name
+      }
+      const result = await api.lateSwap(date, picks, { projectionSource })
+      if (result.changed) {
+        for (const players of Object.values(result.lineup.slots)) {
+          for (const p of players) namesById[p.id] = p.name
+        }
+        setState((prev) => {
+          const nextLineups = [...prev.lineups]
+          nextLineups[selected] = result.lineup
+          return { ...prev, lineups: nextLineups }
+        })
+      }
+      setLateSwapState({ status: 'ready', ...result, namesById })
+    } catch (err) {
+      setLateSwapState({ status: 'error', message: err.message })
     }
   }
 
@@ -645,14 +690,23 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
 
           {state.lineups.length > 1 && (
             <div className="controls" style={{ marginBottom: 12 }}>
-              <button onClick={() => setSelected((i) => Math.max(0, i - 1))} disabled={selected === 0}>
+              <button
+                onClick={() => {
+                  setSelected((i) => Math.max(0, i - 1))
+                  setLateSwapState({ status: 'idle' })
+                }}
+                disabled={selected === 0}
+              >
                 ← Prev
               </button>
               <span className="dim" style={{ fontSize: 13 }}>
                 Lineup {selected + 1} of {state.lineups.length}
               </span>
               <button
-                onClick={() => setSelected((i) => Math.min(state.lineups.length - 1, i + 1))}
+                onClick={() => {
+                  setSelected((i) => Math.min(state.lineups.length - 1, i + 1))
+                  setLateSwapState({ status: 'idle' })
+                }}
                 disabled={selected === state.lineups.length - 1}
               >
                 Next →
@@ -661,6 +715,37 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
           )}
 
           <LineupsTable lineup={state.lineups[selected]} />
+
+          <div className="controls" style={{ marginTop: 12 }}>
+            <button
+              onClick={runLateSwap}
+              disabled={lateSwapState.status === 'loading'}
+              title="Re-optimize just this lineup's still-open slots (games that haven't started yet) -- locked players stay exactly as they are, same as real DK late swap"
+            >
+              {lateSwapState.status === 'loading' ? 'Checking for swaps…' : 'Late swap'}
+            </button>
+          </div>
+          {lateSwapState.status === 'error' && (
+            <div className="notice error" style={{ marginTop: 8 }}>{lateSwapState.message}</div>
+          )}
+          {lateSwapState.status === 'ready' && (
+            <div className="notice" style={{ marginTop: 8 }}>
+              {lateSwapState.changed ? (
+                <>
+                  Swapped {lateSwapState.removed_player_ids.length} player
+                  {lateSwapState.removed_player_ids.length === 1 ? '' : 's'}:{' '}
+                  {lateSwapState.removed_player_ids
+                    .map((id) => lateSwapState.namesById[id] || id)
+                    .join(', ')}{' '}
+                  → {lateSwapState.added_player_ids
+                    .map((id) => lateSwapState.namesById[id] || id)
+                    .join(', ')}
+                </>
+              ) : (
+                lateSwapState.message || 'No better swap found -- this lineup is already optimal for its open slots.'
+              )}
+            </div>
+          )}
 
           {state.exposure.length > 0 && (
             <div className="card table-wrap" style={{ marginTop: 16 }}>
