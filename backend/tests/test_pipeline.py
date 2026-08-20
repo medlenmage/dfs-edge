@@ -3203,6 +3203,142 @@ async def main() -> int:
           [row["roi_pct"] for row in sim_csv_rows] == [str(r["roi_pct"]) for r in sim_batch["results"]],
           str(([row["roi_pct"] for row in sim_csv_rows], [r["roi_pct"] for r in sim_batch["results"]])))
 
+    print("\nContest generator: self-play mode -- the whole batch simulated as its own contest (contest.py evaluate_field_mirrored)")
+
+    # A batch where two entries share almost the same stack (same team,
+    # 7 of 8 hitters overlap) should show strongly correlated simulated
+    # results -- in whatever trial that shared stack runs hot, BOTH
+    # entries do well together, and in whatever trial it runs cold, both
+    # do poorly together. Two entries built from entirely separate,
+    # non-overlapping teams have no shared element and should stay close
+    # to independent. This is the literal mechanic behind self-play mode:
+    # lineups sharing correlated players/stacks cluster together in the
+    # standings instead of being scored in isolation against an unrelated
+    # field.
+    # MIN_GAMES_FULL_TRUST["hitter"] is 50 -- fake_any_player_game_log's
+    # 20-game hitting log (used just above) is a THIN sample, which
+    # makes player_outcome_pool() blend in the shared position pool via
+    # UNSEEDED randomness (a real, already-identified flakiness source
+    # in this codebase). A dedicated 60-game full-trust fixture here
+    # keeps this section's pool draws deterministic (own games only, no
+    # blend) so the correlation numbers below don't vary run to run.
+    async def fake_full_trust_game_log(player_id, season, group="hitting"):
+        # Alternates a big game with a dud, same "genuine game-to-game
+        # spread" shape as this file's own [0.0, 20.0] * N sim_pools
+        # fixtures elsewhere -- a constant per-game line (no spread at
+        # all) would make every player's outcome pool a near-constant,
+        # which trivially correlates every lineup with every other one
+        # regardless of shared players/teams and defeats the point of
+        # this test.
+        if group == "pitching":
+            return [
+                {
+                    "game_date": f"2099-{4 + (i - 1) // 28:02d}-{(i - 1) % 28 + 1:02d}",
+                    "outs": 18, "strikeouts": 9 if i % 2 == 0 else 3, "wins": 1 if i % 2 == 0 else 0,
+                    "earned_runs": 1 if i % 2 == 0 else 4, "hits_against": 4 if i % 2 == 0 else 8,
+                    "walks_against": 1, "hit_batsmen": 0, "complete_games": 0, "shutouts": 0,
+                }
+                for i in range(1, 21)
+            ]
+        return [
+            {
+                "game_date": f"2099-{4 + (i - 1) // 28:02d}-{(i - 1) % 28 + 1:02d}",
+                "plate_appearances": 4, "hits": 3 if i % 2 == 0 else 0, "doubles": 1 if i % 2 == 0 else 0,
+                "triples": 0, "home_runs": 1 if i % 2 == 0 else 0, "rbi": 3 if i % 2 == 0 else 0,
+                "runs": 2 if i % 2 == 0 else 0, "walks": 0, "hit_by_pitch": 0, "stolen_bases": 0,
+            }
+            for i in range(1, 61)
+        ]
+
+    mlb.get_player_game_log = fake_full_trust_game_log
+
+    twin_shared_ids = list(range(97001, 97008))  # 7 hitters shared by both TWIN entries
+    twin1_unique_id, twin2_unique_id = 97008, 97009
+    loner1_hitter_ids = list(range(97201, 97209))
+    loner2_hitter_ids = list(range(97211, 97219))
+
+    def _flat_entry(pitcher_ids, hitter_ids, team):
+        return {
+            "salary_used": 50000, "projected_points": 100.0, "total_ownership_pct": 0.0,
+            "players": [
+                *[_sim_player(pid, None) for pid in pitcher_ids],
+                *[_sim_player(pid, team) for pid in hitter_ids],
+            ],
+        }
+
+    twin1_entry = _flat_entry([97101, 97102], [*twin_shared_ids, twin1_unique_id], "TWINTEAM")
+    twin2_entry = _flat_entry([97103, 97104], [*twin_shared_ids, twin2_unique_id], "TWINTEAM")
+    loner1_entry = _flat_entry([97301, 97302], loner1_hitter_ids, "LONERTEAM1")
+    loner2_entry = _flat_entry([97303, 97304], loner2_hitter_ids, "LONERTEAM2")
+
+    self_play_field = [twin1_entry, twin2_entry, loner1_entry, loner2_entry]
+    self_play_pools = await variance.player_pools_for_entries(self_play_field, 2099)
+    self_play_sim = variance.simulate_batch(self_play_field, self_play_pools, num_trials=4000, seed=606)
+    twin_corr = float(np_test.corrcoef(self_play_sim[0], self_play_sim[1])[0, 1])
+    loner_corr = float(np_test.corrcoef(self_play_sim[2], self_play_sim[3])[0, 1])
+    check("two entries sharing most of their stack show strongly correlated simulated results",
+          twin_corr > 0.6, str(round(twin_corr, 3)))
+    check("two entries with completely separate, unrelated stacks stay close to independent",
+          abs(loner_corr) < 0.2, str(round(loner_corr, 3)))
+    check("the shared-stack pair correlates far more than the unrelated pair -- proof shared players/stacks "
+          "cluster together in the simulation instead of being scored as if independent",
+          twin_corr > loner_corr + 0.4, str((round(twin_corr, 3), round(loner_corr, 3))))
+
+    # Left at the preset's real field_size (500) rather than shrunk to
+    # match the 4-lineup sample -- at field_size=4 paid_count/top_1pct/
+    # top_10pct thresholds all collapse to 1, making first_place_pct,
+    # top_1pct_pct, top_10pct_pct and cash_probability_pct mathematically
+    # identical but independently rounded to different decimal
+    # precision (1 vs 2 places), which can flip their strict ordering by
+    # a rounding artifact alone -- not a real invariant violation. A
+    # realistic field_size keeps the thresholds meaningfully distinct.
+    self_play_contest = dict(contest.CONTEST_TYPES["gpp_small"])
+    mirrored = await contest.evaluate_field_mirrored(
+        self_play_field, self_play_contest, season=2099, num_trials=4000, seed=606,
+    )
+    check("evaluate_field_mirrored on a correlated self-play batch returns one result per lineup",
+          len(mirrored["results"]) == 4, str(len(mirrored["results"])))
+    # A tiny 4-lineup sample projected onto a 500-entry field lands each
+    # lineup's rank in a specific trial on one of only 4 possible real
+    # ranks -- almost always making first/top-1%/top-10%/cash the exact
+    # same underlying indicator (all thresholds are far above rank 1,
+    # the only achievable rank here), just independently rounded to
+    # different decimal precision (2 places vs 1). That can flip their
+    # strict ordering by a rounding artifact alone, so a small tolerance
+    # (not a strict <=) is what's actually guaranteed at this sample size
+    # -- the real invariant is already covered at production scale by
+    # the sim_batch checks above.
+    check("evaluate_field_mirrored's self-play results satisfy first<=top1<=top10<=cash within rounding tolerance",
+          all(
+              0 <= r["first_place_pct"] <= r["top_1pct_pct"] + 0.1
+              and r["top_1pct_pct"] <= r["top_10pct_pct"] + 0.1
+              and r["top_10pct_pct"] <= r["cash_probability_pct"] + 0.1
+              and r["cash_probability_pct"] <= 100.0
+              for r in mirrored["results"]
+          ),
+          str(mirrored["results"]))
+
+    sim_entries_self_play = await contest.build_contest_entries_simulated(
+        mul_slate, "gpp_small", 10, season=2099, num_trials=300, seed=31, self_play=True
+    )
+    check("build_contest_entries_simulated(self_play=True) builds the requested number of entries",
+          sim_entries_self_play["num_entries_built"] == 10, sim_entries_self_play["num_entries_built"])
+    check("build_contest_entries_simulated(self_play=True) reports self_play=True on the response",
+          sim_entries_self_play["self_play"] is True, sim_entries_self_play.get("self_play"))
+    check("build_contest_entries_simulated(self_play=True)'s sample_size matches the entries actually built -- "
+          "the batch IS the simulated field, not ranked against a separately-sampled one",
+          sim_entries_self_play["sample_size"] == sim_entries_self_play["num_entries_built"],
+          str((sim_entries_self_play["sample_size"], sim_entries_self_play["num_entries_built"])))
+    self_play_roi_order = [r["roi_pct"] for r in sim_entries_self_play["results"]]
+    check("build_contest_entries_simulated(self_play=True) still sorts results by roi_pct, highest first",
+          self_play_roi_order == sorted(self_play_roi_order, reverse=True), str(self_play_roi_order))
+    check("build_contest_entries_simulated(self_play=True)'s cash probabilities are all valid percentages",
+          all(0.0 <= r["cash_probability_pct"] <= 100.0 for r in sim_entries_self_play["results"]),
+          str([r["cash_probability_pct"] for r in sim_entries_self_play["results"]]))
+    check("build_contest_entries_simulated's default (self_play unset) mode is unaffected by the self_play "
+          "branch -- still reports self_play=False",
+          sim_batch["self_play"] is False, sim_batch.get("self_play"))
+
     print("\nReal contest-standings results (contest_results.py) -- post-contest, not pre-contest")
 
     # DK's real post-contest "standings" export -- a different file from

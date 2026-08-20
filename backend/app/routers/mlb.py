@@ -711,6 +711,11 @@ async def build_contest_entries_simulated(
         embed=True,
         description="Allow exact duplicate entries in the batch (a real GPP move -- entering a signature build multiple times). Duplicates' cash probability/payout/ROI are averaged across the tied group, matching DK's real tie-payout split. Each entry reports duplicate_count",
     ),
+    self_play: bool = Body(
+        False,
+        embed=True,
+        description="Rank this batch against ITSELF instead of a separately-sampled public field -- every lineup competing against every other lineup you generated, in the same simulated trial. Use this to see how your own stacks/builds compare to each other; leave off (default) to see how your batch fares against a realistic public field.",
+    ),
 ) -> dict[str, Any]:
     """
     Like POST /contest-entries, but ranks the batch against a genuine
@@ -747,6 +752,7 @@ async def build_contest_entries_simulated(
             min_salary=min_salary,
             max_salary=max_salary,
             allow_duplicates=allow_duplicates,
+            self_play=self_play,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

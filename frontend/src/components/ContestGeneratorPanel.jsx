@@ -25,6 +25,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [maxSalary, setMaxSalary] = useState('')
   const [allowDuplicates, setAllowDuplicates] = useState(false)
   const [simulate, setSimulate] = useState(false)
+  const [selfPlay, setSelfPlay] = useState(false)
   const [showSlateGames, setShowSlateGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
   const [state, setState] = useState({ status: 'idle' })
@@ -91,6 +92,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         allowDuplicates,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
+        ...(simulate ? { selfPlay } : {}),
       }
       const result = simulate
         ? await api.buildContestEntriesSimulated(date, contestType, numLineups, opts)
@@ -233,6 +235,16 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
           <input type="checkbox" checked={simulate} onChange={(e) => setSimulate(e.target.checked)} />
           Simulate
         </label>
+        {simulate && (
+          <label
+            className="dim"
+            style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}
+            title="Off (default): rank this batch against a separately-sampled realistic public field -- your entries are one voice in a field mostly made of other builds. On: rank this batch against ITSELF -- every lineup you generated competes against every other one in the same simulated trial, so lineups sharing correlated players/stacks naturally cluster together when those players run hot or cold."
+          >
+            <input type="checkbox" checked={selfPlay} onChange={(e) => setSelfPlay(e.target.checked)} />
+            Self-play (batch vs. itself)
+          </label>
+        )}
         <button className="primary" onClick={run} disabled={state.status === 'loading'}>
           {state.status === 'loading'
             ? simulate
@@ -432,6 +444,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             {state.simulated && (
               <span className="badge">{state.num_trials.toLocaleString()} sim trials</span>
             )}
+            {state.simulated && state.mode === 'generate' && (
+              <span
+                className="badge"
+                title={
+                  state.self_play
+                    ? 'Every lineup in this batch ranked against every other lineup in the batch, in the same simulated trial -- no separate field sampled.'
+                    : 'This batch ranked against a separately-sampled realistic public field.'
+                }
+              >
+                {state.self_play ? 'self-play' : 'vs. public field'}
+              </span>
+            )}
             <a
               href={api.contestEntriesCsvUrl(state.batch_id)}
               title={`Download all ${state.num_entries_built.toLocaleString()} entries as a CSV -- for handing off to an external simulator`}
@@ -446,8 +470,9 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                 <>
                   Simulated economics — {state.num_trials.toLocaleString()} Monte Carlo trials of
                   each player's own real historical outcomes, with team correlation for hitters.
-                  Cash probability and payout are genuine simulated results, not a single
-                  projected-points estimate against the field.
+                  {state.self_play
+                    ? ' Every lineup in this batch is ranked against every other lineup in the same simulated trial -- no separate field, so lineups sharing correlated players/stacks naturally cluster together when those players run hot or cold.'
+                    : ' Cash probability and payout are genuine simulated results against a separately-sampled realistic public field.'}
                 </>
               ) : (
                 <>
