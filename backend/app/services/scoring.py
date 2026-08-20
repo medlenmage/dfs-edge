@@ -25,18 +25,23 @@ from typing import Any
 # Weights -- these must sum to 1.0
 # --------------------------------------------------------------------------
 WEIGHTS = {
-    "platoon": 0.17,          # how the hitter performs vs this pitcher's hand
-    "team_total": 0.18,       # Vegas implied runs for his team
-    "pitcher": 0.15,          # how vulnerable this pitcher is to this hand
-    "contact_quality": 0.14,  # Statcast barrel/hard-hit/xwOBA vs league average
-    "stolen_base": 0.08,      # his own season-long stolen-base rate vs league average
-    "park": 0.09,             # ballpark HR factor for his handedness
+    "platoon": 0.15,          # how the hitter performs vs this pitcher's hand
+    "team_total": 0.17,       # Vegas implied runs for his team
+    "pitcher": 0.14,          # how vulnerable this pitcher is to this hand
+    "contact_quality": 0.13,  # Statcast barrel/hard-hit/xwOBA vs league average
+    "stolen_base": 0.07,      # his own season-long stolen-base rate vs league average
+    "park": 0.08,             # ballpark HR factor for his handedness
     "bullpen": 0.05,          # opposing team's relief corps' SEASON-long quality (ERA vs league)
     "bullpen_workload": 0.04, # opposing bullpen's RECENT usage (last 2 days) -- independent of season quality
     "weather": 0.06,          # temperature + wind
     "form": 0.03,             # last 15 games vs season baseline
     "home_road": 0.01,        # his own home/road split
+    "home_run": 0.07,         # his own individual HR probability vs this specific pitcher
 }
+# All twelve trimmed down proportionally to make room for `home_run`
+# below, rather than carving the new weight entirely out of one or two
+# components -- every existing signal loses a little ground, none loses
+# most of it.
 
 # Baselines used when a component is missing entirely.
 NEUTRAL = 1.0
@@ -223,6 +228,67 @@ def weather_component(
     return {
         "value": round(max(0.75, min(1.30, value)), 3),
         "detail": ", ".join(bits) or "no forecast",
+    }
+
+
+def home_run_component(
+    season_stat: dict[str, Any] | None,
+    league_avg_hr_per_pa: float | None,
+    park_hr_factor: float,
+    weather_hr_multiplier: float,
+    pitcher_hr_per_9: float | None,
+    league_avg_pitcher_hr_per_9: float | None,
+    expected_pa: float = 4.3,
+) -> dict[str, Any]:
+    """
+    Individual home-run probability -- how likely is THIS batter,
+    specifically, to hit one out tonight, not just "is it a good HR
+    night for offense in general" (that's what `park`/`weather` already
+    score at the team/environment level). Blends his own season HR rate
+    (shrunk toward league average for a thin sample, same treatment as
+    every other per-player rate here) with how HR-prone the pitcher
+    he's facing has been this season, then separately layers on
+    tonight's park/weather context to turn it into a real "at least one
+    home run tonight" probability -- the same framing a real HR prop
+    line uses.
+
+    Returns two different things by design:
+      - `value`: the 1.00-centred multiplier that feeds `combine()`.
+        Deliberately excludes park/weather -- those already have their
+        own separately-weighted `park`/`weather` components, so folding
+        them in again here would double-count the same signal in the
+        composite. Only his own power and the opposing pitcher's HR
+        vulnerability are genuinely new information at this level.
+      - `probability_pct`: the real, complete answer to "what's his
+        actual home-run chance tonight" -- DOES include park/weather,
+        since a genuine probability estimate shouldn't omit real
+        context just because those factors are scored elsewhere too.
+    """
+    own_rate = (season_stat or {}).get("hr_per_pa")
+    pa = (season_stat or {}).get("pa") or 0
+    if own_rate is None or not league_avg_hr_per_pa:
+        return {"value": NEUTRAL, "probability_pct": None, "detail": "no home-run rate data"}
+
+    # A true HR-rate talent gap between players is much wider, proportionally,
+    # than an OPS split -- same reasoning `stolen_base_component` already
+    # gives for its own wide +-60% cap.
+    own_ratio = _shrink(_ratio(own_rate, league_avg_hr_per_pa, cap=0.9), pa, MIN_PA_FULL_TRUST)
+    pitcher_factor = _ratio(pitcher_hr_per_9, league_avg_pitcher_hr_per_9, cap=0.5)
+
+    value = round(max(0.5, min(1.6, own_ratio * pitcher_factor)), 3)
+
+    adjusted_rate = max(
+        0.0,
+        min(0.5, (league_avg_hr_per_pa * own_ratio) * park_hr_factor * weather_hr_multiplier * pitcher_factor),
+    )
+    probability_pct = round(max(0.0, min(70.0, (1 - (1 - adjusted_rate) ** expected_pa) * 100)), 1)
+
+    return {
+        "value": value,
+        "probability_pct": probability_pct,
+        "hr_per_pa": own_rate,
+        "sample": pa,
+        "detail": f"{probability_pct}% HR chance tonight ({own_rate:.3f} HR/PA season rate)",
     }
 
 

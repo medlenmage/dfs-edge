@@ -537,6 +537,8 @@ async def main() -> int:
         "pitcher_ops_vl": 0.700, "pitcher_ops_vr": 0.700,
         "hitter_barrel": None, "hitter_hard_hit": None, "hitter_xwoba": None,
         "hitter_sb_per_pa": 0.02,
+        "hitter_hr_per_pa": 0.03,
+        "pitcher_hr_per_9": 1.1,
         "bullpen_era": 4.0,
         "bullpen_workload_outs": 20.0,
     }
@@ -1937,8 +1939,8 @@ async def main() -> int:
           str(switch["edge"]["components"]["pitcher"].get("ops_against")))
 
     print("\nScoring internals")
-    check("all eleven components present",
-          len(righty["edge"]["components"]) == 11,
+    check("all twelve components present",
+          len(righty["edge"]["components"]) == 12,
           str(sorted(righty["edge"]["components"])))
     check("weights sum to 1.0",
           abs(sum(scoring.WEIGHTS.values()) - 1.0) < 1e-9,
@@ -2005,6 +2007,111 @@ async def main() -> int:
     check("raw SB count is still exposed on the season stat line, unaffected by the new component",
           switch["season"]["sb"] == 35 and contact["season"]["sb"] == 1,
           str((switch["season"]["sb"], contact["season"]["sb"])))
+
+    print("\nHome-run probability component (individual batter HR chance)")
+    slugger_stat = {"hr_per_pa": 0.06, "pa": 550}
+    contact_stat = {"hr_per_pa": 0.015, "pa": 550}
+    league_hr_per_pa = 0.03
+    league_pitcher_hr9 = 1.10
+    neutral_park, neutral_weather = 1.0, 1.0
+
+    hr_slugger = scoring.home_run_component(
+        slugger_stat, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9
+    )
+    hr_contact = scoring.home_run_component(
+        contact_stat, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9
+    )
+    check("a well-above-average power hitter scores above neutral",
+          hr_slugger["value"] > 1.0, str(hr_slugger))
+    check("a well-below-average power hitter scores below neutral",
+          hr_contact["value"] < 1.0, str(hr_contact))
+    check("the slugger clearly outscores the contact hitter on this component alone",
+          hr_slugger["value"] > hr_contact["value"] + 0.2,
+          str((hr_slugger["value"], hr_contact["value"])))
+    check("the slugger's real probability_pct is a plausible, non-trivial percentage",
+          5.0 < hr_slugger["probability_pct"] < 70.0, str(hr_slugger["probability_pct"]))
+    check("the slugger's probability clearly exceeds the contact hitter's",
+          hr_slugger["probability_pct"] > hr_contact["probability_pct"],
+          str((hr_slugger["probability_pct"], hr_contact["probability_pct"])))
+
+    hr_small_sample = scoring.home_run_component(
+        {"hr_per_pa": 0.06, "pa": 20}, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9
+    )
+    check("a hot start in a tiny sample regresses well short of the full-sample slugger's value",
+          1.0 < hr_small_sample["value"] < hr_slugger["value"], str(hr_small_sample))
+
+    check("no season stat at all is neutral, not a crash",
+          scoring.home_run_component(None, league_hr_per_pa, 1.0, 1.0, 1.1, league_pitcher_hr9)["value"] == 1.0)
+    check("a missing league HR-rate baseline is neutral rather than dividing by nothing",
+          scoring.home_run_component(slugger_stat, None, 1.0, 1.0, 1.1, league_pitcher_hr9)["value"] == 1.0)
+    check("no season stat also reports probability_pct as None, not a fabricated number",
+          scoring.home_run_component(None, league_hr_per_pa, 1.0, 1.0, 1.1, league_pitcher_hr9)["probability_pct"] is None)
+
+    # `value` (what feeds the composite score) is deliberately blind to
+    # park/weather -- those already have their own separately-weighted
+    # components, so this proves home_run_component doesn't double-count
+    # them a second time in the composite.
+    hr_bad_park = scoring.home_run_component(
+        slugger_stat, league_hr_per_pa, 0.7, 0.8, 1.10, league_pitcher_hr9
+    )
+    check("`value` is unaffected by park/weather -- they're not double-counted "
+          "against the existing separately-weighted park/weather components",
+          hr_slugger["value"] == hr_bad_park["value"],
+          str((hr_slugger["value"], hr_bad_park["value"])))
+    check("but `probability_pct` (the real, complete answer) DOES drop in a suppressive "
+          "park/weather environment, since that's genuinely true context for a real HR chance",
+          hr_bad_park["probability_pct"] < hr_slugger["probability_pct"],
+          str((hr_bad_park["probability_pct"], hr_slugger["probability_pct"])))
+
+    hr_good_park = scoring.home_run_component(
+        slugger_stat, league_hr_per_pa, 1.3, 1.2, 1.10, league_pitcher_hr9
+    )
+    check("a launching-pad park/favorable wind raises probability_pct above the neutral-context version",
+          hr_good_park["probability_pct"] > hr_slugger["probability_pct"],
+          str((hr_good_park["probability_pct"], hr_slugger["probability_pct"])))
+
+    # A moderate (not maxed-out) power hitter here -- `slugger_stat`'s 2x-
+    # league HR rate already sits near home_run_component's own `value`
+    # cap on its own, so combining it with a hot pitcher factor would
+    # saturate both sides at the cap and mask the real directional
+    # effect being tested.
+    moderate_stat = {"hr_per_pa": 0.033, "pa": 550}
+    hr_neutral_pitcher = scoring.home_run_component(
+        moderate_stat, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9
+    )
+    hr_vs_gopher_pitcher = scoring.home_run_component(
+        moderate_stat, league_hr_per_pa, neutral_park, neutral_weather, 1.50, league_pitcher_hr9
+    )
+    check("facing a genuinely HR-prone pitcher raises BOTH value and probability_pct "
+          "(this is new information, not already captured by park/weather)",
+          hr_vs_gopher_pitcher["value"] > hr_neutral_pitcher["value"]
+          and hr_vs_gopher_pitcher["probability_pct"] > hr_neutral_pitcher["probability_pct"],
+          str((hr_vs_gopher_pitcher["value"], hr_neutral_pitcher["value"],
+               hr_vs_gopher_pitcher["probability_pct"], hr_neutral_pitcher["probability_pct"])))
+
+    check("probability_pct never exceeds the function's own sanity cap even for an extreme input",
+          scoring.home_run_component(
+              {"hr_per_pa": 0.20, "pa": 600}, league_hr_per_pa, 1.4, 1.3, 2.5, league_pitcher_hr9
+          )["probability_pct"] <= 70.0, "")
+
+    # Wired end-to-end through the real slate build: Big Righty Bat (101,
+    # 30 HR/580 PA) is the fixture's clear top power bat -- Boston
+    # Contact (202, 13 HR/480 PA) its clear weakest.
+    top_power = yanks["Big Righty Bat"]
+    weak_power = sox["Boston Contact"]
+    check("wired end-to-end: the fixture's clear top power bat scores above neutral on home_run",
+          top_power["edge"]["components"]["home_run"]["value"] > 1.0,
+          str(top_power["edge"]["components"]["home_run"]))
+    check("wired end-to-end: the fixture's clear weakest power bat scores at or below neutral",
+          weak_power["edge"]["components"]["home_run"]["value"] <= 1.0,
+          str(weak_power["edge"]["components"]["home_run"]))
+    check("wired end-to-end: both real hitters get a real, sane probability_pct",
+          all(
+              0.0 <= h["edge"]["components"]["home_run"]["probability_pct"] <= 70.0
+              for h in (top_power, weak_power)
+          ),
+          str((top_power["edge"]["components"]["home_run"]["probability_pct"],
+               weak_power["edge"]["components"]["home_run"]["probability_pct"])))
 
     check("scores stay within 0-100",
           all(0 <= h["edge"]["score"] <= 100
