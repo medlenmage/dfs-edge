@@ -1135,7 +1135,7 @@ def build_contest_field(
     }
 
 
-def _build_entries_and_field(
+def _build_contest_and_entries(
     slate: dict[str, Any],
     contest_type: str,
     num_lineups: int,
@@ -1143,19 +1143,18 @@ def _build_entries_and_field(
     projection_source: str = "rotowire",
     max_exposure_pct: float | None,
     field_size: int | None,
-    sample_size: int | None,
     included_game_pks: list[int] | None,
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
     seed: int | None,
-) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """
-    Shared setup for build_contest_entries and
-    build_contest_entries_simulated: validate the contest type/size,
-    build the user's own entries, and sample an opponent field to rank
-    them against. `seed`, if given, offsets the opponent field's own
-    seed by one so the two random walks aren't identical.
+    Shared setup for build_contest_entries/build_contest_entries_simulated
+    (in both their vs-a-separate-field and self-play modes): validate the
+    contest type/size and build the user's own entries. Split out from
+    _build_entries_and_field() so self-play mode can skip sampling an
+    opponent field entirely -- it doesn't need one.
     """
     if contest_type not in CONTEST_TYPES:
         raise ContestError(
@@ -1185,6 +1184,44 @@ def _build_entries_and_field(
         num_lineups,
         projection_source=projection_source,
         max_exposure_pct=max_exposure_pct,
+        included_game_pks=included_game_pks,
+        min_salary=min_salary,
+        max_salary=max_salary,
+        allow_duplicates=allow_duplicates,
+        seed=seed,
+    )
+    return contest, entries
+
+
+def _build_entries_and_field(
+    slate: dict[str, Any],
+    contest_type: str,
+    num_lineups: int,
+    *,
+    projection_source: str = "rotowire",
+    max_exposure_pct: float | None,
+    field_size: int | None,
+    sample_size: int | None,
+    included_game_pks: list[int] | None,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
+    allow_duplicates: bool = False,
+    seed: int | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Shared setup for build_contest_entries and
+    build_contest_entries_simulated's default (vs-a-separate-field) mode:
+    validate, build the user's own entries, and sample an opponent field
+    to rank them against. `seed`, if given, offsets the opponent field's
+    own seed by one so the two random walks aren't identical.
+    """
+    contest, entries = _build_contest_and_entries(
+        slate,
+        contest_type,
+        num_lineups,
+        projection_source=projection_source,
+        max_exposure_pct=max_exposure_pct,
+        field_size=field_size,
         included_game_pks=included_game_pks,
         min_salary=min_salary,
         max_salary=max_salary,
@@ -1312,39 +1349,80 @@ async def build_contest_entries_simulated(
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
     seed: int | None = None,
+    self_play: bool = False,
 ) -> dict[str, Any]:
     """
-    Like build_contest_entries, but ranks the batch against
-    evaluate_batch_simulated()'s real Monte Carlo cash probabilities and
-    payout distributions instead of a single projected-points snapshot
+    Like build_contest_entries, but ranks the batch against a real Monte
+    Carlo simulation instead of a single projected-points snapshot
     against the field. A separate function rather than a flag on
     build_contest_entries -- simulation is real additional compute
     (fetching every player's own outcome pool, then running num_trials
     simulated realities) on top of an already-large mass-generation
     call, and needs `season` to know which year's game logs to pull.
+
+    Two genuinely different questions, both real and useful, picked via
+    `self_play`:
+
+      - `self_play=False` (default): "how do MY entries fare against a
+        REALISTIC public field?" -- ranks the batch against a separate,
+        ownership-weighted sample standing in for the OTHER real
+        entries in the contest (`evaluate_batch_simulated`). Right when
+        your own batch is a modest slice of a much bigger real contest
+        (e.g. 300 entries in a 5,000-entry GPP) -- you're one voice in
+        a field mostly made of other real people's builds.
+
+      - `self_play=True`: "how does MY OWN BATCH perform against
+        ITSELF?" -- every lineup ranked against every other lineup in
+        the SAME batch, in the SAME simulated trial, with no separate
+        field sampled at all (`evaluate_field_mirrored`, the same
+        self-play mechanic already built for "My DK entries" mirroring
+        a real contest's whole field). Answers a different, real
+        question: which of YOUR OWN builds/stacks are relatively
+        strongest, and how would the leaderboard look if the whole
+        field played like variations of your own strategy -- useful
+        for portfolio construction and exposure decisions, not a
+        substitute for the realistic-public-field default.
     """
-    contest, entries, field = _build_entries_and_field(
-        slate,
-        contest_type,
-        num_lineups,
-        projection_source=projection_source,
-        max_exposure_pct=max_exposure_pct,
-        field_size=field_size,
-        sample_size=sample_size,
-        included_game_pks=included_game_pks,
-        min_salary=min_salary,
-        max_salary=max_salary,
-        allow_duplicates=allow_duplicates,
-        seed=seed,
-    )
-    evaluation = await evaluate_batch_simulated(
-        entries,
-        field,
-        contest,
-        season=season,
-        num_trials=num_trials,
-        seed=(seed + 2) if seed is not None else None,
-    )
+    if self_play:
+        contest, entries = _build_contest_and_entries(
+            slate,
+            contest_type,
+            num_lineups,
+            projection_source=projection_source,
+            max_exposure_pct=max_exposure_pct,
+            field_size=field_size,
+            included_game_pks=included_game_pks,
+            min_salary=min_salary,
+            max_salary=max_salary,
+            allow_duplicates=allow_duplicates,
+            seed=seed,
+        )
+        evaluation = await evaluate_field_mirrored(
+            entries, contest, season=season, num_trials=num_trials, seed=seed,
+        )
+    else:
+        contest, entries, field = _build_entries_and_field(
+            slate,
+            contest_type,
+            num_lineups,
+            projection_source=projection_source,
+            max_exposure_pct=max_exposure_pct,
+            field_size=field_size,
+            sample_size=sample_size,
+            included_game_pks=included_game_pks,
+            min_salary=min_salary,
+            max_salary=max_salary,
+            allow_duplicates=allow_duplicates,
+            seed=seed,
+        )
+        evaluation = await evaluate_batch_simulated(
+            entries,
+            field,
+            contest,
+            season=season,
+            num_trials=num_trials,
+            seed=(seed + 2) if seed is not None else None,
+        )
 
     # Highest simulated ROI first -- the whole point of running the
     # simulation is finding which of your own entries actually pays
@@ -1394,11 +1472,24 @@ async def build_contest_entries_simulated(
         "exposure": field_exposure(entries, top_n=20),
         "entries": entries,
         "results": evaluation["results"],
+        "self_play": self_play,
         "note": (
-            f"Cash probability and expected payout come from {evaluation['num_trials']:,} "
-            "real Monte Carlo simulated trials of each player's own historical outcome "
-            "pool, with team correlation for hitters -- a genuine probability, not a "
-            "single projected-points estimate against the field."
+            (
+                f"Cash probability and expected payout come from {evaluation['num_trials']:,} "
+                "real Monte Carlo simulated trials of this ENTIRE BATCH ranked against ITSELF "
+                "-- every lineup competing against every other lineup you generated, in the "
+                "same simulated trial, projected onto the real field_size. Lineups that share "
+                "correlated players/stacks will naturally cluster together at the top or "
+                "bottom when those players run hot or cold in a given trial, same as a real "
+                "correlated public field would."
+                if self_play
+                else
+                f"Cash probability and expected payout come from {evaluation['num_trials']:,} "
+                "real Monte Carlo simulated trials of each player's own historical outcome "
+                "pool, with team correlation for hitters, ranked against a separately-sampled "
+                "realistic public field -- a genuine probability, not a single projected-points "
+                "estimate against the field."
+            )
         ),
     }
 

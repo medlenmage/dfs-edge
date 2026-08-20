@@ -230,6 +230,7 @@ export const api = {
       minSalary = 47000,
       maxSalary = 50000,
       allowDuplicates = false,
+      selfPlay = false,
     } = {},
   ) =>
     request('/api/mlb/contest-entries-simulated', {
@@ -246,6 +247,7 @@ export const api = {
         min_salary: minSalary,
         max_salary: maxSalary,
         allow_duplicates: allowDuplicates,
+        self_play: selfPlay,
       }),
     }),
 
