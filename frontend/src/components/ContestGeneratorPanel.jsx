@@ -529,21 +529,32 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
               <div className="controls" style={{ flexWrap: 'wrap', marginTop: 8 }}>
                 <span
                   className="badge"
-                  title="What ANY random, zero-skill entry should expect from this exact contest, on average -- a closed-form fact from the contest's own entry fee, prize pool, and payout%, not a simulation. Compare your batch's own numbers above against this to see whether a good score is real edge, or just a generous field."
+                  title="What ANY random, zero-skill entry should expect from this exact contest, on average -- a closed-form fact from the contest's own entry fee, prize pool, and payout%, not a simulation."
                 >
                   field baseline: {state.field_baseline.avg_cash_probability_pct}% cash,{' '}
                   {state.field_baseline.avg_roi_pct >= 0 ? '+' : ''}
                   {state.field_baseline.avg_roi_pct}% ROI
                 </span>
-                <span
-                  className={`badge ${
-                    state.summary.avg_roi_pct - state.field_baseline.avg_roi_pct >= 0 ? 'ok' : 'risk'
-                  }`}
-                  title="Your batch's own avg ROI minus the field baseline's -- the real, field-beating edge your entries show, isolated from what the field's own rake-driven baseline already accounts for."
-                >
-                  your edge: {state.summary.avg_roi_pct - state.field_baseline.avg_roi_pct >= 0 ? '+' : ''}
-                  {(state.summary.avg_roi_pct - state.field_baseline.avg_roi_pct).toFixed(1)} pts ROI
-                </span>
+                {/* "Your edge" only means anything when the entries being
+                    averaged are a genuinely DIFFERENT population from the
+                    field they're compared against. In self-play mode (and
+                    always, in "My DK entries" mode -- it's simulating the
+                    whole field's own archetypes, never "your" submitted
+                    picks) the entries ARE the field, ranked against
+                    itself, so this number is tautologically ~0 -- showing
+                    it there reads as "my results are meaningless" rather
+                    than "not applicable here." */}
+                {!state.self_play && state.mode !== 'dk-entries' && (
+                  <span
+                    className={`badge ${
+                      state.summary.avg_roi_pct - state.field_baseline.avg_roi_pct >= 0 ? 'ok' : 'risk'
+                    }`}
+                    title="Your batch's own avg ROI minus the field baseline's -- the real, field-beating edge your entries show, isolated from what the field's own rake-driven baseline already accounts for."
+                  >
+                    your edge: {state.summary.avg_roi_pct - state.field_baseline.avg_roi_pct >= 0 ? '+' : ''}
+                    {(state.summary.avg_roi_pct - state.field_baseline.avg_roi_pct).toFixed(1)} pts ROI
+                  </span>
+                )}
               </div>
             )}
           </div>
