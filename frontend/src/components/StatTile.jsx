@@ -9,8 +9,18 @@ export function StatTile({ label, value, sub }) {
 }
 
 export function SlateTiles({ slate }) {
-  const games = slate?.games || []
-  if (!games.length) return null
+  const allGames = slate?.games || []
+  if (!allGames.length) return null
+
+  // Same auto-detect-from-the-loaded-DK-slate pattern already used by
+  // the Stacks/Hitters/Pitchers tabs' own Games checklists: once a DK
+  // slate is loaded, these headline numbers should reflect just that
+  // slate (e.g. picking the "Early" 4-game slate shouldn't still show
+  // stats averaged across the whole day's 15 games) -- falling back to
+  // every game when nothing's detected as in-slate yet, same "showing
+  // everything beats silently showing nothing" reasoning those tabs use.
+  const inSlateGames = allGames.filter((g) => g.in_slate !== false)
+  const games = inSlateGames.length ? inSlateGames : allGames
 
   const totals = games
     .map((g) => g.betting?.total)
