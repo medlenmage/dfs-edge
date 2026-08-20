@@ -217,6 +217,24 @@ export const api = {
   // as a link's href, no JS-side blob handling needed.
   contestEntriesCsvUrl: (batchId) => `${BASE}/api/mlb/contest-entries/${batchId}/csv`,
 
+  // Re-rank/re-filter an already-simulated batch's real results -- no
+  // new Monte Carlo run. playerExposureCaps/roiBoosts are plain
+  // objects keyed by player id (as a string, JSON object keys always
+  // are) -> number.
+  reshapeContestEntries: (
+    batchId,
+    { targetCount = null, maxExposurePct = null, playerExposureCaps = null, roiBoosts = null } = {},
+  ) =>
+    request(`/api/mlb/contest-entries/${batchId}/reshape`, {
+      method: 'POST',
+      body: JSON.stringify({
+        target_count: targetCount,
+        max_exposure_pct: maxExposurePct,
+        player_exposure_caps: playerExposureCaps,
+        roi_boosts: roiBoosts,
+      }),
+    }),
+
   buildContestEntriesSimulated: (
     date,
     contestType,
