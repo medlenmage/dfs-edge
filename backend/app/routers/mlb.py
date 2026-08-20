@@ -529,7 +529,12 @@ async def build_contest_field(
     useful for chalk exposure and roughly where a build would land.
     """
     day = date or date_cls.today().isoformat()
-    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
+    # Always includes in-house data (regardless of projection_source) so
+    # optimizer.build_player_pool()'s ownership fallback has something
+    # real to use whenever RotoWire's own export doesn't cover a player
+    # -- otherwise that player silently floors to ~0% owned in the
+    # sampled field, which is closer to random than realistic.
+    slate = await mlb_slate.build_slate(day, include_inhouse=True)
     try:
         result = contest.build_contest_field(
             slate,
@@ -602,7 +607,11 @@ async def build_contest_entries(
     below), e.g. to hand off to an external simulator.
     """
     day = date or date_cls.today().isoformat()
-    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
+    # Always includes in-house data -- see build_contest_field's own
+    # comment above; the opponent field this batch gets ranked against
+    # needs a real ownership fallback wherever RotoWire's export doesn't
+    # cover a player.
+    slate = await mlb_slate.build_slate(day, include_inhouse=True)
     try:
         result = contest.build_contest_entries(
             slate,
@@ -684,7 +693,11 @@ async def build_contest_entries_simulated(
     """
     day = date or date_cls.today().isoformat()
     season = int(day[:4])
-    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
+    # Always includes in-house data -- see build_contest_field's own
+    # comment above; the simulated field this batch gets ranked against
+    # needs a real ownership fallback wherever RotoWire's export doesn't
+    # cover a player.
+    slate = await mlb_slate.build_slate(day, include_inhouse=True)
     try:
         result = await contest.build_contest_entries_simulated(
             slate,
@@ -828,7 +841,11 @@ async def simulate_dk_entries(
             detail="No DK entries file uploaded for that date yet -- upload one via POST /dk-entries first.",
         )
     season = int(day[:4])
-    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
+    # Always includes in-house data -- see build_contest_field's own
+    # comment above; the mirrored field this batch gets ranked against
+    # needs a real ownership fallback wherever RotoWire's export doesn't
+    # cover a player.
+    slate = await mlb_slate.build_slate(day, include_inhouse=True)
 
     parsed = dk_entries.parse_entries_csv(text)
     contest_row = next((c for c in dk_entries.contest_summary(parsed) if c["contest_id"] == contest_id), None)

@@ -404,6 +404,18 @@ def build_player_pool(
     `"inhouse"` (`projection.inhouse_fpts`, only present when the slate
     was built with `include_inhouse=True`).
 
+    Ownership falls back to the OTHER source when the chosen one is
+    missing it (e.g. RotoWire's export doesn't cover every player on a
+    slate) -- a real bug found by backtesting the contest simulator
+    against real GPP results: without this, any player RotoWire simply
+    didn't export gets treated as ~0% owned (`contest.py`'s ownership
+    floor), silently making the simulated opponent field construction
+    for those players closer to random than realistic, which is exactly
+    the kind of gap that inflates a skill-based entry's simulated edge.
+    FPTS has no such fallback -- a missing FPTS excludes the player from
+    the pool entirely (below), since there's no other signal to
+    optimize against.
+
     Each pool entry also carries `edge_composite` -- scoring.py's own
     matchup-quality multiplier, used only by variance.py's simulator to
     condition each player's Monte Carlo outcome on today's actual
@@ -416,6 +428,8 @@ def build_player_pool(
             f"Choose one of: {', '.join(PROJECTION_SOURCES)}."
         )
     fpts_key, ownership_key = PROJECTION_SOURCES[projection_source]
+    other_source = next(s for s in PROJECTION_SOURCES if s != projection_source)
+    _, fallback_ownership_key = PROJECTION_SOURCES[other_source]
 
     pool: list[dict[str, Any]] = []
     for game in slate.get("games") or []:
@@ -454,7 +468,7 @@ def build_player_pool(
                         "opponent": opp_abbrev,
                         "salary": salary_info["salary"],
                         "projected_fpts": proj_info[fpts_key],
-                        "ownership_pct": proj_info.get(ownership_key) or 0,
+                        "ownership_pct": proj_info.get(ownership_key) or proj_info.get(fallback_ownership_key) or 0,
                         "slots": slots,
                         # scoring.py's matchup-quality multiplier (1.0 =
                         # dead average), reused by variance.py's Monte
