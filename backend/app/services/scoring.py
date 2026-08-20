@@ -25,13 +25,14 @@ from typing import Any
 # Weights -- these must sum to 1.0
 # --------------------------------------------------------------------------
 WEIGHTS = {
-    "platoon": 0.19,          # how the hitter performs vs this pitcher's hand
+    "platoon": 0.17,          # how the hitter performs vs this pitcher's hand
     "team_total": 0.18,       # Vegas implied runs for his team
     "pitcher": 0.15,          # how vulnerable this pitcher is to this hand
     "contact_quality": 0.14,  # Statcast barrel/hard-hit/xwOBA vs league average
     "stolen_base": 0.08,      # his own season-long stolen-base rate vs league average
     "park": 0.09,             # ballpark HR factor for his handedness
-    "bullpen": 0.07,          # opposing team's relief corps, for the innings after the starter leaves
+    "bullpen": 0.05,          # opposing team's relief corps' SEASON-long quality (ERA vs league)
+    "bullpen_workload": 0.04, # opposing bullpen's RECENT usage (last 2 days) -- independent of season quality
     "weather": 0.06,          # temperature + wind
     "form": 0.03,             # last 15 games vs season baseline
     "home_road": 0.01,        # his own home/road split
@@ -292,6 +293,38 @@ def bullpen_component(
 
     value = round(max(0.8, min(1.2, era / league_avg_bullpen_era)), 3)
     return {"value": value, "era": era, "detail": f"{era} opposing bullpen ERA"}
+
+
+def bullpen_workload_component(
+    opp_workload: dict[str, Any] | None,
+    league_avg_outs: float | None,
+    window_days: int,
+) -> dict[str, Any]:
+    """
+    How worn down is the opposing bullpen from HEAVY RECENT usage --
+    deliberately separate from `bullpen_component`'s season-long ERA
+    read, which can't see a team that just leaned hard on relief the
+    last couple days (an extra-inning marathon, a rough start pulled
+    early, a bullpen game) independent of how the pen has pitched all
+    year. A tired arm is a real short-term edge even for an otherwise
+    strong bullpen having a fine season -- and conversely, a genuinely
+    bad bullpen that's happened to be rested the last two days isn't
+    made worse by this component (that's what `bullpen_component`
+    already covers). Hitter-only, same reasoning as `bullpen_component`:
+    a probable starter's own line isn't touched by either team's
+    bullpen usage.
+    """
+    outs = (opp_workload or {}).get("outs")
+    if not outs or not league_avg_outs:
+        return {"value": NEUTRAL, "detail": "no recent bullpen workload data"}
+
+    value = round(max(0.85, min(1.15, outs / league_avg_outs)), 3)
+    innings = round(outs / 3, 1)
+    return {
+        "value": value,
+        "outs": outs,
+        "detail": f"{innings} bullpen innings in the last {window_days} days",
+    }
 
 
 def contact_quality_component(

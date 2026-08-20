@@ -162,6 +162,17 @@ BULLPEN = {
     147: {"era": 3.00, "whip": 1.10, "k_per_9": 9.5, "ip": 210.0},   # Yankees -- strong
 }
 
+# Season-long quality (BULLPEN) and recent workload (BULLPEN_WORKLOAD)
+# are deliberately given OPPOSITE reads here: the Red Sox pen is bad all
+# year (5.20 ERA) but well-rested the last 2 days (6 outs); the Yankees
+# pen has a fine season (3.00 ERA) but got hammered recently (30 outs,
+# an extra-inning-game-sized workload) -- isolates the two signals from
+# each other, proving neither can substitute for the other.
+BULLPEN_WORKLOAD = {
+    111: {"outs": 6, "appearances": 2},    # Red Sox -- lightly used recently
+    147: {"outs": 30, "appearances": 9},   # Yankees -- heavily taxed recently
+}
+
 FAKE_LINES = [
     {
         "event_id": "evt1", "commence_time": f"{DAY}T23:10:00Z",
@@ -276,6 +287,10 @@ async def fake_bullpen(season):
     return BULLPEN
 
 
+async def fake_bullpen_workload(day):
+    return BULLPEN_WORKLOAD
+
+
 def fake_salary_load(day):
     return SALARIES
 
@@ -312,6 +327,7 @@ def patch() -> None:
     savant.get_hitter_batted_ball = fake_savant_hit
     savant.get_pitcher_batted_ball = fake_savant_pitch
     mlb.get_bullpen_stats = fake_bullpen
+    mlb.get_recent_bullpen_workload = fake_bullpen_workload
     salaries.load = fake_salary_load
     projections.load = fake_projection_load
     cache.get = fake_cache_get
@@ -509,6 +525,7 @@ async def main() -> int:
 
     twp_data = {
         "bullpen": {},
+        "bullpen_workload": {},
         "hit_season": twp_season,
         "hit_vl": {}, "hit_vr": {}, "hit_home": {}, "hit_away": {},
         "hit_recent": {},
@@ -520,6 +537,7 @@ async def main() -> int:
         "hitter_barrel": None, "hitter_hard_hit": None, "hitter_xwoba": None,
         "hitter_sb_per_pa": 0.02,
         "bullpen_era": 4.0,
+        "bullpen_workload_outs": 20.0,
     }
     twp_env = {
         "park": parks.get_park("LAD"), "roof_closed": True, "temp_fx": None, "wind_fx": None,
@@ -1756,12 +1774,40 @@ async def main() -> int:
           str(switch["edge"]["components"]["pitcher"].get("ops_against")))
 
     print("\nScoring internals")
-    check("all ten components present",
-          len(righty["edge"]["components"]) == 10,
+    check("all eleven components present",
+          len(righty["edge"]["components"]) == 11,
           str(sorted(righty["edge"]["components"])))
     check("weights sum to 1.0",
           abs(sum(scoring.WEIGHTS.values()) - 1.0) < 1e-9,
           str(sum(scoring.WEIGHTS.values())))
+
+    print("\nBullpen recent workload (independent of season-long ERA)")
+    # BULLPEN and BULLPEN_WORKLOAD are deliberately opposite for these two
+    # teams: the Red Sox pen (111) is bad ALL SEASON (5.20 ERA) but was
+    # barely used the last 2 days (6 outs); the Yankees pen (147) has a
+    # fine season (3.00 ERA) but got hammered recently (30 outs, an
+    # extra-inning-sized workload). Neither signal should be able to
+    # fake the other.
+    redsox = {h["name"]: h for h in game["home"]["hitters"]}
+    check("a Yankees hitter (facing the rested-but-bad-all-year Red Sox pen) "
+          "reads recent outs correctly, even though season ERA says something else",
+          righty["edge"]["components"]["bullpen_workload"]["outs"] == 6,
+          str(righty["edge"]["components"]["bullpen_workload"]))
+    check("that same well-rested bullpen scores below neutral on workload "
+          "(good matchup for the pitcher, bad for the hitter) despite its poor season ERA",
+          righty["edge"]["components"]["bullpen_workload"]["value"] < 1.0,
+          str(righty["edge"]["components"]["bullpen_workload"]))
+
+    redsox_hitter = next(iter(redsox.values()))
+    check("a Red Sox hitter (facing the heavily-taxed-but-good-all-year Yankees pen) "
+          "scores above neutral on workload (good matchup) despite the strong season ERA",
+          redsox_hitter["edge"]["components"]["bullpen_workload"]["value"] > 1.0,
+          str(redsox_hitter["edge"]["components"]["bullpen_workload"]))
+    check("the same Red Sox hitter scores BELOW neutral on season-long bullpen quality "
+          "-- proving workload and season ERA are genuinely independent signals, not "
+          "one masquerading as the other",
+          redsox_hitter["edge"]["components"]["bullpen"]["value"] < 1.0,
+          str(redsox_hitter["edge"]["components"]["bullpen"]))
 
     print("\nStolen-base component (DraftKings pays +5/SB, same as a double -- "
           "previously invisible to the model)")

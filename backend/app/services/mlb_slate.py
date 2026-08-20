@@ -104,6 +104,7 @@ async def build_slate(
         "savant_hit": savant.get_hitter_batted_ball(season),
         "savant_pitch": savant.get_pitcher_batted_ball(season),
         "bullpen": mlb.get_bullpen_stats(season),
+        "bullpen_workload": mlb.get_recent_bullpen_workload(day),
     }
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
     data: dict[str, Any] = {}
@@ -139,6 +140,7 @@ async def build_slate(
         # get_bullpen_stats() already filters to teams with a trustworthy
         # sample of relief innings, so no further gate here either.
         "bullpen_era": scoring.league_average(data["bullpen"], "era", 0, "era"),
+        "bullpen_workload_outs": scoring.league_average(data["bullpen_workload"], "outs", 0, "outs"),
     }
 
     # Salaries and projections are manual uploads, not a fetch -- see
@@ -649,6 +651,7 @@ async def _team_hitters(
         return []
 
     opp_bullpen = data["bullpen"].get(opponent_team_id)
+    opp_bullpen_workload = data["bullpen_workload"].get(opponent_team_id)
 
     # Prefer the confirmed lineup; fall back to the active roster.
     if confirmed:
@@ -722,6 +725,9 @@ async def _team_hitters(
                 season_stat, baselines["hitter_sb_per_pa"]
             ),
             "bullpen": scoring.bullpen_component(opp_bullpen, baselines["bullpen_era"]),
+            "bullpen_workload": scoring.bullpen_workload_component(
+                opp_bullpen_workload, baselines["bullpen_workload_outs"], mlb.BULLPEN_WORKLOAD_WINDOW_DAYS
+            ),
             "park": scoring.park_component(
                 hr_factor_for_hand(park, bats), park["runs"]
             ),
