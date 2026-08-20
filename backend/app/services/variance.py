@@ -33,6 +33,7 @@ games, never a fabricated number.
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 from typing import Any
 
@@ -193,6 +194,24 @@ TEAM_MULTIPLIER_STD = 0.28
 TEAM_MULTIPLIER_MIN = 0.25
 TEAM_MULTIPLIER_MAX = 2.25
 
+# BRING-BACK CORRELATION: two teams playing EACH OTHER in the same game
+# don't have independent days -- a real shootout (weather, park, a soft
+# pitching matchup on both sides) tends to lift both offenses together,
+# which is exactly why rostering 1-2 hitters from the opposing team
+# ("bring-back") alongside a main stack is a real GPP construction
+# technique. `simulate_batch()` models this as a shared per-trial game
+# factor blended with each team's own independent residual, weighted so
+# the MARGINAL distribution of any single team's multiplier (mean, STD,
+# clamped bounds) is exactly unchanged from the uncorrelated case --
+# only the correlation BETWEEN two same-game teams' multipliers moves,
+# and only when both sides of that game actually appear in the same
+# simulate_batch() call. Approximate and clearly labeled, like every
+# other constant in this module -- a real bring-back correlation is
+# genuine but partial (each team's day still depends heavily on its own,
+# team-specific pitching matchup), nowhere near the near-total
+# correlation within a single team's own stack.
+GAME_CORRELATION = 0.35
+
 # How much each signal, one unit away from its own neutral value (1.0),
 # shifts the target percentile of a player's own outcome pool. All
 # three are independently tunable and, like TEAM_MULTIPLIER_STD, were
@@ -346,6 +365,15 @@ def simulate_batch(
     team's multiplier (a start is a mostly-independent event from the
     team's own hitting day), only react to their opponent's.
 
+    Two DIFFERENT teams playing each other in the same game also aren't
+    fully independent of one another -- see GAME_CORRELATION above --
+    whenever both sides of that matchup happen to appear somewhere in
+    this same batch (a stack plus a bring-back play, or just two
+    entries in the same field that happen to roster opposite sides of
+    one game). A team with no known opponent in this batch, or whose
+    real opponent doesn't itself appear anywhere in `entries`, gets an
+    independent day exactly as before this existed.
+
     `player_pools` must have an entry (from `player_outcome_pool()`) for
     every player id appearing anywhere in `entries`.
     """
@@ -380,14 +408,40 @@ def simulate_batch(
         {info["team"] for info in unique_players.values() if not info["is_pitcher"] and info.get("team")}
         | {info["opponent"] for info in unique_players.values() if info["is_pitcher"] and info.get("opponent")}
     )
-    team_multipliers = {
-        team: np.clip(
-            rng.normal(TEAM_MULTIPLIER_MEAN, TEAM_MULTIPLIER_STD, size=num_trials),
-            TEAM_MULTIPLIER_MIN,
-            TEAM_MULTIPLIER_MAX,
+    # Which team each team is actually facing this batch, from either
+    # side's own (team, opponent) pair -- whichever players happen to
+    # carry it. Only used to find genuine same-game pairs among
+    # `relevant_teams`; a team with no known opponent (or whose opponent
+    # isn't itself in this batch) just gets an independent day, exactly
+    # as before this feature existed.
+    team_to_opponent: dict[str, str] = {}
+    for info in unique_players.values():
+        team, opponent = info.get("team"), info.get("opponent")
+        if team and opponent:
+            team_to_opponent[team] = opponent
+
+    game_factors: dict[frozenset, np.ndarray] = {}
+
+    def _shared_game_factor(a: str, b: str) -> np.ndarray:
+        key = frozenset((a, b))
+        if key not in game_factors:
+            game_factors[key] = rng.normal(0.0, TEAM_MULTIPLIER_STD, size=num_trials)
+        return game_factors[key]
+
+    game_weight = math.sqrt(GAME_CORRELATION)
+    indep_weight = math.sqrt(1.0 - GAME_CORRELATION)
+
+    team_multipliers = {}
+    for team in relevant_teams:
+        opponent = team_to_opponent.get(team)
+        independent = rng.normal(0.0, TEAM_MULTIPLIER_STD, size=num_trials)
+        if opponent and opponent in relevant_teams and team_to_opponent.get(opponent) == team:
+            residual = game_weight * _shared_game_factor(team, opponent) + indep_weight * independent
+        else:
+            residual = independent
+        team_multipliers[team] = np.clip(
+            TEAM_MULTIPLIER_MEAN + residual, TEAM_MULTIPLIER_MIN, TEAM_MULTIPLIER_MAX
         )
-        for team in relevant_teams
-    }
 
     player_ids = list(unique_players)
     player_index = {pid: i for i, pid in enumerate(player_ids)}
