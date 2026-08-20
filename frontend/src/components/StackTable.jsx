@@ -92,6 +92,10 @@ export function StackTable({ slate }) {
         // Every hitter on this team faces the same opposing bullpen, so
         // any one of them carries the number.
         bullpenEra: (t.hitters || [])[0]?.edge?.components?.bullpen?.era ?? null,
+        // Recent workload (last 2 days) is a separate signal from season
+        // ERA above -- a fine bullpen can still be gassed from an
+        // extra-inning game, and a bad one can happen to be rested.
+        bullpenRecentOuts: (t.hitters || [])[0]?.edge?.components?.bullpen_workload?.outs ?? null,
         topBats: (t.hitters || []).slice(0, 4),
       })
     }
@@ -198,6 +202,12 @@ export function StackTable({ slate }) {
                   <div className="sub-line">
                     {r.bullpenEra.toFixed(2)} bullpen ERA
                     {r.bullpenEra >= 4.5 && <span className="badge risk" style={{ marginLeft: 4 }}>shaky pen</span>}
+                  </div>
+                )}
+                {r.bullpenRecentOuts != null && (
+                  <div className="sub-line dim" style={{ fontSize: 12 }}>
+                    {(r.bullpenRecentOuts / 3).toFixed(1)} pen IP last 2 days
+                    {r.bullpenRecentOuts >= 30 && <span className="badge risk" style={{ marginLeft: 4 }}>taxed pen</span>}
                   </div>
                 )}
               </td>

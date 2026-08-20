@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date as date_cls
+from datetime import timedelta
 from typing import Any
 
 from app.cache import cached
@@ -481,6 +482,70 @@ async def get_bullpen_stats(season: int) -> dict[int, dict[str, Any]]:
             "ip": round(ip, 1),
         }
     return out
+
+
+# How many calendar days back (not counting the slate date itself) count
+# as "recent" for bullpen fatigue -- an extra-inning marathon or a
+# bullpen game yesterday is a real short-term edge even for a bullpen
+# having a fine season; a game from a week ago no longer is.
+BULLPEN_WORKLOAD_WINDOW_DAYS = 2
+
+
+async def get_recent_bullpen_workload(day: str) -> dict[int, dict[str, Any]]:
+    """
+    Each team's bullpen outs/appearances over the
+    BULLPEN_WORKLOAD_WINDOW_DAYS calendar days immediately before `day`
+    -- deliberately separate from get_bullpen_stats()'s season-long ERA
+    read, which can't see a team that just leaned hard on relief the
+    last couple days (an extra-inning game, a rough start pulled early,
+    a bullpen game) independent of how the pen has pitched all year.
+
+    Same fetch-and-filter shape as get_bullpen_stats() -- the same
+    /stats leaders endpoint supports `stats=byDateRange` with an
+    explicit start/end window instead of `stats=season`, so this reuses
+    the identical "everyone with zero starts is a reliever, sum by
+    team" aggregation.
+    """
+    settings = get_settings()
+    end = date_cls.fromisoformat(day) - timedelta(days=1)
+    start = end - timedelta(days=BULLPEN_WORKLOAD_WINDOW_DAYS - 1)
+    start_str, end_str = start.isoformat(), end.isoformat()
+
+    async def _load() -> Any:
+        return await get_json(
+            f"{BASE}/stats",
+            params={
+                "stats": "byDateRange",
+                "group": "pitching",
+                "season": int(day[:4]),
+                "sportId": SPORT_ID,
+                "playerPool": "All",
+                "limit": 2000,
+                "gameType": "R",
+                "startDate": start_str,
+                "endDate": end_str,
+            },
+            source="MLB Stats API",
+        )
+
+    payload = await cached(
+        f"mlb:bullpen_workload:{start_str}:{end_str}", settings.ttl_stats, _load
+    )
+
+    totals: dict[int, dict[str, int]] = {}
+    for block in payload.get("stats") or []:
+        for split in block.get("splits") or []:
+            stat = split.get("stat") or {}
+            if _i(stat.get("gamesStarted")) > 0:
+                continue  # anyone who has started a game isn't a reliever
+            team_id = (split.get("team") or {}).get("id")
+            if not team_id:
+                continue
+            t = totals.setdefault(team_id, {"outs": 0, "appearances": 0})
+            t["outs"] += _i(stat.get("outs"))
+            t["appearances"] += _i(stat.get("gamesPitched"))
+
+    return totals
 
 
 # --------------------------------------------------------------------------
