@@ -2907,6 +2907,54 @@ async def main() -> int:
     check("player_outcome_pool is cached -- calling again returns the same pool, ignoring a new seed",
           first_call == second_call, str((len(first_call), len(second_call))))
 
+    print("\nas_of_date backtesting cutoff (variance.py)")
+
+    # 60 games before the cutoff (well above MIN_GAMES_FULL_TRUST, DK
+    # points in {8,10,12} same as consistent_games above) plus 10 games
+    # ON/AFTER the cutoff with a deliberately unmistakable DK value (50,
+    # rbi=25) -- as_of_date's whole job is making sure a backtest for a
+    # real past date can never see games that hadn't happened yet.
+    asof_dates_before = [f"2099-04-{(i % 28) + 1:02d}" for i in range(60)]
+    asof_before_games = [
+        {**_rbi_game(r), "date": d} for r, d in zip([5, 4, 6, 5] * 15, asof_dates_before)
+    ]
+    asof_future_games = [
+        {**_rbi_game(25), "date": f"2099-08-{(i % 28) + 1:02d}"} for i in range(10)
+    ]
+    variance_game_logs[90006] = asof_before_games + asof_future_games
+
+    # Order matters here: check the shared-pool-contribution behavior
+    # BEFORE ever making a plain (non-as_of_date) call for this player,
+    # since that call legitimately DOES contribute -- calling it first
+    # would pollute the "before" baseline with the very value being
+    # checked for.
+    pool_before = set(variance.position_pool("OF", VARIANCE_SEASON))
+    asof_pool = await variance.player_outcome_pool(
+        90006, "OF", VARIANCE_SEASON, seed=1, as_of_date="2099-08-01"
+    )
+    check("as_of_date excludes every game on/after the cutoff -- the pool draws only from the "
+          "pre-cutoff 8/10/12 games, never the future 50.0 outlier",
+          set(asof_pool) <= {8.0, 10.0, 12.0}, str(sorted(set(asof_pool))))
+
+    pool_after_asof_call = set(variance.position_pool("OF", VARIANCE_SEASON))
+    check("an as_of_date call does NOT contribute its games to the shared same-position pool -- "
+          "a backtest re-deriving a past snapshot shouldn't mutate live shared state other "
+          "present-day requests draw from",
+          50.0 not in pool_after_asof_call, str(sorted(pool_after_asof_call - pool_before)))
+
+    full_pool_90006 = await variance.player_outcome_pool(90006, "OF", VARIANCE_SEASON, seed=1)
+    check("without as_of_date (the live app's real behavior), the same player's pool DOES "
+          "include the later games -- proof the cutoff isn't silently applied everywhere",
+          50.0 in full_pool_90006, str(sorted(set(full_pool_90006))))
+    check("as_of_date's cache key is scoped separately from the plain call -- the two pools "
+          "above didn't collide with (or overwrite) each other",
+          set(asof_pool) != set(full_pool_90006), "")
+
+    pool_after_full_call = set(variance.position_pool("OF", VARIANCE_SEASON))
+    check("a plain (no as_of_date) call still DOES contribute to the shared same-position pool, "
+          "same as every other real live request",
+          50.0 in pool_after_full_call, "")
+
     print("\nTeam correlation: stacked lineups show higher variance than unstacked (variance.py)")
 
     import random as random_module
