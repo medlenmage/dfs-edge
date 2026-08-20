@@ -3541,7 +3541,23 @@ async def main() -> int:
           {9720, 9721, 9722} <= chalk_ids and not ({9723, 9724} & chalk_ids),
           str(sorted(chalk_ids)))
 
-    rake_field = contest.generate_field(mul_slate, 300, seed=707)
+    # sample_size=250 is a deliberate exact divisor of both field_size
+    # values used below (500 and 100,000) -- when field_size isn't an
+    # exact multiple of sample_size, block sizes vary by +-1 real rank,
+    # and a plain unweighted average of each sampled lineup's own
+    # roi_pct no longer equals the true field-wide average (a lineup
+    # whose block represents 2 real ranks needs to count twice as much
+    # as one representing only 1, especially right where the curve is
+    # steepest -- confirmed directly: with a first_place_pct spike in
+    # play, an unweighted average of a 300-lineup sample against a
+    # 500-entry field read -8.1% instead of the true -15.0%, purely
+    # from that block-size-weighting gap, not a real bug). Each
+    # individual sampled lineup's OWN roi_pct stays a perfectly valid,
+    # unbiased estimate regardless -- this is purely about how to
+    # aggregate many of them into one honest field-wide average for a
+    # test, so picking an exact divisor sidesteps the whole issue
+    # rather than needing a size-weighted mean here.
+    rake_field = contest.generate_field(mul_slate, 250, seed=707)
     rake_contest = dict(contest.CONTEST_TYPES["gpp_small"])
 
     # The field ranked purely against itself (self-play, same machinery
@@ -3564,17 +3580,18 @@ async def main() -> int:
           f"field avg roi_pct={round(field_avg_roi, 1)}, expected near {-contest.RAKE_PCT * 100:.1f}")
 
     # Regression guard for the exact bug this whole sanity check
-    # actually found: a 300-lineup sample projected onto a much bigger
-    # real field_size (a routine ratio for the gpp_large/gpp_milly
-    # presets, which default to sampling far fewer lineups than their
-    # field_size) used to read a single point off the payout curve for
-    # each sampled lineup's projected rank -- fine at a ~1x compression
-    # ratio, but the curve is sharply top-heavy, so at high compression
-    # the point value badly overstates the true block-average payout
-    # (confirmed against real live slate data: +34% ROI at a 21x ratio,
-    # +264% at 209x, both far from the correct ~-15%). Same 300-lineup
-    # sample as above, just re-evaluated against a 100,000-entry
-    # field_size (a 333x compression ratio) instead of 500.
+    # actually found: a small lineup sample projected onto a much
+    # bigger real field_size (a routine ratio for the gpp_large/
+    # gpp_milly presets, which default to sampling far fewer lineups
+    # than their field_size) used to read a single point off the
+    # payout curve for each sampled lineup's projected rank -- fine at
+    # a ~1x compression ratio, but the curve is sharply top-heavy, so
+    # at high compression the point value badly overstates the true
+    # block-average payout (confirmed against real live slate data:
+    # +34% ROI at a 21x ratio, +264% at 209x, both far from the correct
+    # ~-15%). Same 250-lineup sample as above, just re-evaluated
+    # against a 100,000-entry field_size (a 400x compression ratio,
+    # still an exact divisor of 250) instead of 500.
     high_compression_contest = dict(rake_contest)
     high_compression_contest["field_size"] = 100_000
     high_compression_mirrored = await contest.evaluate_field_mirrored(
