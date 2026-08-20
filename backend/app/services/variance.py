@@ -148,6 +148,22 @@ async def player_outcome_pool(
     )
 
 
+def ceiling_from_pool(pool: list[float], percentile: float = 0.9) -> float:
+    """
+    The `percentile`-th percentile of a player's own outcome pool -- a
+    real, data-driven ceiling (not a guess or a flat multiple of the
+    mean), reusing the exact same bootstrap resampling pool the Monte
+    Carlo simulator already draws from. The "upside" half of a leverage
+    score (ceiling - ownership%) -- see inhouse_projections.py's
+    player_ceilings().
+    """
+    if not pool:
+        return 0.0
+    ordered = sorted(pool)
+    idx = round(percentile * (len(ordered) - 1))
+    return ordered[idx]
+
+
 # --------------------------------------------------------------------------
 # Team correlation (Phase 3) + matchup conditioning and pitcher/opponent
 # anti-correlation (Phase 6)

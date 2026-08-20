@@ -212,6 +212,39 @@ async def inhouse_fpts_batch(players: list[dict[str, Any]], season: int) -> dict
     return result
 
 
+# Percentile of a player's own outcome pool used as his "ceiling" for
+# leverage -- 90th percentile is a real, not-too-extreme upside read
+# (the true max of a real season's game log is often one huge outlier
+# game that overstates realistic tournament-winning upside).
+_CEILING_PERCENTILE = 0.9
+
+
+async def player_ceilings(players: list[dict[str, Any]], season: int) -> dict[int, float]:
+    """
+    A real, data-driven ceiling for every unique player id in `players`
+    -- the 90th percentile of their own bootstrap outcome pool
+    (variance.py's player_outcome_pool(), the exact same pool the Monte
+    Carlo simulator draws from). This is the "upside" half of a
+    leverage score (ceiling - ownership%) -- see mlb_slate.py's
+    _attach_inhouse_projections() for where the two get combined.
+
+    Reuses the same real game-log fetch baseline_dk_points() already
+    made for this same batch of players (both go through
+    clients/mlb.get_player_game_log()'s cache), so this costs one extra
+    cheap cached lookup per player, not a second real fetch.
+    """
+    unique = {p["id"]: p for p in players if p.get("id")}
+    ids = list(unique.values())
+    pools = await asyncio.gather(
+        *(variance.player_outcome_pool(p["id"], p["position"], season) for p in ids)
+    )
+    return {
+        p["id"]: variance.ceiling_from_pool(pool, _CEILING_PERCENTILE)
+        for p, pool in zip(ids, pools)
+        if pool
+    }
+
+
 # --------------------------------------------------------------------------
 # In-house ownership% v1 (Phase 3)
 # --------------------------------------------------------------------------

@@ -220,7 +220,10 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
     RotoWire projection is already there (or None), then
     projection["inhouse_ownership_pct"] on top of that wherever a DK
     salary is also loaded (ownership is meaningless without a real
-    salary-capped contest to be owned in). Mutates in place.
+    salary-capped contest to be owned in), then
+    projection["inhouse_ceiling"]/["leverage_score"] (ceiling minus
+    ownership -- real upside the field is under-rostering) wherever
+    both a ceiling and an ownership number exist. Mutates in place.
 
     A probable pitcher only gets an "edge" key when _pitcher_edge()
     could actually compute one (missing season stats, etc. skip it) --
@@ -282,6 +285,16 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                     )
 
     ownership = inhouse_projections.project_ownership(ownership_pool)
+    # Real, data-driven ceilings for the same batch -- the "upside" half
+    # of a leverage score. Computed for everyone with an edge/composite
+    # (not just the ones that made it into ownership_pool), so leverage
+    # can still show up even before a DK salary is loaded.
+    ceilings = await inhouse_projections.player_ceilings(all_players, season)
+
+    def _leverage(ceiling: float | None, own_pct: float | None) -> float | None:
+        if ceiling is None or own_pct is None:
+            return None
+        return round(ceiling - own_pct, 2)
 
     for g in out_games:
         for side in ("home", "away"):
@@ -292,6 +305,14 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                 own_pct = ownership.get(hitter["id"])
                 if own_pct is not None:
                     hitter["projection"] = {**(hitter["projection"] or {}), "inhouse_ownership_pct": own_pct}
+                ceiling = ceilings.get(hitter["id"])
+                leverage = _leverage(ceiling, own_pct)
+                if leverage is not None:
+                    hitter["projection"] = {
+                        **(hitter["projection"] or {}),
+                        "inhouse_ceiling": ceiling,
+                        "leverage_score": leverage,
+                    }
             pitcher = g[side]["probable_pitcher"]
             if pitcher and pitcher.get("edge"):
                 value = inhouse.get(pitcher["id"])
@@ -300,6 +321,14 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                 own_pct = ownership.get(pitcher["id"])
                 if own_pct is not None:
                     pitcher["projection"] = {**(pitcher["projection"] or {}), "inhouse_ownership_pct": own_pct}
+                ceiling = ceilings.get(pitcher["id"])
+                leverage = _leverage(ceiling, own_pct)
+                if leverage is not None:
+                    pitcher["projection"] = {
+                        **(pitcher["projection"] or {}),
+                        "inhouse_ceiling": ceiling,
+                        "leverage_score": leverage,
+                    }
 
 
 # --------------------------------------------------------------------------
