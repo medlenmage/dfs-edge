@@ -70,9 +70,18 @@ async def main() -> int:
     print(f"{len(rows)} archived player results across {len(by_date)} real dates: "
           f"{', '.join(sorted(by_date))}\n")
 
-    percentiles: list[float] = []
-    hitter_percentiles: list[float] = []
-    pitcher_percentiles: list[float] = []
+    # Two parallel passes: `current` reproduces exactly what the LIVE
+    # app does today (a player's full season game log, no date
+    # awareness at all -- the correct behavior for a real slate, since
+    # "today" has no future games to leak); `asof` additionally cuts
+    # off any game on or after the archived contest's own date, closing
+    # the look-ahead gap a naive backtest would otherwise have (every
+    # one of these archived contests is now in the past relative to
+    # "today," so the CURRENT pass's season-long pool necessarily
+    # includes games that hadn't happened yet as of that real contest).
+    percentiles: dict[str, list[float]] = {"current": [], "asof": []}
+    hitter_percentiles: dict[str, list[float]] = {"current": [], "asof": []}
+    pitcher_percentiles: dict[str, list[float]] = {"current": [], "asof": []}
     unmatched = 0
     no_pool = 0
 
@@ -93,23 +102,27 @@ async def main() -> int:
                 unmatched += 1
                 continue
             position = r["position"] or "OF"
-            pool = await variance.player_outcome_pool(pid, position, season)
-            if not pool:
+            current_pool = await variance.player_outcome_pool(pid, position, season)
+            asof_pool = await variance.player_outcome_pool(pid, position, season, as_of_date=day)
+            if not current_pool or not asof_pool:
                 no_pool += 1
                 continue
-            pct = contest_results.outcome_percentile(float(r["actual_fpts"]), pool)
-            percentiles.append(pct)
-            if position == "P":
-                pitcher_percentiles.append(pct)
-            else:
-                hitter_percentiles.append(pct)
+            for label, pool in (("current", current_pool), ("asof", asof_pool)):
+                pct = contest_results.outcome_percentile(float(r["actual_fpts"]), pool)
+                percentiles[label].append(pct)
+                (pitcher_percentiles if position == "P" else hitter_percentiles)[label].append(pct)
 
-    print(f"\nMatched {len(percentiles)} of {len(rows)} archived players to a real outcome pool "
+    n_matched = len(percentiles["current"])
+    print(f"\nMatched {n_matched} of {len(rows)} archived players to a real outcome pool "
           f"({unmatched} name-match misses, {no_pool} with no pool data).\n")
 
-    print("Overall calibration:", contest_results.calibration_summary(percentiles))
-    print("Hitters only:       ", contest_results.calibration_summary(hitter_percentiles))
-    print("Pitchers only:      ", contest_results.calibration_summary(pitcher_percentiles))
+    for label, desc in [("current", "CURRENT (full season, what the live app actually does)"),
+                         ("asof", "AS-OF (games before the contest date only, no look-ahead)")]:
+        print(f"-- {desc} --")
+        print("  Overall: ", contest_results.calibration_summary(percentiles[label]))
+        print("  Hitters: ", contest_results.calibration_summary(hitter_percentiles[label]))
+        print("  Pitchers:", contest_results.calibration_summary(pitcher_percentiles[label]))
+        print()
     return 0
 
 

@@ -106,7 +106,7 @@ def position_pool(position: str, season: int) -> list[float]:
 
 
 async def player_outcome_pool(
-    player_id: int, position: str, season: int, *, seed: int | None = None
+    player_id: int, position: str, season: int, *, seed: int | None = None, as_of_date: str | None = None
 ) -> list[float]:
     """
     A POOL_SIZE-length bootstrap resampling pool of DK-point outcomes
@@ -114,6 +114,18 @@ async def player_outcome_pool(
     simulate one game's result for them. Blends in the shared
     same-position pool for thin samples; a player with a full season's
     worth of games draws almost entirely from his own real history.
+
+    `as_of_date` (an ISO date string), if given, excludes any game on
+    or after it -- for backtesting only: projecting a real historical
+    date's outcomes from the season's FULL game log (the normal,
+    correct behavior for a live request) would let games that hadn't
+    happened yet leak into the "prediction," which is exactly the kind
+    of look-ahead bias that can make a backtest look better calibrated
+    than the live model actually is. Skips contributing to the shared
+    same-position pool when set, too -- a backtest re-deriving a past
+    snapshot shouldn't mutate the live shared pool other real (present-
+    day) requests draw from. Cached under a date-scoped key so this
+    never collides with (or gets served) a live, unfiltered pool.
     """
     settings = get_settings()
 
@@ -121,8 +133,11 @@ async def player_outcome_pool(
         kind = player_kind(position)
         group = "pitching" if kind == "pitcher" else "hitting"
         game_log = await mlb.get_player_game_log(player_id, season, group=group)
+        if as_of_date is not None:
+            game_log = [g for g in game_log if (g.get("date") or "") < as_of_date]
         own = own_games(game_log, kind)
-        contribute_to_position_pool(position, season, own)
+        if as_of_date is None:
+            contribute_to_position_pool(position, season, own)
 
         if not own:
             # No games of his own yet this season (hasn't debuted, or
@@ -143,9 +158,10 @@ async def player_outcome_pool(
             for _ in range(POOL_SIZE)
         ]
 
-    return await cache.cached(
-        f"variance:pool:{player_id}:{season}:{position}", settings.ttl_game_logs, _load
-    )
+    cache_key = f"variance:pool:{player_id}:{season}:{position}"
+    if as_of_date is not None:
+        cache_key += f":asof{as_of_date}"
+    return await cache.cached(cache_key, settings.ttl_game_logs, _load)
 
 
 def ceiling_from_pool(pool: list[float], percentile: float = 0.9) -> float:
