@@ -143,6 +143,7 @@ CONTEST_TYPES: dict[str, dict[str, Any]] = {
         "entry_fee": 10.0,
         "payout_pct": 0.20,
         "shape": "top_heavy",
+        "first_place_pct": 15.0,
     },
     "gpp_large": {
         "label": "Large-field GPP",
@@ -150,6 +151,7 @@ CONTEST_TYPES: dict[str, dict[str, Any]] = {
         "entry_fee": 5.0,
         "payout_pct": 0.18,
         "shape": "top_heavy",
+        "first_place_pct": 15.0,
     },
     "gpp_milly": {
         "label": "Massive-field GPP (millionaire-maker style)",
@@ -157,8 +159,20 @@ CONTEST_TYPES: dict[str, dict[str, Any]] = {
         "entry_fee": 20.0,
         "payout_pct": 0.15,
         "shape": "top_heavy",
+        "first_place_pct": 15.0,
     },
 }
+# 1st place's real share of the prize pool in a genuine large-field GPP
+# (10-20% per published real DK payout distributions) is far more
+# concentrated than the smooth `1/(rank+1)^0.7` power-law curve alone
+# produces (confirmed: gpp_large's curve without an override put 1st
+# at just 3.5% of the pool) -- the curve is otherwise a close match to
+# real payout norms at every other checkpoint (top 0.1%/1%/5%/10%/the
+# min-cash line all land within the published real ranges), so only
+# the very top needed a real anchor. 15.0 is the midpoint of that
+# published 10-20% range, applied uniformly since the reference isn't
+# field-size-specific and the curve's SHAPE (not the field size) is
+# what determines every other rank's payout as a fraction of the pool.
 RAKE_PCT = 0.15
 TOP_HEAVY_EXPONENT = 0.7
 
@@ -1011,7 +1025,7 @@ def evaluate_field(
     entry_fee = contest["entry_fee"]
     paid_count = max(1, round(field_size * contest["payout_pct"]))
     prize_pool = round(field_size * entry_fee * (1 - RAKE_PCT), 2)
-    payouts = _payout_curve(paid_count, prize_pool, contest["shape"])
+    payouts = _custom_payout_curve(paid_count, prize_pool, contest["shape"], contest.get("first_place_pct"))
 
     field_points = [lu["projected_points"] for lu in field]
     sample_size = len(field_points)
@@ -1077,7 +1091,7 @@ def _evaluate_batch_against_field(
     entry_fee = contest["entry_fee"]
     paid_count = max(1, round(field_size * contest["payout_pct"]))
     prize_pool = round(field_size * entry_fee * (1 - RAKE_PCT), 2)
-    payouts = _payout_curve(paid_count, prize_pool, contest["shape"])
+    payouts = _custom_payout_curve(paid_count, prize_pool, contest["shape"], contest.get("first_place_pct"))
 
     field_points = [lu["projected_points"] for lu in field]
     sample_size = len(field_points)
@@ -1164,7 +1178,12 @@ async def evaluate_batch_simulated(
     entry_fee = contest["entry_fee"]
     paid_count = max(1, round(field_size * contest["payout_pct"]))
     prize_pool = contest.get("prize_pool") or round(field_size * entry_fee * (1 - RAKE_PCT), 2)
-    payouts = np.array(_custom_payout_curve(paid_count, prize_pool, contest["shape"], first_place_pct))
+    payouts = np.array(
+        _custom_payout_curve(
+            paid_count, prize_pool, contest["shape"],
+            first_place_pct if first_place_pct is not None else contest.get("first_place_pct"),
+        )
+    )
     full_payouts = np.zeros(field_size)
     full_payouts[:paid_count] = payouts
 
@@ -1731,7 +1750,12 @@ async def evaluate_field_mirrored(
         )
     paid_count = max(1, round(field_size * contest["payout_pct"]))
     prize_pool = contest.get("prize_pool") or round(field_size * entry_fee * (1 - RAKE_PCT), 2)
-    payouts = np.array(_custom_payout_curve(paid_count, prize_pool, contest["shape"], first_place_pct))
+    payouts = np.array(
+        _custom_payout_curve(
+            paid_count, prize_pool, contest["shape"],
+            first_place_pct if first_place_pct is not None else contest.get("first_place_pct"),
+        )
+    )
     full_payouts = np.zeros(field_size)
     full_payouts[:paid_count] = payouts
 
