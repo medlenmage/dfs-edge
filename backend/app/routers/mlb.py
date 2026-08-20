@@ -484,6 +484,39 @@ async def generate_lineups(
     return {"date": day, **result}
 
 
+@router.post("/late-swap")
+async def late_swap(
+    date: str | None = Body(None, embed=True),
+    picks: list[dict[str, Any]] = Body(
+        ...,
+        embed=True,
+        description=(
+            "Exactly 10 entries in fixed roster order (P, P, C, 1B, 2B, 3B, SS, OF, OF, OF), "
+            "each {'player_id': int, 'game_pk': int} -- game_pk from the SAME slate response "
+            "the lineup was originally built from"
+        ),
+    ),
+    projection_source: str = Body(
+        "rotowire", embed=True, description="Which FPTS/ownership numbers to fill open slots with: 'rotowire' or 'inhouse'"
+    ),
+) -> dict[str, Any]:
+    """
+    Re-optimize an already-built lineup's still-open slots (games that
+    haven't started yet) -- exactly what real DK late swap allows.
+    Players whose games have already locked stay exactly as they were;
+    open slots get refilled from the CURRENT slate, so a scratch or a
+    last-minute lineup change gets picked up without rebuilding the
+    whole lineup from scratch.
+    """
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(day, include_inhouse=(projection_source == "inhouse"))
+    try:
+        result = optimizer.late_swap(slate, picks, projection_source=projection_source)
+    except optimizer.OptimizerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"date": day, **result}
+
+
 @router.get("/contest-types")
 async def get_contest_types() -> dict[str, Any]:
     """Named contest presets the field generator can build against."""

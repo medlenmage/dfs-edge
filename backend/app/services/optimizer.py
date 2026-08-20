@@ -33,6 +33,7 @@ joint MILP.
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import pulp
@@ -466,6 +467,13 @@ def build_player_pool(
                         "name": p.get("name"),
                         "team": abbrev,
                         "opponent": opp_abbrev,
+                        # Which real game this player belongs to -- late_swap()
+                        # needs it to know when a rostered player's game
+                        # locks, and it's cheap to carry through everywhere
+                        # else too (lineup exports, the frontend) rather than
+                        # making late_swap the only consumer that needs a
+                        # separate slate lookup.
+                        "game_pk": game.get("game_pk"),
                         "salary": salary_info["salary"],
                         "projected_fpts": proj_info[fpts_key],
                         "ownership_pct": proj_info.get(ownership_key) or proj_info.get(fallback_ownership_key) or 0,
@@ -611,6 +619,7 @@ def _solve_one(
                         "id": p["id"],
                         "name": p["name"],
                         "team": p["team"],
+                        "game_pk": p["game_pk"],
                         "salary": p["salary"],
                         "projected_fpts": p["projected_fpts"],
                         "ownership_pct": p["ownership_pct"],
@@ -1017,3 +1026,93 @@ def generate_lineups(
         lu["duplicate_count"] = signature_counts[frozenset(ids)]
 
     return {"lineups": lineups, "exposure": exposure, "team_exposure": team_exposure}
+
+
+def _flatten_slots(slots: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Every player across every slot, in SLOT_TYPES order -- doesn't
+    import lineup_export.players_in_slot_order() to avoid a circular
+    import (that module imports SLOT_REQUIREMENTS from this one)."""
+    out: list[dict[str, Any]] = []
+    for slot in SLOT_TYPES:
+        out.extend(slots.get(slot, []))
+    return out
+
+
+def late_swap(
+    slate: dict[str, Any],
+    picks: list[dict[str, Any]],
+    *,
+    projection_source: str = "rotowire",
+) -> dict[str, Any]:
+    """
+    Given an already-built 10-player lineup and the CURRENT slate,
+    re-optimize just the slots whose game hasn't locked yet -- exactly
+    what real DK "late swap" allows, no more. A player whose game has
+    already started stays exactly as he was (a real DK entry can't be
+    touched there either, whether he's playing great or just got
+    scratched); a player in a still-open game is fair game to replace,
+    whether he's confirmed scratched, a last-minute lineup change, or
+    just a worse matchup than when the lineup was first built.
+
+    `picks` is exactly ROSTER_SIZE entries in fixed roster order (P, P,
+    C, 1B, 2B, 3B, SS, OF, OF, OF), each `{"player_id": int, "game_pk":
+    int}` -- game_pk comes from the SAME slate response the original
+    lineup was built from, not re-derived from the player id, since a
+    genuinely scratched player can vanish from the current roster
+    listing entirely (his team is still playing; the CURRENT slate is
+    the source of truth for when that game starts, not for whether this
+    specific player is still on it).
+
+    A pick whose game_pk isn't found anywhere in the current slate
+    (postponement, a bad id, ...) is conservatively treated as locked
+    -- there's no safe way to confirm it's actually still swappable, and
+    silently touching a player DK might already consider locked would
+    be worse than being over-cautious.
+    """
+    if len(picks) != ROSTER_SIZE:
+        raise OptimizerError(f"late_swap needs exactly {ROSTER_SIZE} picks, got {len(picks)}.")
+
+    game_start_by_pk: dict[int, str] = {
+        g.get("game_pk"): g.get("game_time_utc") for g in slate.get("games") or []
+    }
+    now = datetime.now(timezone.utc)
+
+    locked_ids: list[int] = []
+    swappable = False
+    unresolved_ids: list[int] = []
+    for pick in picks:
+        pid = pick["player_id"]
+        start_raw = game_start_by_pk.get(pick.get("game_pk"))
+        if start_raw is None:
+            unresolved_ids.append(pid)
+            locked_ids.append(pid)
+            continue
+        start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        if start <= now:
+            locked_ids.append(pid)
+        else:
+            swappable = True
+
+    if not swappable:
+        return {
+            "changed": False,
+            "message": "Every player's game has already locked -- nothing left to swap.",
+            "locked_player_ids": locked_ids,
+            "unresolved_player_ids": unresolved_ids,
+        }
+
+    result = generate_lineups(
+        slate, num_lineups=1, projection_source=projection_source, locked_ids=locked_ids,
+    )
+    new_lineup = result["lineups"][0]
+    new_ids = {p["id"] for p in _flatten_slots(new_lineup["slots"])}
+    old_ids = {pick["player_id"] for pick in picks}
+
+    return {
+        "changed": new_ids != old_ids,
+        "lineup": new_lineup,
+        "removed_player_ids": sorted(old_ids - new_ids),
+        "added_player_ids": sorted(new_ids - old_ids),
+        "locked_player_ids": locked_ids,
+        "unresolved_player_ids": unresolved_ids,
+    }

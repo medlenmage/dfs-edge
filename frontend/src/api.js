@@ -135,6 +135,16 @@ export const api = {
       }),
     }),
 
+  // `picks` is exactly 10 {player_id, game_pk} entries in fixed roster
+  // order (P, P, C, 1B, 2B, 3B, SS, OF, OF, OF) -- game_pk from the
+  // SAME slate the lineup was built from, so the backend can tell
+  // which of this lineup's players have a game that's already locked.
+  lateSwap: (date, picks, { projectionSource = 'rotowire' } = {}) =>
+    request('/api/mlb/late-swap', {
+      method: 'POST',
+      body: JSON.stringify({ date, picks, projection_source: projectionSource }),
+    }),
+
   clearCache: (prefix) =>
     request(`/api/cache/clear${prefix ? `?prefix=${prefix}` : ''}`, {
       method: 'POST',
