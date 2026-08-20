@@ -1008,6 +1008,33 @@ def _block_average_payouts(payouts: np.ndarray, boundaries: np.ndarray, field_si
     return smoothed
 
 
+def _field_baseline(
+    payout_pct: float, prize_pool: float, entry_fee: float, field_size: int
+) -> dict[str, float]:
+    """
+    What ANY random entry -- zero skill, zero edge -- should expect
+    from this contest, on average, by definition: exactly `payout_pct`
+    of the field cashes (that's the literal meaning of the number), and
+    the average dollar in equals `prize_pool / (field_size * entry_fee)`
+    dollars out, since the whole prize pool gets split among exactly
+    that many real entries. Both are closed-form facts derivable
+    directly from the contest's own numbers -- no simulation needed,
+    and true regardless of any player's or lineup's actual skill.
+
+    This is the number a real edge should be measured AGAINST: "my
+    batch shows +40% ROI" means very different things next to a
+    baseline of -15% (a genuine ~55-point edge over an average random
+    entry) versus next to +10% (a suspiciously generous field that
+    would make +40% look far less impressive by comparison) -- see the
+    "field-beating edge" side of the contest generator's summary output
+    for the actual comparison.
+    """
+    return {
+        "avg_cash_probability_pct": round(payout_pct * 100, 1),
+        "avg_roi_pct": round((prize_pool / (field_size * entry_fee) - 1) * 100, 1),
+    }
+
+
 def evaluate_field(
     field: list[dict[str, Any]],
     user_lineups: list[dict[str, Any]],
@@ -1518,6 +1545,7 @@ def build_contest_entries(
             "total_entry_cost": total_cost,
             "total_estimated_payout": total_payout,
             "estimated_net_profit": round(total_payout - total_cost, 2),
+            "avg_roi_pct": round((total_payout / total_cost - 1) * 100, 1) if total_cost else 0.0,
             "avg_salary_used": round(sum(e["salary_used"] for e in entries) / len(entries)),
             "avg_projected_points": round(sum(points) / len(points), 2),
             "min_projected_points": min(points),
@@ -1526,6 +1554,9 @@ def build_contest_entries(
                 sum(e["total_ownership_pct"] for e in entries) / len(entries), 1
             ),
         },
+        "field_baseline": _field_baseline(
+            contest["payout_pct"], evaluation["prize_pool"], contest["entry_fee"], evaluation["field_size"]
+        ),
         "exposure": field_exposure(entries, top_n=20),
         # Full batch, deliberately not capped here -- routers/mlb.py
         # decides how much of this goes into the JSON response (the
@@ -1680,6 +1711,9 @@ async def build_contest_entries_simulated(
             "total_expected_payout": total_expected_payout,
             "estimated_net_profit": round(total_expected_payout - total_cost, 2),
         },
+        "field_baseline": _field_baseline(
+            contest["payout_pct"], evaluation["prize_pool"], contest["entry_fee"], evaluation["field_size"]
+        ),
         "exposure": field_exposure(entries, top_n=20),
         "entries": entries,
         "results": evaluation["results"],
@@ -1929,6 +1963,9 @@ async def build_dk_entries_simulated(
             "total_expected_payout": total_expected_payout,
             "estimated_net_profit": round(total_expected_payout - total_cost, 2),
         },
+        "field_baseline": _field_baseline(
+            contest["payout_pct"], evaluation["prize_pool"], entry_fee, evaluation["field_size"]
+        ),
         "exposure": field_exposure(entries, top_n=20),
         "entries": entries,
         "results": evaluation["results"],
