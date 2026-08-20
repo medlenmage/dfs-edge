@@ -41,7 +41,11 @@ export function StackTable({ slate }) {
     [slate],
   )
   const slateDetected = slateGames.some((g) => g.inSlate != null)
-  const slateGamePks = slateGames.map((g) => g.pk).join(',')
+  // Includes each game's inSlate flag, not just its pk -- switching to a
+  // different loaded DK slate (Early/Main/Night/...) on the same date
+  // changes which games are in_slate without changing the day's own
+  // list of game_pks, so a pk-only key would never re-run this effect.
+  const slateGamesKey = slateGames.map((g) => `${g.pk}:${g.inSlate}`).join(',')
 
   useEffect(() => {
     // Unlike the Lineups/Contest Generator tabs (where restricting to a
@@ -52,7 +56,7 @@ export function StackTable({ slate }) {
     // nothing.
     const detected = slateGames.filter((g) => g.inSlate !== false).map((g) => g.pk)
     setIncludedGames(new Set(detected.length ? detected : slateGames.map((g) => g.pk)))
-  }, [slateGamePks])
+  }, [slateGamesKey])
 
   function toggleGame(pk) {
     setIncludedGames((prev) => {
