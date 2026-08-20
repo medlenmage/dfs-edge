@@ -3446,6 +3446,166 @@ async def main() -> int:
           "branch -- still reports self_play=False",
           sim_batch["self_play"] is False, sim_batch.get("self_play"))
 
+    print("\nBlock-averaged payout smoothing (contest.py _block_average_payouts)")
+
+    # A tiny hand-checkable curve: 10 real ranks paying out
+    # 100,80,60,...,0 (nothing beyond rank 5), smoothed onto just 2
+    # sampled "blocks" -- block 1 covers real ranks 1-5 (mean 60), block
+    # 2 covers ranks 6-10 (mean 0). boundaries=[1, 6] (1-indexed block
+    # starts), matching the exact shape evaluate_field_mirrored's own
+    # real_ranks_by_k produces.
+    bp_curve = np_test.array([100.0, 80.0, 60.0, 40.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    bp_smoothed = contest._block_average_payouts(bp_curve, np_test.array([1, 6]), 10)
+    check("_block_average_payouts replaces every rank in a block with that block's own mean",
+          list(bp_smoothed) == [60.0] * 5 + [0.0] * 5, list(bp_smoothed))
+    check("_block_average_payouts preserves the curve's total sum -- a pure within-block "
+          "redistribution, never gaining or losing total payout mass",
+          abs(bp_smoothed.sum() - bp_curve.sum()) < 1e-9,
+          str((bp_smoothed.sum(), bp_curve.sum())))
+    check("_block_average_payouts is a no-op once boundaries already cover every real rank "
+          "(no compression to correct for)",
+          list(contest._block_average_payouts(bp_curve, np_test.arange(1, 11), 10)) == list(bp_curve),
+          "")
+
+    print("\nRake sanity check: a zero-skill chalk lineup and the field's own aggregate ROI (contest.py)")
+
+    # `build_chalk_lineup()` -- the single most heavily-owned lineup
+    # possible, no randomness, no skill. Real GPP rake means even this
+    # should show simulated ROI near -RAKE_PCT*100, not a real edge --
+    # if a field-generation bug lets a zero-skill lineup show strong
+    # positive ROI, that's proof the field itself is too weak/random to
+    # be a realistic opponent, exactly the failure mode the "impossibly
+    # good ROI" feedback described.
+    chalk = contest.build_chalk_lineup(mul_slate)
+    check("build_chalk_lineup returns a legal 10-player lineup",
+          len(chalk["players"]) == 10, len(chalk["players"]))
+    check("build_chalk_lineup stays within the salary cap",
+          chalk["salary_used"] <= optimizer.SALARY_CAP, chalk["salary_used"])
+
+    # mul_slate's own fixture never sets real ownership_pct values (every
+    # player floors to the same 0.5 sampling weight), so it can prove
+    # build_chalk_lineup() produces a LEGAL lineup but can't prove it's
+    # actually picking the highest-owned player anywhere -- a dedicated,
+    # deliberately ownership-differentiated fixture is needed for that.
+    # Two dummy-opponent games (CHKZ1/CHKZ2 have no hitters at all) keep
+    # the two pitcher picks from ever banning CHKA's or CHKB's real
+    # hitters -- their own pitchers are given clearly higher ownership
+    # than CHKZ1/CHKZ2's so the P-slot picks are deterministic regardless
+    # of any internal list-ordering assumption.
+    chalk_hitters_a = [
+        opt_hitter(9710, "CHKA_C_hi", "CHKA", "C", 2500, 8.0, own=40.0),
+        opt_hitter(9711, "CHKA_C_lo", "CHKA", "C", 2400, 7.5, own=5.0),
+        opt_hitter(9712, "CHKA_1B_hi", "CHKA", "1B", 2800, 10.0, own=45.0),
+        opt_hitter(9713, "CHKA_1B_lo", "CHKA", "1B", 2700, 9.6, own=6.0),
+        opt_hitter(9714, "CHKA_2B_hi", "CHKA", "2B", 2600, 9.0, own=42.0),
+        opt_hitter(9715, "CHKA_2B_lo", "CHKA", "2B", 2500, 8.7, own=7.0),
+        opt_hitter(9716, "CHKA_3B_hi", "CHKA", "3B", 2900, 12.0, own=44.0),
+        opt_hitter(9717, "CHKA_3B_lo", "CHKA", "3B", 2800, 11.5, own=8.0),
+        opt_hitter(9718, "CHKA_SS_hi", "CHKA", "SS", 2700, 9.5, own=38.0),
+        opt_hitter(9719, "CHKA_SS_lo", "CHKA", "SS", 2600, 9.2, own=9.0),
+    ]
+    chalk_hitters_b = [
+        opt_hitter(9720, "CHKB_OF_hi1", "CHKB", "OF", 4000, 14.0, own=50.0),
+        opt_hitter(9721, "CHKB_OF_hi2", "CHKB", "OF", 3900, 13.5, own=48.0),
+        opt_hitter(9722, "CHKB_OF_hi3", "CHKB", "OF", 3800, 13.0, own=46.0),
+        opt_hitter(9723, "CHKB_OF_lo1", "CHKB", "OF", 3000, 12.5, own=3.0),
+        opt_hitter(9724, "CHKB_OF_lo2", "CHKB", "OF", 2900, 12.0, own=2.0),
+    ]
+    chalk_slate = {
+        "games": [
+            {
+                "game_pk": 89001,
+                "home": {"abbrev": "CHKA", "hitters": chalk_hitters_a,
+                         "probable_pitcher": opt_pitcher(9700, "CHKAP", 8000, 18.0, own=99.0), "scratches": []},
+                "away": {"abbrev": "CHKZ1", "hitters": [],
+                         "probable_pitcher": opt_pitcher(9701, "CHKZ1P", 7500, 17.0, own=1.0), "scratches": []},
+            },
+            {
+                "game_pk": 89002,
+                "home": {"abbrev": "CHKB", "hitters": chalk_hitters_b,
+                         "probable_pitcher": opt_pitcher(9702, "CHKBP", 7800, 16.0, own=98.0), "scratches": []},
+                "away": {"abbrev": "CHKZ2", "hitters": [],
+                         "probable_pitcher": opt_pitcher(9703, "CHKZ2P", 7500, 15.0, own=1.0), "scratches": []},
+            },
+        ]
+    }
+    precise_chalk = contest.build_chalk_lineup(chalk_slate)
+    chalk_ids = {p["id"] for p in precise_chalk["players"]}
+    check("build_chalk_lineup picks the single highest-owned player at every single-position slot "
+          "(C/1B/2B/3B/SS), never the clearly-lower-owned same-position alternative",
+          {9710, 9712, 9714, 9716, 9718} <= chalk_ids
+          and not ({9711, 9713, 9715, 9717, 9719} & chalk_ids),
+          str(sorted(chalk_ids)))
+    check("build_chalk_lineup fills all 3 OF slots with the 3 highest-owned outfielders, "
+          "never the clearly-lower-owned ones",
+          {9720, 9721, 9722} <= chalk_ids and not ({9723, 9724} & chalk_ids),
+          str(sorted(chalk_ids)))
+
+    rake_field = contest.generate_field(mul_slate, 300, seed=707)
+    rake_contest = dict(contest.CONTEST_TYPES["gpp_small"])
+
+    # The field ranked purely against itself (self-play, same machinery
+    # the Contest Generator's own self-play mode uses): every dollar in
+    # the prize pool comes from entry fees minus RAKE_PCT, by
+    # construction (`prize_pool = field_size * entry_fee * (1 -
+    # RAKE_PCT)`, and the payout curve always distributes exactly that
+    # much) -- so the field's OWN aggregate ROI, averaged across a
+    # representative ownership-weighted sample of itself, is a real,
+    # closed-form mathematical fact: it must land close to -RAKE_PCT*100
+    # regardless of any player's individual skill, since payouts can
+    # never exceed what was collected minus the rake.
+    field_mirrored = await contest.evaluate_field_mirrored(
+        rake_field, rake_contest, season=2099, num_trials=4000, seed=707,
+    )
+    field_avg_roi = sum(r["roi_pct"] for r in field_mirrored["results"]) / len(field_mirrored["results"])
+    check("the field's own average simulated ROI lands close to -RAKE_PCT*100% (the site's rake), "
+          "not near zero or positive -- proof the payout math is genuinely rake-correct",
+          abs(field_avg_roi - (-contest.RAKE_PCT * 100)) < 4.0,
+          f"field avg roi_pct={round(field_avg_roi, 1)}, expected near {-contest.RAKE_PCT * 100:.1f}")
+
+    # Regression guard for the exact bug this whole sanity check
+    # actually found: a 300-lineup sample projected onto a much bigger
+    # real field_size (a routine ratio for the gpp_large/gpp_milly
+    # presets, which default to sampling far fewer lineups than their
+    # field_size) used to read a single point off the payout curve for
+    # each sampled lineup's projected rank -- fine at a ~1x compression
+    # ratio, but the curve is sharply top-heavy, so at high compression
+    # the point value badly overstates the true block-average payout
+    # (confirmed against real live slate data: +34% ROI at a 21x ratio,
+    # +264% at 209x, both far from the correct ~-15%). Same 300-lineup
+    # sample as above, just re-evaluated against a 100,000-entry
+    # field_size (a 333x compression ratio) instead of 500.
+    high_compression_contest = dict(rake_contest)
+    high_compression_contest["field_size"] = 100_000
+    high_compression_mirrored = await contest.evaluate_field_mirrored(
+        rake_field, high_compression_contest, season=2099, num_trials=4000, seed=707,
+    )
+    high_compression_avg_roi = (
+        sum(r["roi_pct"] for r in high_compression_mirrored["results"])
+        / len(high_compression_mirrored["results"])
+    )
+    check("the field's own average ROI stays close to -RAKE_PCT*100% even at a severe (333x) "
+          "sample-to-field_size compression ratio -- the exact regime that used to blow up",
+          abs(high_compression_avg_roi - (-contest.RAKE_PCT * 100)) < 6.0,
+          f"field avg roi_pct={round(high_compression_avg_roi, 1)} at 333x compression, "
+          f"expected near {-contest.RAKE_PCT * 100:.1f}")
+
+    # The chalk lineup evaluated against that SAME realistic field (the
+    # actual "would a real user see this" path -- entries ranked
+    # against a separately-sampled opponent field, exactly like the
+    # Contest Generator's default simulate mode).
+    chalk_eval = await contest.evaluate_batch_simulated(
+        [chalk], rake_field, rake_contest, season=2099, num_trials=4000, seed=707,
+    )
+    chalk_roi = chalk_eval["results"][0]["roi_pct"]
+    check("a zero-skill chalk lineup does NOT show anywhere near the '+101.7%' magnitude of ROI the user "
+          "flagged as implausible -- the whole point of this sanity check",
+          chalk_roi < 50.0, chalk_roi)
+    check("the chalk lineup's ROI isn't wildly better than the field's own average either -- a lineup with "
+          "no real skill edge shouldn't meaningfully outperform the field it's drawn from",
+          chalk_roi < field_avg_roi + 40.0,
+          str((chalk_roi, round(field_avg_roi, 1))))
+
     print("\nReal contest-standings results (contest_results.py) -- post-contest, not pre-contest")
 
     # DK's real post-contest "standings" export -- a different file from

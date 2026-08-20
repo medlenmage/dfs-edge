@@ -576,6 +576,123 @@ def _build_candidate_pool(
     return candidates_by_slot, slot_order
 
 
+def build_chalk_lineup(
+    slate: dict[str, Any],
+    *,
+    projection_source: str = "rotowire",
+    included_game_pks: list[int] | None = None,
+    min_salary: int = 0,
+    max_salary: int = SALARY_CAP,
+) -> dict[str, Any]:
+    """
+    The single most heavily-chalk lineup possible: at every slot, the
+    highest-owned affordable player, picked greedily -- no randomness,
+    no stack-shape preference, no attempt to be good, just maximally
+    "the obvious plays." A deliberately zero-skill baseline, not a real
+    lineup anyone would build on purpose.
+
+    This exists for one reason: real DFS rake means the site keeps
+    RAKE_PCT of every dollar entered regardless of who wins, so even
+    the most popular possible lineup on a slate should show a simulated
+    ROI close to -RAKE_PCT*100 (the site's cut) once run through
+    evaluate_batch_simulated() against a realistic field -- not a real
+    edge. If it instead comes back showing strong positive ROI, that's
+    proof the field-generation model itself is broken (too weak, or
+    insufficiently correlated with real ownership), not that this
+    lineup found genuine value. See the "chalk lineup" sanity checks in
+    test_pipeline.py for the automated version of this claim.
+    """
+    candidates_by_slot, slot_order = _build_candidate_pool(
+        slate, included_game_pks, projection_source
+    )
+
+    used_ids: set[int] = set()
+    picks: list[dict[str, Any]] = []
+    salary_so_far = 0
+    team_hitter_count: dict[str, int] = {}
+    banned_hitter_teams: set[str] = set()
+    # Teams a picked pitcher is facing -- a *second* pitcher pick whose
+    # own team is one of these would be the literal opposing starter of
+    # a game already represented in this lineup. _sample_one_lineup
+    # never hits this in practice (randomized + retried, so two
+    # opposing starters landing in the same 2-pitcher lineup back to
+    # back is a rare coincidence it just retries away); a deliberately
+    # deterministic, non-randomized greedy walk has no such luck to
+    # rely on, so it's excluded explicitly here -- picking both starters
+    # of one game would ban HITTERS from both teams at once (via
+    # banned_hitter_teams below), which can starve every hitter slot on
+    # a thin slate.
+    picked_pitcher_opponents: set[str] = set()
+
+    for i, slot in enumerate(slot_order):
+        remaining_slots = slot_order[i + 1 :]
+        eligible = [p for p in candidates_by_slot[slot] if p["id"] not in used_ids]
+        if slot == "P":
+            if picked_pitcher_opponents:
+                non_opposing = [p for p in eligible if p["team"] not in picked_pitcher_opponents]
+                if non_opposing:
+                    eligible = non_opposing
+        else:
+            eligible = [p for p in eligible if team_hitter_count.get(p["team"], 0) < MAX_HITTERS_PER_TEAM]
+            if banned_hitter_teams:
+                eligible = [p for p in eligible if p["team"] not in banned_hitter_teams]
+        if not eligible:
+            raise ContestError(
+                f"Couldn't build a chalk lineup -- no eligible players left for the {slot} slot."
+            )
+
+        min_cost_of_rest = sum(
+            min(
+                (p["salary"] for p in candidates_by_slot[s] if p["id"] not in used_ids),
+                default=0,
+            )
+            for s in remaining_slots
+        )
+        budget = SALARY_CAP - salary_so_far - min_cost_of_rest
+        affordable = [p for p in eligible if p["salary"] <= budget]
+        if not affordable:
+            raise ContestError("Couldn't build a chalk lineup within the salary cap.")
+
+        pick = max(affordable, key=_ownership_weight)
+        picks.append(pick)
+        used_ids.add(pick["id"])
+        salary_so_far += pick["salary"]
+        if slot == "P":
+            if pick.get("opponent"):
+                banned_hitter_teams.add(pick["opponent"])
+                picked_pitcher_opponents.add(pick["opponent"])
+        else:
+            team_hitter_count[pick["team"]] = team_hitter_count.get(pick["team"], 0) + 1
+
+    if not (min_salary <= salary_so_far <= max_salary):
+        raise ContestError(
+            f"The most-chalk lineup available (${salary_so_far:,}) falls outside the "
+            f"requested salary range (${min_salary:,}-${max_salary:,})."
+        )
+
+    stack_type, stack = stack_info({"players": picks})
+    return {
+        "salary_used": salary_so_far,
+        "stack_type": stack_type,
+        "stack": stack,
+        "projected_points": round(sum(p["projected_fpts"] for p in picks), 2),
+        "total_ownership_pct": round(sum(p["ownership_pct"] for p in picks), 1),
+        "players": [
+            {
+                "id": p["id"],
+                "name": p["name"],
+                "team": p["team"],
+                "salary": p["salary"],
+                "projected_fpts": p["projected_fpts"],
+                "ownership_pct": p["ownership_pct"],
+                "edge_composite": p.get("edge_composite"),
+            }
+            for p in picks
+        ],
+        "player_ids": frozenset(used_ids),
+    }
+
+
 def generate_field(
     slate: dict[str, Any],
     sample_size: int,
@@ -819,6 +936,64 @@ def _custom_payout_curve(
     return [first_place_payout, *rest_payouts]
 
 
+def _block_average_payouts(payouts: np.ndarray, boundaries: np.ndarray, field_size: int) -> np.ndarray:
+    """
+    A length-`field_size` real per-rank payout array (0 beyond the paid
+    ranks), smoothed so every rank within one block reads that block's
+    own average payout instead of one single rank's payout. `boundaries`
+    is the ascending, 1-indexed real rank where each block STARTS --
+    the exact same rank values the caller's own sample-to-field_size
+    projection formula already produces (`real_ranks_by_k` in
+    evaluate_field_mirrored, an analogous array in
+    evaluate_batch_simulated) -- each block runs from one boundary up
+    to (not including) the next.
+
+    Why this matters: both simulated-ranking functions below project a
+    real contest's `field_size` down onto a much smaller Monte Carlo
+    `sample_size` (routine for the large-field GPP presets -- gpp_large
+    is 10,000 real entries simulated from a few thousand sampled
+    lineups at most, gpp_milly is 100,000 from the same cap). A rank
+    achieved *within the sample* -- "3rd best of the 500 lineups
+    simulated" -- doesn't correspond to one single real rank; it stands
+    in for a whole BLOCK of real ranks (roughly field_size/sample_size
+    of them) that would have finished between the sample's 2nd- and
+    3rd-best entries in the real, fully-populated contest. Reading off
+    just that block's single best-case payout -- what a naive point
+    lookup does -- is a real, provable bug: real payout curves are
+    sharply convex/top-heavy (`_payout_curve`'s `1/(rank+1)^0.7` decay),
+    so the block's best rank pays meaningfully more than its average,
+    and the overstatement compounds every trial. Confirmed empirically
+    against real slate data: a field ranked purely against itself
+    should show an average simulated ROI near -RAKE_PCT*100 at ANY
+    compression ratio (a closed-form fact -- aggregate payouts can
+    never exceed entry fees minus rake, regardless of any lineup's
+    skill) -- the point-lookup version showed roughly correct numbers
+    at a 1-2x field_size/sample_size ratio, but drifted to +34% ROI at
+    21x and +264% at 209x, exactly the ratios the gpp_large/gpp_milly
+    presets' default sample sizes produce.
+
+    Boundaries must come from the CALLER's own rank-projection formula,
+    not an independently-derived partition (e.g. `np.array_split`) --
+    two different partition schemes covering the same range don't align
+    rank-for-rank, so a caller reading off a boundary point that isn't
+    exactly a boundary in the smoothing scheme silently reintroduces a
+    smaller version of the same bias. Sum-preserving by construction
+    (each block replaced by its own mean is a pure within-block
+    redistribution), so the smoothed curve still sums to exactly the
+    same total (prize_pool) as the original.
+    """
+    if len(boundaries) >= field_size:
+        return payouts
+    starts = boundaries
+    ends = np.append(starts[1:], field_size + 1)
+    cumsum = np.concatenate([[0.0], np.cumsum(payouts)])
+    block_means = (cumsum[ends - 1] - cumsum[starts - 1]) / (ends - starts)
+    smoothed = np.empty(field_size)
+    for k in range(len(starts)):
+        smoothed[starts[k] - 1 : ends[k] - 1] = block_means[k]
+    return smoothed
+
+
 def evaluate_field(
     field: list[dict[str, Any]],
     user_lineups: list[dict[str, Any]],
@@ -990,9 +1165,23 @@ async def evaluate_batch_simulated(
     paid_count = max(1, round(field_size * contest["payout_pct"]))
     prize_pool = contest.get("prize_pool") or round(field_size * entry_fee * (1 - RAKE_PCT), 2)
     payouts = np.array(_custom_payout_curve(paid_count, prize_pool, contest["shape"], first_place_pct))
+    full_payouts = np.zeros(field_size)
+    full_payouts[:paid_count] = payouts
 
     num_entries = len(entries)
     sample_size = len(field)
+    # The exact same formula percentile_rank below uses to project a
+    # count of field lineups beaten (0..sample_size) onto a real rank --
+    # smoothing boundaries built from any OTHER partition scheme
+    # wouldn't align with the ranks this function actually produces,
+    # silently reintroducing a smaller version of the point-lookup bias
+    # _block_average_payouts exists to fix.
+    beaten_range = np.arange(sample_size + 1)
+    ranks_for_beaten = np.clip(
+        np.round((1 - beaten_range / sample_size) * field_size), 1, field_size
+    ).astype(np.int64)
+    smoothing_boundaries = np.unique(ranks_for_beaten)
+    smoothed_payouts = _block_average_payouts(full_payouts, smoothing_boundaries, field_size)
     player_pools = await variance.player_pools_for_entries(entries + field, season)
     sim = variance.simulate_batch(entries + field, player_pools, num_trials=num_trials, seed=seed)
     entry_sim, field_sim = sim[:num_entries], sim[num_entries:]
@@ -1018,8 +1207,11 @@ async def evaluate_batch_simulated(
     np.put_along_axis(final_rank, order, distinct_rank_sorted, axis=0)
 
     in_the_money = final_rank <= paid_count
-    payout_index = np.clip(final_rank - 1, 0, paid_count - 1)
-    payout_per_trial = np.where(in_the_money, payouts[payout_index], 0.0)
+    # smoothed_payouts already reads 0 for a rank whose whole block sits
+    # below the paid cutoff, and a genuine partial-credit blend for a
+    # block straddling it -- no separate in_the_money gate needed here,
+    # unlike the naive per-rank lookup this replaced.
+    payout_per_trial = smoothed_payouts[final_rank - 1]
 
     # "Top 1%"/"top 10%" are relative to the real contest's field_size
     # (same scale final_rank already projects onto), not the entry
@@ -1540,17 +1732,21 @@ async def evaluate_field_mirrored(
     paid_count = max(1, round(field_size * contest["payout_pct"]))
     prize_pool = contest.get("prize_pool") or round(field_size * entry_fee * (1 - RAKE_PCT), 2)
     payouts = np.array(_custom_payout_curve(paid_count, prize_pool, contest["shape"], first_place_pct))
+    full_payouts = np.zeros(field_size)
+    full_payouts[:paid_count] = payouts
 
-    player_pools = await variance.player_pools_for_entries(field_lineups, season)
-    sim = variance.simulate_batch(field_lineups, player_pools, num_trials=num_trials, seed=seed)
-
-    order = np.argsort(-sim, axis=0)  # best-to-worst lineup index per trial
     if sample_size > 1:
         real_ranks_by_k = 1 + np.floor(
             np.arange(sample_size) * (field_size - 1) / (sample_size - 1)
         ).astype(np.int64)
     else:
         real_ranks_by_k = np.array([1])
+    smoothed_payouts = _block_average_payouts(full_payouts, real_ranks_by_k, field_size)
+
+    player_pools = await variance.player_pools_for_entries(field_lineups, season)
+    sim = variance.simulate_batch(field_lineups, player_pools, num_trials=num_trials, seed=seed)
+
+    order = np.argsort(-sim, axis=0)  # best-to-worst lineup index per trial
     final_rank = np.empty_like(order)
     np.put_along_axis(final_rank, order, real_ranks_by_k[:, None], axis=0)
 
@@ -1560,8 +1756,11 @@ async def evaluate_field_mirrored(
     first_place = final_rank == 1
     top_1pct = final_rank <= top_1pct_threshold
     top_10pct = final_rank <= top_10pct_threshold
-    payout_index = np.clip(final_rank - 1, 0, paid_count - 1)
-    payout_per_trial = np.where(in_the_money, payouts[payout_index], 0.0)
+    # smoothed_payouts already reads 0 for a rank whose whole block sits
+    # below the paid cutoff, and a genuine partial-credit blend for a
+    # block straddling it -- no separate in_the_money gate needed here,
+    # unlike the naive per-rank lookup this replaced.
+    payout_per_trial = smoothed_payouts[final_rank - 1]
 
     results = []
     for i in range(sample_size):
