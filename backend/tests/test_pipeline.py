@@ -3251,6 +3251,16 @@ async def main() -> int:
     value_ownership = inhouse_projections.project_ownership(value_pool)
     check("higher fpts at the same salary/team-total gets higher ownership (value signal)",
           value_ownership[82002] > value_ownership[82001], str(value_ownership))
+    # Regression for a real bug found by backtesting against 4 real
+    # slates' actual DK contest ownership: the raw fpts/salary ratio is
+    # tiny (~0.001-0.003) next to team_total (~0.7-1.5) and salary_tier
+    # (0-1), so it barely moved raw_scores despite its weight -- real
+    # ownership correlation was ~0.02 (down from an already-weak 0.19)
+    # and modelled spread was stuck at 1-4% on a real 365-player pool.
+    # A genuinely large fpts gap (6.0 vs 10.0, 67% higher) must now
+    # produce REAL separation, not a near-50/50 split.
+    check("a large fpts gap at identical salary produces real separation, not a near-flat split",
+          value_ownership[82002] - value_ownership[82001] > 20.0, str(value_ownership))
 
     # Team-total signal: same salary/fpts, higher implied team runs -> higher ownership.
     team_total_pool = [

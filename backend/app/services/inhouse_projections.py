@@ -234,8 +234,17 @@ _SALARY_TIER_WEIGHT = 0.3
 
 # Softmax temperature: how concentrated ownership gets on the top
 # play(s) within a position group. Lower = more chalk-heavy (the best
-# play dominates); higher = flatter, more evenly spread.
-_SOFTMAX_TEMPERATURE = 2.5
+# play dominates); higher = flatter, more evenly spread. Temperature
+# only affects concentration, never which players rank highest (that's
+# entirely raw_scores, fixed above) -- so this was tuned separately,
+# empirically, against the same 4 real slates: with the pre-fix 2.5,
+# a real 365-player pool topped out at 4.2% ownership for anyone (real
+# slates routinely see 20-33%+ on genuine chalk); 0.3 brings the
+# modelled top play to ~28% on that same real pool, close to the real
+# range without collapsing to one dominant play the way anything below
+# ~0.2 started to (52%+ on a single player, which real large-field
+# ownership essentially never does).
+_SOFTMAX_TEMPERATURE = 0.3
 
 
 def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
@@ -260,7 +269,10 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     without a separate scarcity term.
 
       - value: fpts / salary -- the standard points-per-dollar signal
-        every real DFS player looks at first.
+        every real DFS player looks at first. Min-max normalised to a
+        0-1 scale within the position group before weighting (see WHY
+        below) -- the raw ratio alone is far too small a number to
+        compete with the other two signals.
       - team total: that player's team's Vegas implied runs relative
         to league average -- popular high-total teams get stacked (and
         owned) more.
@@ -271,6 +283,28 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
         default pick. Distance from the position's own mid-salary,
         not the whole slate's, since "expensive" means something
         different for a catcher than for an outfielder.
+
+    WHY VALUE IS NORMALISED (a real bug, found via backtesting)
+    -------------------------------------------------------------
+    Backtested against 4 real slates' actual DK contest ownership
+    (`%Drafted` from real contest-standings exports): this model
+    originally used a raw fpts/salary ratio for `value` -- typically
+    ~0.001-0.003 -- added straight into the same sum as `team_total`
+    (~0.7-1.5) and `salary_tier` (0-1) via `_VALUE_WEIGHT * value`
+    (weight 1.0). Despite being weighted highest and documented as
+    "the dominant real-world driver," value's raw magnitude was
+    100-1000x smaller than the other two signals, so it contributed
+    essentially nothing to which players actually got ranked highest --
+    ownership was really being driven almost entirely by salary_tier
+    (distance from the group's own midpoint), which is exactly why the
+    backtest showed near-zero rank correlation with real ownership
+    (0.023 average Spearman across 4 real slates) and a suspiciously
+    flat spread (1-4% on a real 365-player pool, vs. real ownership's
+    20-33%+ for genuine chalk). Min-max normalising value onto the
+    same 0-1 scale salary_tier already uses fixes the actual ranking,
+    not just the spread -- softmax temperature only changes how
+    concentrated the final distribution is, never which players end up
+    on top, so temperature alone could never have fixed this.
     """
     ownership: dict[int, float] = {}
 
@@ -290,11 +324,17 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
         mid_salary = (min_salary + max_salary) / 2
         salary_half_span = max((max_salary - min_salary) / 2, 1)
 
+        raw_values = [
+            (p.get("fpts") or 0.0) / p["salary"] if p.get("salary") else 0.0
+            for p in players
+        ]
+        min_value, max_value = min(raw_values), max(raw_values)
+        value_span = max(max_value - min_value, 1e-9)
+
         raw_scores = []
-        for p in players:
+        for p, raw_value in zip(players, raw_values):
             salary = p.get("salary") or 0
-            fpts = p.get("fpts") or 0.0
-            value = fpts / salary if salary else 0.0
+            value = (raw_value - min_value) / value_span
 
             implied_runs = p.get("implied_runs") or scoring.LEAGUE_IMPLIED_RUNS
             team_total = implied_runs / scoring.LEAGUE_IMPLIED_RUNS
