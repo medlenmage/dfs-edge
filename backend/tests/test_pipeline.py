@@ -23,6 +23,7 @@ from app.clients import draftkings, mlb, odds, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     contest,
+    contest_results,
     dk_entries,
     inhouse_projections,
     lineup_export,
@@ -3202,6 +3203,72 @@ async def main() -> int:
           [row["roi_pct"] for row in sim_csv_rows] == [str(r["roi_pct"]) for r in sim_batch["results"]],
           str(([row["roi_pct"] for row in sim_csv_rows], [r["roi_pct"] for r in sim_batch["results"]])))
 
+    print("\nReal contest-standings results (contest_results.py) -- post-contest, not pre-contest")
+
+    # DK's real post-contest "standings" export -- a different file from
+    # the pre-contest salary CSV or the bulk-entries upload template --
+    # packs an entries table (Rank/EntryId/EntryName/Points/Lineup) and a
+    # player-pool table (Player/Roster Position/%Drafted/FPTS) into the
+    # same rows. The player pool routinely outlives the entries table
+    # (far more real drafted players than there are rows shown), which
+    # this fixture's 3rd row (blank entries columns, real player-pool
+    # columns) exercises directly.
+    standings_csv = (
+        "Rank,EntryId,EntryName,TimeRemaining,Points,Lineup,,Player,Roster Position,%Drafted,FPTS\n"
+        "1,5001,grinder99 (1/5),0,150.5,1B A 2B B,,Mookie Betts,SS,25.5,18.2\n"
+        "2,5002,otherguy (2/10),0,140.0,1B C 2B D,,Aaron Judge,OF,15.0,22.1\n"
+        ",,,,,,,\"Fernández, Freddy\",1B,10.25,9.5\n"
+    )
+    parsed_standings = contest_results.parse_contest_standings(standings_csv)
+    check("parse_contest_standings finds both real contest entries",
+          len(parsed_standings["entries"]) == 2, str(parsed_standings["entries"]))
+    check("parse_contest_standings reads rank/points as real numbers, not strings",
+          parsed_standings["entries"][0]["rank"] == 1 and parsed_standings["entries"][0]["points"] == 150.5,
+          str(parsed_standings["entries"][0]))
+    check("parse_contest_standings finds all 3 real player-pool rows, including the one with no entries data",
+          len(parsed_standings["player_pool"]) == 3, str(parsed_standings["player_pool"]))
+    check("parse_contest_standings strips the % and reads ownership as a real number",
+          parsed_standings["player_pool"][0]["ownership_pct"] == 25.5, str(parsed_standings["player_pool"][0]))
+    check("parse_contest_standings normalizes player names the same way the rest of the app does",
+          parsed_standings["player_pool"][0]["normalized_name"] == player_match.normalize_name("Mookie Betts"),
+          str(parsed_standings["player_pool"][0]))
+
+    check("parse_contest_standings returns empty results for a completely empty file rather than crashing",
+          contest_results.parse_contest_standings("") == {"entries": [], "player_pool": []}, "")
+
+    check("find_my_entry finds the right entry by exact EntryId",
+          contest_results.find_my_entry(parsed_standings["entries"], entry_id="5002")["rank"] == 2,
+          str(contest_results.find_my_entry(parsed_standings["entries"], entry_id="5002")))
+    check("find_my_entry finds the right entry by handle, ignoring the (rank/total) suffix",
+          contest_results.find_my_entry(parsed_standings["entries"], handle="grinder99")["rank"] == 1,
+          str(contest_results.find_my_entry(parsed_standings["entries"], handle="grinder99")))
+    check("find_my_entry is case-insensitive on the handle match",
+          contest_results.find_my_entry(parsed_standings["entries"], handle="GRINDER99")["rank"] == 1, "")
+    check("find_my_entry returns None when neither entry_id nor handle matches anything real",
+          contest_results.find_my_entry(parsed_standings["entries"], handle="nobody_here") is None, "")
+    check("find_my_entry returns None when given neither an entry_id nor a handle",
+          contest_results.find_my_entry(parsed_standings["entries"]) is None, "")
+    check("find_my_entry prefers an exact entry_id over a handle when both are given",
+          contest_results.find_my_entry(parsed_standings["entries"], entry_id="5001", handle="otherguy")["rank"] == 1,
+          "")
+
+    check("extract_csv_text decodes a plain (non-zip) CSV directly",
+          contest_results.extract_csv_text(standings_csv.encode("utf-8")) == standings_csv, "")
+
+    import io as _io_test
+    import zipfile as _zipfile_test
+    zip_buf = _io_test.BytesIO()
+    with _zipfile_test.ZipFile(zip_buf, "w") as zf:
+        zf.writestr("contest-standings-12345.csv", standings_csv)
+    check("extract_csv_text unwraps a real DK contest-standings .zip download to its one CSV",
+          contest_results.extract_csv_text(zip_buf.getvalue()) == standings_csv, "")
+
+    try:
+        contest_results.extract_csv_text(b"PK\x03\x04not actually a valid zip")
+        check("extract_csv_text raises a clear error on a corrupted zip rather than an opaque crash", False)
+    except ValueError:
+        check("extract_csv_text raises a clear error on a corrupted zip rather than an opaque crash", True)
+
     print("\nDraftKings entries CSV (dk_entries.py) -- simulating lineups you actually built on DK")
 
     # DK's real bulk-entries export packs two unrelated tables into one
@@ -3572,12 +3639,20 @@ async def main() -> int:
     # A genuinely streaky player -- 15 quiet games (3.0 pts) and 5 huge
     # ones (20.0 pts), season average ~7.25 -- isolates real upside from
     # a flat player's ceiling, which should sit close to his own mean.
+    # Full trust (60 games, >= the 50-game hitter threshold) on both --
+    # player_outcome_pool() blends in the shared position pool for
+    # thin samples, which would make the exact ceiling depend on
+    # whatever other tests have already contributed to that shared
+    # pool by this point in the file. At full trust the blend collapses
+    # to entirely the player's own real games, same robust pattern
+    # already used for the batting-order PA-factor tests above.
     streaky_games = (
-        [dict(_single_rbi_run_game(), rbi=0, runs=0) for _ in range(15)]  # 3.0 pts/game
-        + [dict(_single_rbi_run_game(), rbi=5, runs=5, hits=2, doubles=1, home_runs=1) for _ in range(5)]
+        [dict(_single_rbi_run_game(), rbi=0, runs=0) for _ in range(45)]  # 3.0 pts/game
+        + [dict(_single_rbi_run_game(), rbi=5, runs=5, hits=2, doubles=1, home_runs=1) for _ in range(15)]
     )
+    flat_60_games = [_single_rbi_run_game() for _ in range(60)]  # 7.0 pts/game, every game
     inhouse_game_logs[80025] = streaky_games
-    inhouse_game_logs[80026] = flat_games  # reuse the flat 7.0-pts-every-game fixture from earlier
+    inhouse_game_logs[80026] = flat_60_games
 
     ceilings = await inhouse_projections.player_ceilings(
         [{"id": 80025, "position": "OF"}, {"id": 80026, "position": "OF"}], INHOUSE_SEASON

@@ -89,3 +89,109 @@ async def archive_slate_projections(day: str, rows: list[dict[str, Any]]) -> Non
             )
     except Exception:
         log.exception("Failed to archive slate_projections for %s", day)
+
+
+async def archive_contest_results(
+    day: str,
+    contest_id: str,
+    contest_name: str,
+    player_pool: list[dict[str, Any]],
+    *,
+    field_size: int,
+    entry_fee: float | None = None,
+    my_entry: dict[str, Any] | None = None,
+) -> None:
+    """
+    Archive one real contest's post-contest results permanently: every
+    player's real final ownership%/actual FPTS (contest_player_results),
+    plus the contest itself -- field size, entry fee, and the user's own
+    rank/points once identified (contest_uploads). Upserts on contest_id
+    so re-uploading the same contest's export overwrites rather than
+    duplicates.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        return
+    try:
+        parsed_day = date_cls.fromisoformat(day)
+        async with pool.acquire() as conn:
+            if player_pool:
+                await conn.executemany(
+                    """
+                    INSERT INTO contest_player_results
+                        (date, contest_id, contest_name, player_name,
+                         normalized_name, position, ownership_pct, actual_fpts)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (contest_id, normalized_name) DO UPDATE SET
+                        ownership_pct = EXCLUDED.ownership_pct,
+                        actual_fpts = EXCLUDED.actual_fpts,
+                        archived_at = now()
+                    """,
+                    [
+                        (
+                            parsed_day,
+                            contest_id,
+                            contest_name,
+                            row["name"],
+                            row["normalized_name"],
+                            row.get("position"),
+                            row.get("ownership_pct"),
+                            row.get("actual_fpts"),
+                        )
+                        for row in player_pool
+                    ],
+                )
+            await conn.execute(
+                """
+                INSERT INTO contest_uploads
+                    (contest_id, date, contest_name, field_size,
+                     my_entry_id, my_rank, my_points, entry_fee)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (contest_id) DO UPDATE SET
+                    field_size = EXCLUDED.field_size,
+                    my_entry_id = EXCLUDED.my_entry_id,
+                    my_rank = EXCLUDED.my_rank,
+                    my_points = EXCLUDED.my_points,
+                    entry_fee = EXCLUDED.entry_fee,
+                    archived_at = now()
+                """,
+                contest_id,
+                parsed_day,
+                contest_name,
+                field_size,
+                (my_entry or {}).get("entry_id"),
+                (my_entry or {}).get("rank"),
+                (my_entry or {}).get("points"),
+                entry_fee,
+            )
+    except Exception:
+        log.exception("Failed to archive contest results for %s", contest_id)
+
+
+async def get_my_contest_history() -> list[dict[str, Any]]:
+    """
+    Every uploaded contest with a real identified entry (my_entry_id
+    set), oldest first -- the raw feed for a bankroll/results-over-time
+    view. Returns [] (not an error) if Supabase isn't configured or the
+    query fails, same resilience convention as every other function
+    here -- history is a nice-to-have, never something that can break
+    the live dashboard.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT contest_id, date, contest_name, field_size,
+                       my_rank, my_points, entry_fee
+                FROM contest_uploads
+                WHERE my_entry_id IS NOT NULL
+                ORDER BY date ASC
+                """
+            )
+            return [dict(r) for r in rows]
+    except Exception:
+        log.exception("Failed to load contest history")
+        return []
