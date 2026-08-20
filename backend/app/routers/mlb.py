@@ -798,6 +798,81 @@ async def download_contest_entries_csv(batch_id: str) -> Response:
     )
 
 
+@router.post("/contest-entries/{batch_id}/reshape")
+async def reshape_contest_entries(
+    batch_id: str,
+    target_count: int | None = Body(
+        None, embed=True, description="How many entries to keep in the final shaped portfolio -- defaults to the whole batch"
+    ),
+    max_exposure_pct: float | None = Body(
+        None, embed=True, description="Cap how often any one player appears in the FINAL shaped portfolio (not the original batch)"
+    ),
+    player_exposure_caps: dict[str, float] | None = Body(
+        None, embed=True, description="Per-player exposure cap overrides, keyed by player id as a string -- overrides max_exposure_pct for that player"
+    ),
+    roi_boosts: dict[str, float] | None = Body(
+        None, embed=True, description="Per-player ROI nudge in PERCENTAGE POINTS (additive, may be negative), keyed by player id as a string -- re-ranks results, never changes the real simulated roi_pct"
+    ),
+) -> dict[str, Any]:
+    """
+    Re-rank and/or re-filter an already-built batch's real results on
+    the results screen -- no new Monte Carlo run, just a genuine
+    reshape of numbers that are already simulated. Needs `roi_pct` on
+    every result, so this only works on a batch built through one of
+    the "Simulate" paths (POST /contest-entries-simulated,
+    POST /dk-entries/simulate) -- the fast deterministic mode's results
+    don't carry a per-entry roi_pct today.
+
+    Caches the reshaped batch under its OWN new batch_id (same TTL as
+    any other build) so the existing CSV download endpoint works on it
+    unchanged -- the original batch is left untouched, so reshaping
+    more than once (trying a different cap, say) always starts back
+    from the real, full simulated batch rather than compounding.
+    """
+    cached = cache.get(f"contest_batch:{batch_id}")
+    if not cached:
+        raise HTTPException(
+            status_code=404,
+            detail="That batch has expired or doesn't exist -- generate a new one and try again.",
+        )
+    if not cached["results"] or "roi_pct" not in cached["results"][0]:
+        raise HTTPException(
+            status_code=400,
+            detail="This batch has no roi_pct to reshape by -- reshaping only works on a batch "
+            "built with Simulate on.",
+        )
+
+    try:
+        reshaped = contest.reshape_batch(
+            cached["entries"],
+            cached["results"],
+            target_count=target_count,
+            max_exposure_pct=max_exposure_pct,
+            player_exposure_caps=(
+                {int(pid): pct for pid, pct in player_exposure_caps.items()} if player_exposure_caps else None
+            ),
+            roi_boosts={int(pid): pts for pid, pts in roi_boosts.items()} if roi_boosts else None,
+        )
+    except contest.ContestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    new_batch_id = uuid4().hex
+    cache.put(
+        f"contest_batch:{new_batch_id}",
+        {"entries": reshaped["entries"], "results": reshaped["results"]},
+        _CONTEST_BATCH_TTL,
+    )
+
+    return {
+        "batch_id": new_batch_id,
+        "num_kept": reshaped["num_kept"],
+        "num_dropped": reshaped["num_dropped"],
+        "exposure": reshaped["exposure"],
+        "sample_entries": reshaped["entries"][:200],
+        "results": reshaped["results"][:200],
+    }
+
+
 @router.post("/dk-entries")
 async def upload_dk_entries(
     date: str | None = Query(None, description="Slate date this file is for, defaults to today"),

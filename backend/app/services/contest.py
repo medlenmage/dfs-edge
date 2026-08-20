@@ -902,6 +902,88 @@ def field_exposure(field: list[dict[str, Any]], top_n: int = 15) -> list[dict[st
     return ranked
 
 
+def reshape_batch(
+    entries: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    *,
+    target_count: int | None = None,
+    max_exposure_pct: float | None = None,
+    player_exposure_caps: dict[int, float] | None = None,
+    roi_boosts: dict[int, float] | None = None,
+) -> dict[str, Any]:
+    """
+    Re-rank and/or re-filter an ALREADY-SIMULATED batch's real results on
+    the results screen -- no new Monte Carlo run, this is a pure
+    post-hoc reshape over numbers that are already genuine, so a user
+    can shape their actual submitted portfolio without a full rebuild
+    every time they want to try a different exposure cap.
+
+    `roi_boosts` (player_id -> ROI PERCENTAGE POINTS, additive, may be
+    negative) nudges the SORT ORDER only: each entry's real `roi_pct`
+    is never modified, only a separate `adjusted_roi_pct` used to decide
+    ranking -- deliberately additive rather than a multiplicative %,
+    since multiplying an already-negative roi_pct (the common case --
+    most entries in a real GPP lose money) by a positive boost would
+    perversely make it MORE negative, exactly backwards from "nudge this
+    player's lineups up the rankings."
+
+    `max_exposure_pct`/`player_exposure_caps` (the latter overrides the
+    former for specific players) then greedily keep entries -- highest
+    `adjusted_roi_pct` first -- up to `target_count` (defaults to the
+    whole batch), dropping any entry that would push a player's exposure
+    over their cap relative to `target_count` (the size of the FINAL
+    portfolio being shaped, not the original batch) -- same incremental
+    exposure-counting technique already used during generation
+    (`_sample_one_lineup`'s `exposure_count`), just applied to a
+    pre-sorted candidate list instead of random sampling. A dropped
+    entry doesn't stop the walk -- a lower-ranked entry further down the
+    list may still fit within the caps.
+    """
+    if not entries or not results:
+        raise ContestError("Need at least one entry to reshape.")
+    if len(entries) != len(results):
+        raise ContestError("entries and results must be the same length (index-aligned).")
+
+    roi_boosts = roi_boosts or {}
+    player_exposure_caps = player_exposure_caps or {}
+    target = len(entries) if target_count is None else max(1, min(target_count, len(entries)))
+
+    scored = []
+    for entry, result in zip(entries, results):
+        player_ids = [p["id"] for p in entry["players"]]
+        boost = sum(roi_boosts.get(pid, 0.0) for pid in player_ids)
+        scored.append((result["roi_pct"] + boost, entry, result, player_ids))
+    scored.sort(key=lambda t: -t[0])
+
+    kept_entries: list[dict[str, Any]] = []
+    kept_results: list[dict[str, Any]] = []
+    exposure_count: dict[int, int] = {}
+
+    for adjusted, entry, result, player_ids in scored:
+        if len(kept_entries) >= target:
+            break
+        fits = True
+        for pid in player_ids:
+            cap = player_exposure_caps.get(pid, max_exposure_pct)
+            if cap is not None and (exposure_count.get(pid, 0) + 1) / target * 100 > cap + 1e-9:
+                fits = False
+                break
+        if not fits:
+            continue
+        for pid in player_ids:
+            exposure_count[pid] = exposure_count.get(pid, 0) + 1
+        kept_entries.append(entry)
+        kept_results.append({**result, "adjusted_roi_pct": round(adjusted, 1)})
+
+    return {
+        "entries": kept_entries,
+        "results": kept_results,
+        "exposure": field_exposure(kept_entries, top_n=20),
+        "num_kept": len(kept_entries),
+        "num_dropped": len(entries) - len(kept_entries),
+    }
+
+
 def _payout_curve(paid_count: int, prize_pool: float, shape: str) -> list[float]:
     """
     Payout per paid rank, best finish first. A deliberately simple,

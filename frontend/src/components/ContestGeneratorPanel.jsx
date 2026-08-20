@@ -30,6 +30,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [includedGames, setIncludedGames] = useState(new Set())
   const [state, setState] = useState({ status: 'idle' })
 
+  // Portfolio shaping (post-hoc, on an already-simulated batch's real
+  // results -- no rebuild). `originalReady` is the untouched full
+  // batch a "Reshape" always starts back from, so shaping twice in a
+  // row (trying a different cap, say) never compounds on top of an
+  // already-trimmed set.
+  const [originalReady, setOriginalReady] = useState(null)
+  const [roiBoosts, setRoiBoosts] = useState({})
+  const [exposureCaps, setExposureCaps] = useState({})
+  const [targetCount, setTargetCount] = useState('')
+  const [globalMaxExposure, setGlobalMaxExposure] = useState('')
+  const [reshaping, setReshaping] = useState(false)
+
   const [dkUploading, setDkUploading] = useState(false)
   const [dkUploadError, setDkUploadError] = useState('')
   const [dkContests, setDkContests] = useState(null)
@@ -81,6 +93,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const preset = contestTypes?.[contestType]
   const overRequested = preset && numLineups > preset.field_size
 
+  // Shared by run() and runDkEntries(): a fresh build/simulate is always
+  // the new "original" a Reshape starts back from, so any in-progress
+  // boosts/caps from a previous batch don't silently carry over.
+  function applyReady(ready) {
+    setState(ready)
+    setOriginalReady(ready)
+    setRoiBoosts({})
+    setExposureCaps({})
+    setTargetCount('')
+    setGlobalMaxExposure('')
+  }
+
   async function run() {
     setState({ status: 'loading' })
     try {
@@ -97,7 +121,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
       const result = simulate
         ? await api.buildContestEntriesSimulated(date, contestType, numLineups, opts)
         : await api.buildContestEntries(date, contestType, numLineups, opts)
-      setState({ status: 'ready', simulated: simulate, mode: 'generate', ...result })
+      applyReady({ status: 'ready', simulated: simulate, mode: 'generate', ...result })
     } catch (err) {
       setState({ status: 'error', message: err.message })
     }
@@ -131,10 +155,86 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
       })
-      setState({ status: 'ready', simulated: true, mode: 'dk-entries', ...result })
+      applyReady({ status: 'ready', simulated: true, mode: 'dk-entries', ...result })
     } catch (err) {
       setState({ status: 'error', message: err.message })
     }
+  }
+
+  // Recomputes the same aggregate shape build_contest_entries_simulated's
+  // own summary uses, from whatever subset of results survived a
+  // reshape -- entry_fee comes from the untouched original batch, since
+  // reshaping never changes what contest this is.
+  function summarizeResults(results, entryFee) {
+    const n = results.length
+    const avg = (key) => results.reduce((sum, r) => sum + r[key], 0) / n
+    const totalExpectedPayout = results.reduce((sum, r) => sum + r.expected_payout, 0)
+    const totalEntryCost = n * entryFee
+    const round = (v, d) => Math.round(v * 10 ** d) / 10 ** d
+    return {
+      avg_cash_probability_pct: round(avg('cash_probability_pct'), 1),
+      avg_first_place_pct: round(avg('first_place_pct'), 2),
+      avg_top_1pct_pct: round(avg('top_1pct_pct'), 2),
+      avg_top_10pct_pct: round(avg('top_10pct_pct'), 2),
+      avg_roi_pct: round(avg('roi_pct'), 1),
+      total_entry_cost: round(totalEntryCost, 2),
+      total_expected_payout: round(totalExpectedPayout, 2),
+      estimated_net_profit: round(totalExpectedPayout - totalEntryCost, 2),
+    }
+  }
+
+  async function reshape() {
+    if (!originalReady) return
+    setReshaping(true)
+    try {
+      const result = await api.reshapeContestEntries(originalReady.batch_id, {
+        targetCount: targetCount.trim() ? Number(targetCount) : null,
+        maxExposurePct: globalMaxExposure.trim() ? Number(globalMaxExposure) : null,
+        playerExposureCaps: Object.keys(exposureCaps).length ? exposureCaps : null,
+        roiBoosts: Object.keys(roiBoosts).length ? roiBoosts : null,
+      })
+      setState({
+        ...originalReady,
+        batch_id: result.batch_id,
+        num_entries_built: result.num_kept,
+        num_dropped: result.num_dropped,
+        exposure: result.exposure,
+        sample_entries: result.sample_entries,
+        results: result.results,
+        summary: summarizeResults(result.results, originalReady.contest.entry_fee),
+        reshaped: true,
+      })
+    } catch (err) {
+      setState({ status: 'error', message: err.message })
+    } finally {
+      setReshaping(false)
+    }
+  }
+
+  function resetShaping() {
+    setRoiBoosts({})
+    setExposureCaps({})
+    setTargetCount('')
+    setGlobalMaxExposure('')
+    if (originalReady) setState(originalReady)
+  }
+
+  function setRoiBoost(id, value) {
+    setRoiBoosts((prev) => {
+      const next = { ...prev }
+      if (value.trim() === '' || Number(value) === 0) delete next[id]
+      else next[id] = Number(value)
+      return next
+    })
+  }
+
+  function setExposureCap(id, value) {
+    setExposureCaps((prev) => {
+      const next = { ...prev }
+      if (value.trim() === '') delete next[id]
+      else next[id] = Number(value)
+      return next
+    })
   }
 
   return (
@@ -419,7 +519,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
 
       {state.status === 'ready' && (
         <>
-          {state.num_entries_built < state.num_entries_requested && (
+          {!state.reshaped && state.num_entries_built < state.num_entries_requested && (
             <div className="notice" style={{ marginBottom: 12 }}>
               Only built {state.num_entries_built.toLocaleString()} of{' '}
               {state.num_entries_requested.toLocaleString()} requested — the pool ran out of room
@@ -559,6 +659,55 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             )}
           </div>
 
+          {state.simulated && (
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="sub-line" style={{ marginBottom: 8 }}>
+                Shape your portfolio — no rebuild, this re-ranks and re-filters the real simulated
+                results above. Set an ROI boost or exposure cap on individual players in the table
+                below, then Reshape.
+              </div>
+              <div className="controls" style={{ flexWrap: 'wrap' }}>
+                <label className="dim" style={{ fontSize: 13 }}>
+                  Keep top{' '}
+                  <input
+                    type="number"
+                    min="1"
+                    placeholder={String(originalReady?.num_entries_built ?? '')}
+                    value={targetCount}
+                    onChange={(e) => setTargetCount(e.target.value)}
+                    style={{ width: 80 }}
+                  />
+                </label>
+                <label
+                  className="dim"
+                  style={{ fontSize: 13 }}
+                  title="Caps any player's exposure across the FINAL kept portfolio (not the original batch) -- overridden per-player by the Cap column below"
+                >
+                  Max exposure{' '}
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    placeholder="—"
+                    value={globalMaxExposure}
+                    onChange={(e) => setGlobalMaxExposure(e.target.value)}
+                    style={{ width: 70 }}
+                  />
+                  %
+                </label>
+                <button className="primary" onClick={reshape} disabled={reshaping || !originalReady}>
+                  {reshaping ? 'Reshaping…' : 'Reshape'}
+                </button>
+                {state.reshaped && <button onClick={resetShaping}>Reset to full batch</button>}
+                {state.reshaped && (
+                  <span className="badge" title="How many of the original batch's entries survived this reshape">
+                    {state.num_entries_built} kept, {state.num_dropped} dropped
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           {state.exposure.length > 0 && (
             <div className="card table-wrap" style={{ marginBottom: 14 }}>
               <div className="sub-line" style={{ marginBottom: 8 }}>
@@ -571,6 +720,22 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                     <th>Team</th>
                     <th className="num">Entries</th>
                     <th className="num">Exposure</th>
+                    {state.simulated && (
+                      <>
+                        <th
+                          className="num"
+                          title="ROI percentage points to add to every lineup containing this player, for RANKING purposes only -- the real simulated roi_pct is never changed. Negative nudges a player's lineups down."
+                        >
+                          Boost (pts)
+                        </th>
+                        <th
+                          className="num"
+                          title="This player's own exposure cap in the reshaped portfolio -- overrides the global Max exposure above"
+                        >
+                          Cap %
+                        </th>
+                      </>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -580,6 +745,31 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                       <td className="dim">{e.team}</td>
                       <td className="num">{e.count}</td>
                       <td className="num">{e.pct}%</td>
+                      {state.simulated && (
+                        <>
+                          <td className="num">
+                            <input
+                              type="number"
+                              step="1"
+                              placeholder="—"
+                              value={roiBoosts[e.id] ?? ''}
+                              onChange={(ev) => setRoiBoost(e.id, ev.target.value)}
+                              style={{ width: 64 }}
+                            />
+                          </td>
+                          <td className="num">
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              placeholder="—"
+                              value={exposureCaps[e.id] ?? ''}
+                              onChange={(ev) => setExposureCap(e.id, ev.target.value)}
+                              style={{ width: 56 }}
+                            />
+                          </td>
+                        </>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -676,10 +866,21 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                             <td className="num">{r ? `$${r.expected_payout.toFixed(2)}` : '—'}</td>
                             <td className="num">
                               {r ? (
-                                <span className={`badge ${r.roi_pct >= 0 ? 'ok' : 'risk'}`}>
-                                  {r.roi_pct >= 0 ? '+' : ''}
-                                  {r.roi_pct}%
-                                </span>
+                                <>
+                                  <span className={`badge ${r.roi_pct >= 0 ? 'ok' : 'risk'}`}>
+                                    {r.roi_pct >= 0 ? '+' : ''}
+                                    {r.roi_pct}%
+                                  </span>
+                                  {r.adjusted_roi_pct != null && r.adjusted_roi_pct !== r.roi_pct && (
+                                    <div
+                                      className="sub-line"
+                                      title="Real roi_pct plus any ROI boosts on this lineup's players -- ranking only, not a real simulated number"
+                                    >
+                                      {r.adjusted_roi_pct >= 0 ? '+' : ''}
+                                      {r.adjusted_roi_pct.toFixed(1)}% boosted
+                                    </div>
+                                  )}
+                                </>
                               ) : (
                                 '—'
                               )}

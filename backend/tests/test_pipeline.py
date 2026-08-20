@@ -3383,6 +3383,94 @@ async def main() -> int:
           and sim_batch["summary"]["avg_roi_pct"] != sim_batch["field_baseline"]["avg_roi_pct"],
           str((sim_batch["summary"]["avg_roi_pct"], sim_batch["field_baseline"]["avg_roi_pct"])))
 
+    print("\nPost-hoc portfolio shaping: reshape_batch (contest.py) -- exposure caps + ROI boost")
+
+    def _reshape_entry(pid_list, roi):
+        return (
+            {"players": [{"id": pid, "name": f"P{pid}", "team": "T"} for pid in pid_list]},
+            {"roi_pct": roi, "lineup_index": 0},
+        )
+
+    r_e1, r_r1 = _reshape_entry([201, 202, 203], 50.0)
+    r_e2, r_r2 = _reshape_entry([201, 204, 205], 30.0)
+    r_e3, r_r3 = _reshape_entry([206, 207, 208], 10.0)
+    r_e4, r_r4 = _reshape_entry([201, 209, 210], -5.0)
+    reshape_entries = [r_e1, r_e2, r_e3, r_e4]
+    reshape_results = [r_r1, r_r2, r_r3, r_r4]
+
+    plain = contest.reshape_batch(reshape_entries, reshape_results)
+    check("reshape_batch with no boosts/caps keeps every entry",
+          plain["num_kept"] == 4 and plain["num_dropped"] == 0, str(plain["num_kept"]))
+    check("reshape_batch with no boosts/caps preserves roi_pct-descending order",
+          [r["roi_pct"] for r in plain["results"]] == [50.0, 30.0, 10.0, -5.0],
+          str([r["roi_pct"] for r in plain["results"]]))
+    check("reshape_batch's adjusted_roi_pct equals roi_pct exactly when no boosts are given",
+          all(r["adjusted_roi_pct"] == r["roi_pct"] for r in plain["results"]), str(plain["results"]))
+
+    boosted = contest.reshape_batch(reshape_entries, reshape_results, roi_boosts={206: 50.0})
+    check("roi_boosts changes sort order -- a boosted player's lineup can jump ahead of a "
+          "higher-roi one that doesn't have them (206's lineup: 10 + 50 = 60, now ranked 1st)",
+          boosted["results"][0]["adjusted_roi_pct"] == 60.0
+          and boosted["entries"][0]["players"][0]["id"] == 206,
+          str([(e["players"][0]["id"], r["adjusted_roi_pct"])
+               for e, r in zip(boosted["entries"], boosted["results"])]))
+    check("roi_boosts never modifies the real roi_pct, only adjusted_roi_pct",
+          boosted["results"][0]["roi_pct"] == 10.0, str(boosted["results"][0]))
+
+    neg_boosted = contest.reshape_batch(reshape_entries, reshape_results, roi_boosts={201: -100.0})
+    check("a negative roi_boost correctly REDUCES adjusted_roi_pct (additive, not multiplicative -- "
+          "avoids the sign-flip bug a multiplicative % would cause on already-negative real ROI, "
+          "e.g. -5% roi * 1.2 would perversely become MORE negative under a naive +20% boost)",
+          neg_boosted["results"][0]["adjusted_roi_pct"] == 10.0
+          and neg_boosted["entries"][0]["players"][0]["id"] == 206,
+          str([(e["players"][0]["id"], r["adjusted_roi_pct"])
+               for e, r in zip(neg_boosted["entries"], neg_boosted["results"])]))
+
+    trimmed = contest.reshape_batch(reshape_entries, reshape_results, target_count=2)
+    check("target_count keeps only the top N post-boost entries",
+          trimmed["num_kept"] == 2 and trimmed["num_dropped"] == 2
+          and [r["roi_pct"] for r in trimmed["results"]] == [50.0, 30.0],
+          str(trimmed))
+
+    # Player 201 appears in 3 of the 4 entries (e1, e2, e4), sorted
+    # 50/30/-5 by roi_pct. A 25% cap against a 4-entry final portfolio
+    # allows only 1 of those 3 -- e1 (highest-ranked) survives, e2 and
+    # e4 get dropped once 201 hits its cap, and the walk keeps going
+    # rather than stopping early (e3, with no 201 at all, still gets
+    # kept).
+    capped = contest.reshape_batch(reshape_entries, reshape_results, max_exposure_pct=25.0)
+    check("max_exposure_pct drops entries once a player would exceed the cap relative to the "
+          "final kept count, without stopping the walk -- a later cap-respecting entry still "
+          "gets kept",
+          capped["num_kept"] == 2 and [r["roi_pct"] for r in capped["results"]] == [50.0, 10.0],
+          str(capped))
+    check("reshape_batch's exposure report reflects only the kept entries, not the original batch",
+          all(e["count"] <= capped["num_kept"] for e in capped["exposure"]), str(capped["exposure"]))
+
+    overridden = contest.reshape_batch(
+        reshape_entries, reshape_results, max_exposure_pct=25.0, player_exposure_caps={201: 100.0}
+    )
+    check("player_exposure_caps overrides max_exposure_pct for a specific player -- a high "
+          "override lets that player's lineups all survive despite a tight global cap",
+          overridden["num_kept"] == 4, str(overridden["num_kept"]))
+
+    try:
+        contest.reshape_batch([], [])
+        check("reshape_batch rejects an empty batch", False)
+    except contest.ContestError:
+        check("reshape_batch rejects an empty batch", True)
+
+    try:
+        contest.reshape_batch(reshape_entries, reshape_results[:2])
+        check("reshape_batch rejects mismatched entries/results lengths", False)
+    except contest.ContestError:
+        check("reshape_batch rejects mismatched entries/results lengths", True)
+
+    real_reshape = contest.reshape_batch(sim_batch["entries"], sim_batch["results"], target_count=5)
+    check("reshape_batch wired against a real simulated batch keeps exactly target_count entries "
+          "(no cap tight enough here to prevent filling it)",
+          real_reshape["num_kept"] == 5, str(real_reshape["num_kept"]))
+
     sim_roi_order = [r["roi_pct"] for r in sim_batch["results"]]
     check("build_contest_entries_simulated returns results sorted by roi_pct, highest first",
           sim_roi_order == sorted(sim_roi_order, reverse=True), str(sim_roi_order))
