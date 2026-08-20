@@ -18,6 +18,7 @@ const COLUMNS = [
   { key: 'ownershipPct', label: 'Own%', sortable: true, num: true },
   { key: 'inhouseFpts', label: 'In-house FPTS', sortable: true, num: true },
   { key: 'inhouseOwnershipPct', label: 'In-house Own%', sortable: true, num: true },
+  { key: 'leverage', label: 'Leverage', sortable: true, num: true },
   { key: 'why', label: 'Biggest factor', sortable: false },
 ]
 
@@ -117,6 +118,7 @@ export function HitterTable({ slate, limit = 50 }) {
             ownershipPct: h.projection?.ownership_pct ?? null,
             inhouseFpts: h.projection?.inhouse_fpts ?? null,
             inhouseOwnershipPct: h.projection?.inhouse_ownership_pct ?? null,
+            leverage: h.projection?.leverage_score ?? null,
             confirmed: team.lineup_confirmed,
             platoonDetail: h.edge.components.platoon.detail,
           })
@@ -310,6 +312,16 @@ export function HitterTable({ slate, limit = 50 }) {
                 </td>
                 <td className="num">
                   {r.inhouseOwnershipPct != null ? `${r.inhouseOwnershipPct.toFixed(1)}%` : '—'}
+                </td>
+                <td className="num">
+                  {r.leverage != null ? (
+                    <span className={`badge ${r.leverage >= 0 ? 'ok' : 'risk'}`}>
+                      {r.leverage >= 0 ? '+' : ''}
+                      {r.leverage.toFixed(1)}
+                    </span>
+                  ) : (
+                    '—'
+                  )}
                 </td>
                 <td className="sub-line">
                   {DRIVER_LABELS[r.driver] || r.driver || '—'}

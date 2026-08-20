@@ -3442,6 +3442,55 @@ async def main() -> int:
     check("at identical value, the most expensive (stud) play outdraws the mid-priced player",
           salary_tier_ownership[84003] > salary_tier_ownership[84002], str(salary_tier_ownership))
 
+    print("\nLeverage: real ceiling (variance.py's outcome pool) minus ownership%")
+
+    check("ceiling_from_pool reads the exact percentile from a known pool",
+          variance.ceiling_from_pool(list(range(1, 11)), 0.9) == 9, "")
+    check("ceiling_from_pool returns 0.0 for an empty pool rather than crashing",
+          variance.ceiling_from_pool([], 0.9) == 0.0, "")
+
+    # A genuinely streaky player -- 15 quiet games (3.0 pts) and 5 huge
+    # ones (20.0 pts), season average ~7.25 -- isolates real upside from
+    # a flat player's ceiling, which should sit close to his own mean.
+    streaky_games = (
+        [dict(_single_rbi_run_game(), rbi=0, runs=0) for _ in range(15)]  # 3.0 pts/game
+        + [dict(_single_rbi_run_game(), rbi=5, runs=5, hits=2, doubles=1, home_runs=1) for _ in range(5)]
+    )
+    inhouse_game_logs[80025] = streaky_games
+    inhouse_game_logs[80026] = flat_games  # reuse the flat 7.0-pts-every-game fixture from earlier
+
+    ceilings = await inhouse_projections.player_ceilings(
+        [{"id": 80025, "position": "OF"}, {"id": 80026, "position": "OF"}], INHOUSE_SEASON
+    )
+    check("a streaky player's ceiling sits well above his own season average -- real upside, not just the mean",
+          ceilings[80025] > 15.0, str(ceilings))
+    check("a perfectly flat player's ceiling stays close to his own mean -- no fabricated upside",
+          abs(ceilings[80026] - 7.0) < 1.0, str(ceilings))
+
+    # End-to-end through the real production path: _attach_inhouse_projections()
+    # on a minimal hand-built slate, confirming leverage_score is exactly
+    # ceiling minus ownership, using the function's own real outputs (not a
+    # hand-predicted number, since the ownership softmax has no simple
+    # closed form for a single-player pool).
+    lev_hitter = {
+        "id": 80025, "position": "OF", "edge": {"composite": 1.0},
+        "salary": {"salary": 5000, "position": "OF"}, "projection": None,
+    }
+    lev_out_games = [
+        {
+            "home": {"hitters": [lev_hitter], "implied_runs": 4.4, "probable_pitcher": None},
+            "away": {"hitters": [], "implied_runs": 4.4, "probable_pitcher": None},
+        }
+    ]
+    await mlb_slate._attach_inhouse_projections(lev_out_games, INHOUSE_SEASON)
+    lev_proj = lev_hitter["projection"] or {}
+    check("_attach_inhouse_projections attaches inhouse_ceiling and leverage_score together",
+          lev_proj.get("inhouse_ceiling") is not None and lev_proj.get("leverage_score") is not None,
+          str(lev_proj))
+    check("leverage_score is exactly ceiling minus ownership%",
+          lev_proj.get("leverage_score") == round(lev_proj["inhouse_ceiling"] - lev_proj["inhouse_ownership_pct"], 2),
+          str(lev_proj))
+
     print("\nJSON serialisation")
     import json
 

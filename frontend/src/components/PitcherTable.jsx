@@ -89,6 +89,7 @@ export function PitcherTable({ slate }) {
         ownershipPct: p.projection?.ownership_pct ?? null,
         inhouseFpts: p.projection?.inhouse_fpts ?? null,
         inhouseOwnershipPct: p.projection?.inhouse_ownership_pct ?? null,
+        leverage: p.projection?.leverage_score ?? null,
         venue: g.venue.name,
         parkHr: g.venue.park_factors.hr,
         roofClosed: g.venue.roof_closed,
@@ -162,6 +163,7 @@ export function PitcherTable({ slate }) {
             <th className="num">Own%</th>
             <th className="num">In-house FPTS</th>
             <th className="num">In-house Own%</th>
+            <th className="num">Leverage</th>
             <th>Park / conditions</th>
             <th>Biggest factor</th>
           </tr>
@@ -207,6 +209,16 @@ export function PitcherTable({ slate }) {
               </td>
               <td className="num">
                 {r.inhouseOwnershipPct != null ? `${r.inhouseOwnershipPct.toFixed(1)}%` : '—'}
+              </td>
+              <td className="num">
+                {r.leverage != null ? (
+                  <span className={`badge ${r.leverage >= 0 ? 'ok' : 'risk'}`}>
+                    {r.leverage >= 0 ? '+' : ''}
+                    {r.leverage.toFixed(1)}
+                  </span>
+                ) : (
+                  '—'
+                )}
               </td>
               <td>
                 <div className="sub-line">{r.venue}</div>
