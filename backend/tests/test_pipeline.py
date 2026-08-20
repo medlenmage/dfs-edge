@@ -3672,6 +3672,51 @@ async def main() -> int:
     except ValueError:
         check("extract_csv_text raises a clear error on a corrupted zip rather than an opaque crash", True)
 
+    print("\nOutcome-pool calibration (contest_results.py) -- backtesting real archived contest data")
+
+    check("outcome_percentile: a value at the exact pool median lands near the 50th percentile",
+          abs(contest_results.outcome_percentile(10.0, [0.0, 5.0, 10.0, 15.0, 20.0]) - 60.0) < 0.01,
+          contest_results.outcome_percentile(10.0, [0.0, 5.0, 10.0, 15.0, 20.0]))
+    check("outcome_percentile: a value below every pool member lands at the 0th percentile",
+          contest_results.outcome_percentile(-5.0, [0.0, 5.0, 10.0]) == 0.0, "")
+    check("outcome_percentile: a value above every pool member lands at the 100th percentile",
+          contest_results.outcome_percentile(100.0, [0.0, 5.0, 10.0]) == 100.0, "")
+    check("outcome_percentile: an empty pool returns a neutral 50.0 rather than crashing",
+          contest_results.outcome_percentile(10.0, []) == 50.0, "")
+
+    # A model whose real observations are genuinely uniformly spread
+    # across every percentile is, by definition, well-calibrated --
+    # this is the reference case calibration_summary()'s own docstring
+    # promises: mean near 50, ~80% inside the 10-90 band, ~50% inside
+    # 25-75.
+    uniform_percentiles = [p for p in range(0, 101, 5)]  # 0,5,...,100 -- 21 evenly-spaced points
+    uniform_summary = contest_results.calibration_summary(uniform_percentiles)
+    check("calibration_summary: a genuinely uniform spread of real percentiles reports mean_percentile near 50",
+          abs(uniform_summary["mean_percentile"] - 50.0) < 1.0, str(uniform_summary))
+    check("calibration_summary: a genuinely uniform spread reports pct_within_10_90 near the expected 80%",
+          abs(uniform_summary["pct_within_10_90"] - 80.0) < 5.0, str(uniform_summary))
+    check("calibration_summary: a genuinely uniform spread reports pct_within_25_75 near the expected 50%",
+          abs(uniform_summary["pct_within_25_75"] - 50.0) < 5.0, str(uniform_summary))
+
+    # A model whose pools are too NARROW keeps getting surprised by real
+    # outcomes landing in the tails -- percentiles cluster near 0/100.
+    narrow_summary = contest_results.calibration_summary([2.0, 5.0, 95.0, 98.0, 1.0, 99.0])
+    check("calibration_summary: real outcomes clustered in the tails (too-narrow pools) show a low "
+          "pct_within_10_90, catching real miscalibration rather than reporting a false-positive good score",
+          narrow_summary["pct_within_10_90"] < 50.0, str(narrow_summary))
+
+    # A model whose pools are too WIDE never gets surprised -- every
+    # real outcome lands safely near the middle of an overly-generous
+    # spread, percentiles cluster near 50.
+    wide_summary = contest_results.calibration_summary([48.0, 49.0, 50.0, 51.0, 52.0, 50.0])
+    check("calibration_summary: real outcomes clustered near the middle (too-wide pools) show a "
+          "pct_within_10_90 near 100%, also catching miscalibration in the opposite direction",
+          wide_summary["pct_within_10_90"] > 90.0, str(wide_summary))
+    check("calibration_summary: an empty observation list reports n=0 and None stats rather than crashing",
+          contest_results.calibration_summary([]) == {
+              "n": 0, "mean_percentile": None, "pct_within_10_90": None, "pct_within_25_75": None,
+          }, str(contest_results.calibration_summary([])))
+
     print("\nDraftKings entries CSV (dk_entries.py) -- simulating lineups you actually built on DK")
 
     # DK's real bulk-entries export packs two unrelated tables into one

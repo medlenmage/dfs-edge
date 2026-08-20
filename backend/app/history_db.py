@@ -168,6 +168,38 @@ async def archive_contest_results(
         log.exception("Failed to archive contest results for %s", contest_id)
 
 
+async def get_contest_player_results() -> list[dict[str, Any]]:
+    """
+    Every archived real player result across every uploaded contest --
+    date, contest, player identity, real final ownership%, and real
+    actual FPTS. The raw feed for backtesting anything against genuine
+    historical outcomes (e.g. checking whether the Monte Carlo outcome
+    pools' predicted spread is well-calibrated against what these
+    players actually scored) -- unlike get_my_contest_history(), this
+    is player-level, not just the user's own single identified entry
+    per contest. Returns [] (not an error) if Supabase isn't configured
+    or the query fails, same resilience convention as every other
+    function here.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT date, contest_id, contest_name, player_name,
+                       normalized_name, position, ownership_pct, actual_fpts
+                FROM contest_player_results
+                ORDER BY date ASC
+                """
+            )
+            return [dict(r) for r in rows]
+    except Exception:
+        log.exception("Failed to load contest player results")
+        return []
+
+
 async def get_my_contest_history() -> list[dict[str, Any]]:
     """
     Every uploaded contest with a real identified entry (my_entry_id
