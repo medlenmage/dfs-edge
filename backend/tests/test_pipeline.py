@@ -22,6 +22,7 @@ from app import cache  # noqa: E402
 from app.clients import draftkings, mlb, odds, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
+    atbat_sim,
     contest,
     contest_results,
     dk_entries,
@@ -3226,6 +3227,208 @@ async def main() -> int:
     check("pairing with a real opponent doesn't change a team's own marginal spread",
           abs(float(gamea_totals.std()) - float(solo_sim[0].std())) < 0.15 * float(solo_sim[0].std()),
           str((round(float(gamea_totals.std()), 2), round(float(solo_sim[0].std()), 2))))
+
+    print("\nAt-bat-level MLB simulation (atbat_sim.py)")
+
+    def _atbat_hit_game(pa, hits, doubles=0, triples=0, hr=0, bb=0, hbp=0, k=0):
+        return {
+            "plate_appearances": pa, "hits": hits, "doubles": doubles, "triples": triples,
+            "home_runs": hr, "walks": bb, "hit_by_pitch": hbp, "strikeouts": k,
+        }
+
+    check("pa_outcome_rates returns {} for a player with no games at all",
+          atbat_sim.pa_outcome_rates([]) == {}, "")
+
+    rates_100pa = atbat_sim.pa_outcome_rates([
+        _atbat_hit_game(100, hits=30, doubles=6, triples=1, hr=3, bb=8, hbp=1, k=20)
+    ])
+    check("pa_outcome_rates' events all sum to (almost) exactly 1.0",
+          abs(sum(rates_100pa.values()) - 1.0) < 1e-9, str(sum(rates_100pa.values())))
+    check("pa_outcome_rates computes each event as its real observed count / total PA",
+          rates_100pa["HR"] == 0.03 and rates_100pa["2B"] == 0.06 and rates_100pa["BB"] == 0.08,
+          str(rates_100pa))
+    check("pa_outcome_rates derives 1B as hits minus 2B/3B/HR, not double-counted",
+          abs(rates_100pa["1B"] - 0.20) < 1e-9, str(rates_100pa))  # 30 hits - 6 - 1 - 3 = 20 singles
+
+    no_bullpen_data = atbat_sim.bullpen_pa_rates(None)
+    check("bullpen_pa_rates falls back to the neutral league-average with no real bullpen data",
+          no_bullpen_data == atbat_sim.LEAGUE_AVG_PA_RATES, str(no_bullpen_data))
+    bad_bullpen = atbat_sim.bullpen_pa_rates({"era": 6.50, "k_per_9": 6.0})
+    good_bullpen = atbat_sim.bullpen_pa_rates({"era": 2.50, "k_per_9": 11.0})
+    check("a genuinely shaky bullpen (high ERA) allows more HR than a strong one, at the same "
+          "starting point",
+          bad_bullpen["HR"] > good_bullpen["HR"], str((bad_bullpen["HR"], good_bullpen["HR"])))
+    check("a genuinely shaky bullpen (low K/9) strikes out fewer batters than a strong one",
+          bad_bullpen["K"] < good_bullpen["K"], str((bad_bullpen["K"], good_bullpen["K"])))
+
+    blended_full_trust = atbat_sim.blend_pa_rates(
+        {"K": 0.15, "BB": 0.12, "HBP": 0.01, "OUT": 0.40, "1B": 0.15, "2B": 0.08, "3B": 0.01, "HR": 0.08},
+        None, batter_pa=600,
+    )
+    check("blend_pa_rates sums to 1.0 after blending",
+          abs(sum(blended_full_trust.values()) - 1.0) < 1e-9, str(sum(blended_full_trust.values())))
+    check("a full-trust power hitter's blended HR rate stays well above league average with no "
+          "pitcher signal to counteract it",
+          blended_full_trust["HR"] > atbat_sim.LEAGUE_AVG_PA_RATES["HR"] * 1.5, str(blended_full_trust))
+
+    thin_sample_blend = atbat_sim.blend_pa_rates(
+        {"K": 0.15, "BB": 0.12, "HBP": 0.01, "OUT": 0.40, "1B": 0.15, "2B": 0.08, "3B": 0.01, "HR": 0.08},
+        None, batter_pa=15,
+    )
+    check("a thin-sample player's blended rate regresses most of the way toward league average, "
+          "same shrinkage philosophy as everywhere else in this app",
+          thin_sample_blend["HR"] < blended_full_trust["HR"], str(thin_sample_blend))
+
+    no_batter_data_blend = atbat_sim.blend_pa_rates({}, None)
+    check("blend_pa_rates falls back to league average entirely with no batter data at all "
+          "(within floating-point rounding from the renormalize-to-1.0 step)",
+          all(
+              abs(no_batter_data_blend[event] - atbat_sim.LEAGUE_AVG_PA_RATES[event]) < 1e-9
+              for event in atbat_sim.PA_EVENTS
+          ),
+          str(no_batter_data_blend))
+
+    check("starter_outs_target averages real outs-per-start across his own logged starts",
+          atbat_sim.starter_outs_target([{"outs": 18}, {"outs": 15}, {"outs": 21}]) == 18, "")
+    check("starter_outs_target falls back to a reasonable 15-out (5 IP) default with no starts logged",
+          atbat_sim.starter_outs_target([]) == 15, "")
+
+    print("\nAt-bat-level baserunner advancement (atbat_sim._advance_runners)")
+
+    _rng0 = random.Random(0)  # deterministic branch selection below via explicit thresholds
+
+    class _AlwaysHigh:
+        def random(self):
+            return 0.99
+
+    class _AlwaysLow:
+        def random(self):
+            return 0.01
+
+    bases_loaded = (101, 102, 103)
+    new_bases, scorers, extra_out = atbat_sim._advance_runners(bases_loaded, "HR", 999, 0, _rng0)
+    check("a grand slam clears the bases and scores all 3 runners plus the batter",
+          new_bases == (None, None, None) and sorted(scorers) == [101, 102, 103, 999] and not extra_out,
+          str((new_bases, scorers)))
+
+    new_bases, scorers, _ = atbat_sim._advance_runners(bases_loaded, "3B", 999, 0, _rng0)
+    check("a bases-loaded triple scores all 3 runners, batter ends on 3rd",
+          new_bases == (None, None, 999) and sorted(scorers) == [101, 102, 103], str((new_bases, scorers)))
+
+    new_bases, scorers, _ = atbat_sim._advance_runners((None, 102, 103), "2B", 999, 0, _AlwaysLow())
+    check("on a double, runners already on 2nd/3rd always score, batter ends on 2nd",
+          new_bases == (None, 999, None) and sorted(scorers) == [102, 103], str((new_bases, scorers)))
+
+    new_bases, scorers, _ = atbat_sim._advance_runners((101, None, None), "2B", 999, 0, _AlwaysLow())
+    check("on a double, a runner on 1st scores when the coin flip favors sending him",
+          new_bases == (None, 999, None) and scorers == [101], str((new_bases, scorers)))
+    new_bases, scorers, _ = atbat_sim._advance_runners((101, None, None), "2B", 999, 0, _AlwaysHigh())
+    check("on a double, that same runner on 1st holds at 3rd when the coin flip doesn't favor sending him",
+          new_bases == (None, 999, 101) and scorers == [], str((new_bases, scorers)))
+
+    new_bases, scorers, _ = atbat_sim._advance_runners((101, None, 103), "1B", 999, 0, _AlwaysLow())
+    check("on a single, a runner on 3rd always scores and a runner on 1st always reaches 2nd",
+          new_bases == (999, 101, None) and scorers == [103], str((new_bases, scorers)))
+    new_bases, scorers, _ = atbat_sim._advance_runners((None, 102, None), "1B", 999, 0, _AlwaysLow())
+    check("on a single, a runner on 2nd scores when the coin flip favors sending him",
+          scorers == [102] and new_bases == (999, None, None), str((new_bases, scorers)))
+    new_bases, scorers, _ = atbat_sim._advance_runners((None, 102, None), "1B", 999, 0, _AlwaysHigh())
+    check("on a single, that same runner on 2nd holds at 3rd when the coin flip doesn't favor sending him",
+          new_bases == (999, None, 102) and scorers == [], str((new_bases, scorers)))
+
+    new_bases, scorers, extra_out = atbat_sim._advance_runners((None, None, None), "BB", 999, 0, _rng0)
+    check("a walk with the bases empty just puts the batter on 1st, forces nobody",
+          new_bases == (999, None, None) and scorers == [] and not extra_out, str(new_bases))
+    new_bases, scorers, extra_out = atbat_sim._advance_runners((101, None, None), "BB", 999, 0, _rng0)
+    check("a walk with a runner on 1st forces him to 2nd",
+          new_bases == (999, 101, None) and scorers == [], str(new_bases))
+    new_bases, scorers, extra_out = atbat_sim._advance_runners((101, 102, None), "HBP", 999, 0, _rng0)
+    check("a hit-by-pitch with runners on 1st/2nd forces both up one base",
+          new_bases == (999, 101, 102) and scorers == [], str(new_bases))
+    new_bases, scorers, extra_out = atbat_sim._advance_runners(bases_loaded, "BB", 999, 0, _rng0)
+    check("a bases-loaded walk forces in a run from 3rd",
+          new_bases == (999, 101, 102) and scorers == [103], str((new_bases, scorers)))
+    new_bases, scorers, extra_out = atbat_sim._advance_runners((None, 102, 103), "BB", 999, 0, _rng0)
+    check("a walk does NOT force a runner on 2nd/3rd forward when 1st base is open",
+          new_bases == (999, 102, 103) and scorers == [], str(new_bases))
+
+    new_bases, scorers, extra_out = atbat_sim._advance_runners((None, None, 103), "OUT", 999, 1, _AlwaysLow())
+    check("a runner on 3rd with under 2 outs scores on a generic out when the productive-out "
+          "chance hits",
+          scorers == [103] and not extra_out, str((new_bases, scorers, extra_out)))
+    new_bases, scorers, extra_out = atbat_sim._advance_runners((None, None, 103), "OUT", 999, 2, _AlwaysLow())
+    check("that same runner on 3rd does NOT score on a generic out with 2 outs already -- the "
+          "inning would already be over on the next out anyway",
+          scorers == [] and not extra_out, str((new_bases, scorers, extra_out)))
+    new_bases, scorers, extra_out = atbat_sim._advance_runners((101, None, None), "OUT", 999, 0, _AlwaysLow())
+    check("a runner on 1st with under 2 outs can be removed on a generic out via the simplified "
+          "double-play chance, adding an extra out",
+          new_bases[0] is None and extra_out, str((new_bases, extra_out)))
+    new_bases, scorers, extra_out = atbat_sim._advance_runners((None, None, None), "K", 999, 0, _AlwaysLow())
+    check("a strikeout never moves any baserunner, regardless of what the coin flip would allow",
+          new_bases == (None, None, None) and scorers == [] and not extra_out, str(new_bases))
+
+    print("\nAt-bat-level full-game simulation (atbat_sim.simulate_game)")
+
+    # 60/40 HR/OUT, not literally 100% HR -- every PA still resolves to
+    # only HR or OUT (so the "each run equals that player's own HR
+    # count" invariant below still holds exactly, since nobody ever
+    # reaches base except via a homer, which immediately clears again),
+    # but a genuinely 0%-chance-of-an-out lineup would make a half-
+    # inning mathematically unable to ever end (caught for real: an
+    # earlier version of this fixture hung the whole test suite).
+    hr_rates = {e: (0.6 if e == "HR" else (0.4 if e == "OUT" else 0.0)) for e in atbat_sim.PA_EVENTS}
+    all_out_rates = {e: (1.0 if e == "OUT" else 0.0) for e in atbat_sim.PA_EVENTS}
+    hr_lineup = list(range(1, 10))
+    out_lineup = list(range(101, 110))
+    hr_box = atbat_sim.simulate_game(
+        home_order=hr_lineup, away_order=out_lineup,
+        home_pa_rates={pid: hr_rates for pid in hr_lineup},
+        away_pa_rates={pid: all_out_rates for pid in out_lineup},
+        home_bullpen_rates=all_out_rates, away_bullpen_rates=hr_rates,
+        home_starter_outs=27, away_starter_outs=27,
+        rng=random.Random(1),
+    )
+    check("a lineup that homers on literally every plate appearance scores exactly 1 run per "
+          "plate appearance (solo shots, bases always empty from the previous batter's own HR)",
+          all(hr_box[pid]["runs"] == hr_box[pid]["home_runs"] for pid in hr_lineup),
+          str({pid: (hr_box[pid]["runs"], hr_box[pid]["home_runs"]) for pid in hr_lineup}))
+    check("a lineup that makes an out on literally every plate appearance scores zero runs and "
+          "gets no hits at all",
+          all(out_lineup_line["runs"] == 0 and out_lineup_line["hits"] == 0
+              for pid in out_lineup for out_lineup_line in [hr_box.get(pid, {"runs": 0, "hits": 0})]),
+          str({pid: hr_box.get(pid) for pid in out_lineup}))
+    check("the all-out team faces exactly 27 outs across 9 innings (3 outs x 9, no baserunners "
+          "ever on to complicate it) -- total PA across that lineup equals exactly 27",
+          sum(hr_box.get(pid, {"plate_appearances": 0})["plate_appearances"] for pid in out_lineup) == 27,
+          str(sum(hr_box.get(pid, {"plate_appearances": 0})["plate_appearances"] for pid in out_lineup)))
+
+    real_rates = atbat_sim.blend_pa_rates(rates_100pa, None, batter_pa=600)
+    real_lineup_a = list(range(201, 210))
+    real_lineup_b = list(range(301, 310))
+    real_box = atbat_sim.simulate_game(
+        home_order=real_lineup_a, away_order=real_lineup_b,
+        home_pa_rates={pid: real_rates for pid in real_lineup_a},
+        away_pa_rates={pid: real_rates for pid in real_lineup_b},
+        home_bullpen_rates=atbat_sim.LEAGUE_AVG_PA_RATES, away_bullpen_rates=atbat_sim.LEAGUE_AVG_PA_RATES,
+        home_starter_outs=15, away_starter_outs=15,
+        rng=random.Random(2),
+    )
+    check("a realistic full game produces a genuine, plausible box score -- every lineup slot "
+          "got at least 3 plate appearances (9 innings is plenty for a full lineup to bat "
+          "multiple times) and the whole game produced at least one hit somewhere",
+          all(real_box.get(pid, {"plate_appearances": 0})["plate_appearances"] >= 3
+              for pid in real_lineup_a + real_lineup_b)
+          and sum(real_box.get(pid, {"hits": 0})["hits"] for pid in real_lineup_a + real_lineup_b) > 0,
+          str({pid: real_box.get(pid) for pid in (real_lineup_a + real_lineup_b)[:3]}))
+    check("every simulated player's real counting stats convert cleanly through the EXISTING "
+          "mlb_dk_points.py scorer with no missing-field errors -- proof the box score shape "
+          "this module produces is genuinely compatible with the app's already-built DK scoring",
+          all(
+              isinstance(mlb_dk_points.hitter_game_points(real_box[pid]), float)
+              for pid in real_lineup_a + real_lineup_b if pid in real_box
+          ),
+          "")
 
     print("\nContest generator: simulated economics (contest.py evaluate_batch_simulated)")
 

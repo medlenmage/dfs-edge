@@ -408,6 +408,15 @@ async def get_player_game_log(
                         "walks": _i(stat.get("baseOnBalls")),
                         "hit_by_pitch": _i(stat.get("hitByPitch")),
                         "stolen_bases": _i(stat.get("stolenBases")),
+                        # Not used by mlb_dk_points.py (DK doesn't score
+                        # strikeouts against a hitter directly) -- added
+                        # for services/atbat_sim.py's per-PA outcome-type
+                        # rates, which need to distinguish a strikeout
+                        # from a ball in play to simulate an at-bat.
+                        # Already present in the raw API response (the
+                        # same field _normalise_stat() reads for season
+                        # k_pct), just not extracted here before.
+                        "strikeouts": _i(stat.get("strikeOuts")),
                     }
                 )
             rows.append(row)
