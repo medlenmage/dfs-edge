@@ -928,6 +928,48 @@ async def main() -> int:
     except optimizer.OptimizerError:
         check("build_player_pool rejects an unknown projection_source", True)
 
+    # Regression for a real bug found by backtesting the contest
+    # simulator against real GPP results: RotoWire's export doesn't
+    # cover every player on a slate, and a missing ownership_pct used
+    # to fall straight to 0 -- floored to ~0% owned by contest.py's
+    # sampler, making the simulated opponent field construction for
+    # those players closer to random than realistic. Ownership now
+    # falls back to the OTHER source when the requested one is missing
+    # it -- FPTS has no such fallback (a missing FPTS still excludes
+    # the player from the pool entirely, since there's no other signal
+    # to optimize against).
+    fallback_slate = {
+        "games": [
+            {
+                "home": {
+                    "abbrev": "FBK",
+                    "hitters": [
+                        {
+                            "id": 9401, "name": "NoRotoWireOwnership",
+                            "salary": {"salary": 4000, "position": "1B", "avg_points": None, "value": None},
+                            # RotoWire has an fpts number for him (real, priced) but never
+                            # exported an ownership% for him -- the exact real-world gap.
+                            "projection": {"fpts": 8.0, "ownership_pct": None, "inhouse_fpts": 6.0, "inhouse_ownership_pct": 12.5},
+                        },
+                        {
+                            "id": 9402, "name": "NeitherSourceHasOwnership",
+                            "salary": {"salary": 3500, "position": "2B", "avg_points": None, "value": None},
+                            "projection": {"fpts": 7.0, "ownership_pct": None, "inhouse_fpts": None},
+                        },
+                    ],
+                    "probable_pitcher": None,
+                    "scratches": [],
+                },
+                "away": {"abbrev": "FBK2", "hitters": [], "probable_pitcher": None, "scratches": []},
+            }
+        ]
+    }
+    fallback_pool = {p["id"]: p["ownership_pct"] for p in optimizer.build_player_pool(fallback_slate)}
+    check("ownership_pct falls back to the other source's ownership when RotoWire's own is missing",
+          fallback_pool[9401] == 12.5, str(fallback_pool))
+    check("ownership_pct floors to 0 (not a crash) when neither source has it",
+          fallback_pool[9402] == 0, str(fallback_pool))
+
     print("\nLineup optimizer: multi-lineup generation and exposure caps")
 
     # Real headroom at every slot type (3+ options per infield position,
