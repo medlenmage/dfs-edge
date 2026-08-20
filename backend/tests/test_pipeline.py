@@ -2874,6 +2874,73 @@ async def main() -> int:
     check("a pitcher's simulated outcome trends negatively with the opposing team having a big day",
           pitcher_opp_corr < -0.1, str(round(pitcher_opp_corr, 3)))
 
+    print("\nBring-back correlation: two teams facing EACH OTHER aren't independent (variance.py)")
+
+    # Two real opponents (GAMEA @ GAMEB) each get their own 8-hitter
+    # stack, both simulated in the SAME batch -- a real shootout should
+    # lift both offenses together some of the time, not leave them
+    # fully independent the way two teams that never play each other
+    # would be. Each entry is padded with 2 zero-variance filler
+    # "pitcher slot" players (simulate_batch() treats the first
+    # PITCHER_COUNT players of a flat `players` list as pitchers,
+    # matching every real entry's actual roster shape) so the fillers
+    # can't muddy the correlation measurement -- the same pattern the
+    # anti-correlation test above already uses.
+    gamea_ids = list(range(98001, 98009))
+    gameb_ids = list(range(98011, 98019))
+    gamec_ids = list(range(98021, 98029))  # a third team, NOT gamea's real opponent
+    for pid in gamea_ids + gameb_ids + gamec_ids:
+        sim_pools[pid] = [0.0, 20.0] * 100
+    bringback_filler_ids = list(range(98901, 98907))  # 2 per entry, 3 entries
+    for pid in bringback_filler_ids:
+        sim_pools[pid] = [0.0]
+
+    def _stack_entry(hitter_ids, team, opponent, filler_ids):
+        return _sim_entry([
+            *[_sim_player_full(pid, None) for pid in filler_ids],
+            *[_sim_player_full(pid, team, opponent=opponent) for pid in hitter_ids],
+        ])
+
+    gamea_entry = _stack_entry(gamea_ids, "GAMEA", "GAMEB", bringback_filler_ids[0:2])
+    gameb_entry = _stack_entry(gameb_ids, "GAMEB", "GAMEA", bringback_filler_ids[2:4])
+    gamec_entry = _stack_entry(gamec_ids, "GAMEC", "GAMED", bringback_filler_ids[4:6])
+
+    bringback_sim = variance.simulate_batch(
+        [gamea_entry, gameb_entry, gamec_entry], sim_pools, num_trials=5000, seed=8181
+    )
+    gamea_totals, gameb_totals, gamec_totals = bringback_sim[0], bringback_sim[1], bringback_sim[2]
+    real_opp_corr = float(np_module.corrcoef(gamea_totals, gameb_totals)[0, 1])
+    unrelated_corr = float(np_module.corrcoef(gamea_totals, gamec_totals)[0, 1])
+
+    check("two teams playing EACH OTHER show real positive correlation between their simulated totals",
+          real_opp_corr > 0.15, str(round(real_opp_corr, 3)))
+    check("two teams that are NOT playing each other stay independent (no spurious correlation)",
+          abs(unrelated_corr) < 0.1, str(round(unrelated_corr, 3)))
+    check("bring-back correlation is genuine but partial, not near-total like within-team stacking",
+          real_opp_corr < 0.9, str(round(real_opp_corr, 3)))
+
+    # GAMED never appears anywhere in this batch (only referenced as
+    # GAMEC's opponent) -- GAMEC must fall back to an independent day
+    # rather than erroring or silently correlating with nothing.
+    check("a team whose real opponent never appears in the batch still simulates cleanly",
+          gamec_totals.std() > 0, str(float(gamec_totals.std())))
+
+    # A solo run (GAMEA with no real opponent present at all) should
+    # land at roughly the same mean/spread as the paired run above --
+    # bring-back correlation is designed to change the CORRELATION
+    # between two same-game teams, not either team's own marginal
+    # distribution.
+    solo_sim = variance.simulate_batch(
+        [_stack_entry(gamea_ids, "GAMEA", None, bringback_filler_ids[0:2])],
+        sim_pools, num_trials=5000, seed=8181,
+    )
+    check("pairing with a real opponent doesn't change a team's own marginal mean",
+          abs(float(gamea_totals.mean()) - float(solo_sim[0].mean())) < 5.0,
+          str((round(float(gamea_totals.mean()), 2), round(float(solo_sim[0].mean()), 2))))
+    check("pairing with a real opponent doesn't change a team's own marginal spread",
+          abs(float(gamea_totals.std()) - float(solo_sim[0].std())) < 0.15 * float(solo_sim[0].std()),
+          str((round(float(gamea_totals.std()), 2), round(float(solo_sim[0].std()), 2))))
+
     print("\nContest generator: simulated economics (contest.py evaluate_batch_simulated)")
 
     import numpy as np_test
