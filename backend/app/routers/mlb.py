@@ -15,6 +15,7 @@ from app.clients import draftkings
 from app.services import (
     analysis,
     contest,
+    contest_results,
     dk_entries,
     lineup_export,
     mlb_slate,
@@ -921,3 +922,70 @@ async def simulate_dk_entries(
     result["results"] = full_results[:200]
     result["sample_entries"] = full_entries[:200]
     return {"date": day, **result}
+
+
+@router.post("/contest-results")
+async def upload_contest_results(
+    date: str | None = Query(None, description="Date this contest was played, defaults to today"),
+    contest_name: str | None = Query(None, description="A name you recognize this contest by (DK doesn't put one in the file itself)"),
+    entry_fee: float | None = Query(None, description="Real entry fee, for a running total-cost figure -- the file has no payout data at all"),
+    my_entry_id: str | None = Query(None, description="Your own EntryId, if you know it -- the reliable way to identify your entry"),
+    my_handle: str | None = Query(None, description="Your own DK handle, as a fallback if you don't know your EntryId -- a best-effort name match, not guaranteed in a big public field"),
+    file: UploadFile = File(..., description="A real DK contest-standings export -- the .zip DK gives you, or the .csv inside it"),
+) -> dict[str, Any]:
+    """
+    Upload a real, completed DraftKings contest's post-contest
+    standings export -- different from the pre-contest salary CSV or
+    the bulk-entries upload template. Archives every player's real
+    final ownership%/actual FPTS, and (once identified) your own
+    rank/points, permanently into Supabase (a no-op if SUPABASE_DB_URL
+    isn't set) -- real market ground truth for a future ownership-model
+    calibration pass, and a real bankroll/results-over-time history.
+    """
+    raw = await file.read()
+    try:
+        text = contest_results.extract_csv_text(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Couldn't read that file: {exc}") from exc
+
+    parsed = contest_results.parse_contest_standings(text)
+    if not parsed["entries"]:
+        raise HTTPException(
+            status_code=400,
+            detail="No contest entries found -- is this a real DK contest-standings export?",
+        )
+
+    day = date or date_cls.today().isoformat()
+    # DK's own export has no contest id/name in the file itself -- the
+    # caller supplies a name they recognize, and the (date, name) pair
+    # doubles as a stable id for upserting a re-upload of the same contest.
+    name = contest_name or "Contest"
+    cid = f"{day}:{name}"
+    my_entry = contest_results.find_my_entry(parsed["entries"], entry_id=my_entry_id, handle=my_handle)
+
+    asyncio.create_task(
+        history_db.archive_contest_results(
+            day, cid, name, parsed["player_pool"],
+            field_size=len(parsed["entries"]), entry_fee=entry_fee, my_entry=my_entry,
+        )
+    )
+
+    return {
+        "date": day,
+        "contest_id": cid,
+        "field_size": len(parsed["entries"]),
+        "players_found": len(parsed["player_pool"]),
+        "my_entry": my_entry,
+    }
+
+
+@router.get("/contest-results/history")
+async def get_contest_results_history() -> dict[str, Any]:
+    """Every previously-uploaded real contest with an identified entry
+    of yours, for a bankroll/results-over-time view."""
+    contests = await history_db.get_my_contest_history()
+    return {
+        "contests": contests,
+        "total_entries": len(contests),
+        "total_cost": round(sum(float(c.get("entry_fee") or 0) for c in contests), 2),
+    }

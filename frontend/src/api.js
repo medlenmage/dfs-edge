@@ -251,6 +251,24 @@ export const api = {
 
   uploadDkEntries: (date, file) => uploadFile(`/api/mlb/dk-entries?date=${date}`, file),
 
+  // A real, completed DK contest's post-contest standings export (the
+  // .zip DK gives you, or the .csv inside it) -- different from the
+  // pre-contest salary CSV or the bulk-entries upload template.
+  uploadContestResults: (
+    date,
+    file,
+    { contestName = null, entryFee = null, myEntryId = null, myHandle = null } = {},
+  ) => {
+    const params = new URLSearchParams({ date })
+    if (contestName) params.set('contest_name', contestName)
+    if (entryFee != null) params.set('entry_fee', entryFee)
+    if (myEntryId) params.set('my_entry_id', myEntryId)
+    if (myHandle) params.set('my_handle', myHandle)
+    return uploadFile(`/api/mlb/contest-results?${params.toString()}`, file)
+  },
+
+  contestResultsHistory: () => request('/api/mlb/contest-results/history'),
+
   simulateDkEntries: (
     date,
     contestId,

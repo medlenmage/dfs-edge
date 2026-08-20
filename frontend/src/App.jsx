@@ -8,6 +8,7 @@ import { GameGrid } from './components/GameCard'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { LineupsPanel } from './components/LineupsPanel'
 import { ContestGeneratorPanel } from './components/ContestGeneratorPanel'
+import { ResultsPanel } from './components/ResultsPanel'
 import { NflPanel } from './components/NflPanel'
 import { ScoreLegend } from './components/ScoreMeter'
 import { DkSlatePicker } from './components/DkSlatePicker'
@@ -19,6 +20,7 @@ const TABS = [
   { id: 'games', label: 'Games' },
   { id: 'lineups', label: 'Lineups' },
   { id: 'contest', label: 'Contest Generator' },
+  { id: 'results', label: 'Results' },
   { id: 'ai', label: 'AI analysis' },
 ]
 
@@ -326,6 +328,16 @@ export default function App() {
             <span className="hint">mass multi-entry — up to 10,000 of your own entries per contest</span>
           </div>
           <ContestGeneratorPanel date={date} slate={slate} projectionSource={projSource} />
+        </section>
+      )}
+
+      {slate && tab === 'results' && (
+        <section>
+          <div className="section-head">
+            <h2>Your contest results</h2>
+            <span className="hint">upload real DK contest-standings exports to track results and archive market ownership data</span>
+          </div>
+          <ResultsPanel date={date} />
         </section>
       )}
 
