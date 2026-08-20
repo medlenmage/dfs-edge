@@ -2580,6 +2580,16 @@ async def main() -> int:
           batch["summary"]["cashing_count"] <= batch["paid_count"], str(batch["summary"]))
     check("build_contest_entries reports exposure across the batch",
           len(batch["exposure"]) > 0, str(batch["exposure"][:1]))
+    check("build_contest_entries's summary now carries avg_roi_pct, derived from its own "
+          "total_estimated_payout/total_entry_cost",
+          batch["summary"]["avg_roi_pct"] == round(
+              (batch["summary"]["total_estimated_payout"] / batch["summary"]["total_entry_cost"] - 1) * 100, 1
+          ),
+          str(batch["summary"]))
+    check("build_contest_entries's field_baseline reports gpp_small's real 20% payout_pct and "
+          "-RAKE_PCT*100% avg_roi_pct, the fast/deterministic mode's own zero-skill reference point",
+          batch["field_baseline"] == {"avg_cash_probability_pct": 20.0, "avg_roi_pct": -contest.RAKE_PCT * 100},
+          str(batch["field_baseline"]))
 
     try:
         contest.build_contest_entries(mul_slate, "double_up", 200)
@@ -3339,6 +3349,40 @@ async def main() -> int:
           ),
           str(sim_batch["summary"]))
 
+    print("\nField-calibration output split: field_baseline (contest.py _field_baseline)")
+
+    # A zero-skill entry's expected ROI/cash rate is a closed-form fact
+    # derivable directly from the contest's own numbers -- no
+    # simulation needed. Hand-checkable case: a 1,000-entry contest,
+    # $10 entry, $8,000 real prize pool (not the standard rake formula,
+    # proving this reads the REAL prize_pool rather than re-deriving
+    # one), 20% payout_pct.
+    baseline = contest._field_baseline(0.20, 8000.0, 10.0, 1000)
+    check("_field_baseline's avg_cash_probability_pct is exactly payout_pct as a percentage",
+          baseline["avg_cash_probability_pct"] == 20.0, str(baseline))
+    check("_field_baseline's avg_roi_pct is exactly (prize_pool / (field_size * entry_fee) - 1) * 100 "
+          "-- (8000 / 10000 - 1) * 100 = -20.0",
+          baseline["avg_roi_pct"] == -20.0, str(baseline))
+
+    # Wired end-to-end: gpp_small's real rake-derived prize pool should
+    # reproduce -RAKE_PCT*100 exactly (this is the same closed-form fact
+    # the rake sanity check above verified empirically via full Monte
+    # Carlo simulation -- here it's read straight off the contest's own
+    # numbers, no simulation at all, and should match to the cent).
+    check("build_contest_entries_simulated's field_baseline reports the real gpp_small payout_pct "
+          "(20%) as avg_cash_probability_pct",
+          sim_batch["field_baseline"]["avg_cash_probability_pct"] == 20.0,
+          str(sim_batch["field_baseline"]))
+    check("build_contest_entries_simulated's field_baseline reports exactly -RAKE_PCT*100% avg_roi_pct "
+          "for the standard rake-derived prize pool -- a random zero-skill entry's true expected ROI",
+          sim_batch["field_baseline"]["avg_roi_pct"] == -contest.RAKE_PCT * 100,
+          str(sim_batch["field_baseline"]))
+    check("the entries batch's own avg_roi_pct is reported ALONGSIDE field_baseline, not folded "
+          "into one blended number -- the whole point of the split",
+          "avg_roi_pct" in sim_batch["summary"] and "avg_roi_pct" in sim_batch["field_baseline"]
+          and sim_batch["summary"]["avg_roi_pct"] != sim_batch["field_baseline"]["avg_roi_pct"],
+          str((sim_batch["summary"]["avg_roi_pct"], sim_batch["field_baseline"]["avg_roi_pct"])))
+
     sim_roi_order = [r["roi_pct"] for r in sim_batch["results"]]
     check("build_contest_entries_simulated returns results sorted by roi_pct, highest first",
           sim_roi_order == sorted(sim_roi_order, reverse=True), str(sim_roi_order))
@@ -3880,6 +3924,10 @@ async def main() -> int:
     check("build_dk_entries_simulated reports the real contest's own economics",
           dk_sim["field_size"] == 500 and dk_sim["prize_pool"] == 200.0,
           str((dk_sim["field_size"], dk_sim["prize_pool"])))
+    check("build_dk_entries_simulated's field_baseline uses the REAL hand-entered prize_pool ($200, "
+          "not the standard rake formula) -- (200 / (500*1.0) - 1) * 100 = -60.0",
+          dk_sim["field_baseline"] == {"avg_cash_probability_pct": 20.0, "avg_roi_pct": -60.0},
+          str(dk_sim["field_baseline"]))
     check("build_dk_entries_simulated's total_entry_cost uses the contest's entry_fee across every sampled entry",
           dk_sim["summary"]["total_entry_cost"] == 500.0, str(dk_sim["summary"]["total_entry_cost"]))
     check("build_dk_entries_simulated's results are sorted best-ROI-first",
