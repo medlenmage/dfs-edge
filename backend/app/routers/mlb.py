@@ -940,6 +940,21 @@ async def reshape_contest_entries(
     roi_boosts: dict[str, float] | None = Body(
         None, embed=True, description="Per-player ROI nudge in PERCENTAGE POINTS (additive, may be negative), keyed by player id as a string -- re-ranks results, never changes the real simulated roi_pct"
     ),
+    require_teams: list[str] | None = Body(
+        None, embed=True, description="Filter: keep only entries rostering a player from EVERY team listed (e.g. require a specific team be part of the stack)"
+    ),
+    exclude_teams: list[str] | None = Body(
+        None, embed=True, description="Filter: drop any entry rostering a player from ANY team listed"
+    ),
+    require_player_ids: list[int] | None = Body(
+        None, embed=True, description="Filter: keep only entries rostering EVERY player id listed (a specific combo, e.g. two hitters stacked together)"
+    ),
+    exclude_player_ids: list[int] | None = Body(
+        None, embed=True, description="Filter: drop any entry rostering ANY player id listed"
+    ),
+    stack_types: list[str] | None = Body(
+        None, embed=True, description="Filter: keep only entries whose own stack shape (e.g. '5-3', '4-4') is one of these -- an entry with no stack at all has stack_type ''"
+    ),
 ) -> dict[str, Any]:
     """
     Re-rank and/or re-filter an already-built batch's real results on
@@ -949,6 +964,12 @@ async def reshape_contest_entries(
     the "Simulate" paths (POST /contest-entries-simulated,
     POST /dk-entries/simulate) -- the fast deterministic mode's results
     don't carry a per-entry roi_pct today.
+
+    Filters (require/exclude teams, require/exclude specific player
+    combos, named stack shapes) run FIRST, narrowing the batch to only
+    entries matching every one given -- see contest.reshape_batch()'s
+    own docstring. `target_count`/exposure caps then apply to that
+    narrowed pool, not the original batch.
 
     Caches the reshaped batch under its OWN new batch_id (same TTL as
     any other build) so the existing CSV download endpoint works on it
@@ -979,6 +1000,11 @@ async def reshape_contest_entries(
                 {int(pid): pct for pid, pct in player_exposure_caps.items()} if player_exposure_caps else None
             ),
             roi_boosts={int(pid): pts for pid, pts in roi_boosts.items()} if roi_boosts else None,
+            require_teams=require_teams,
+            exclude_teams=exclude_teams,
+            require_player_ids=require_player_ids,
+            exclude_player_ids=exclude_player_ids,
+            stack_types=stack_types,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -994,6 +1020,7 @@ async def reshape_contest_entries(
         "batch_id": new_batch_id,
         "num_kept": reshaped["num_kept"],
         "num_dropped": reshaped["num_dropped"],
+        "num_filtered_out": reshaped["num_filtered_out"],
         "exposure": reshaped["exposure"],
         "sample_entries": reshaped["entries"][:200],
         "results": reshaped["results"][:200],

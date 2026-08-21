@@ -247,7 +247,17 @@ export const api = {
   // are) -> number.
   reshapeContestEntries: (
     batchId,
-    { targetCount = null, maxExposurePct = null, playerExposureCaps = null, roiBoosts = null } = {},
+    {
+      targetCount = null,
+      maxExposurePct = null,
+      playerExposureCaps = null,
+      roiBoosts = null,
+      requireTeams = null,
+      excludeTeams = null,
+      requirePlayerIds = null,
+      excludePlayerIds = null,
+      stackTypes = null,
+    } = {},
   ) =>
     request(`/api/mlb/contest-entries/${batchId}/reshape`, {
       method: 'POST',
@@ -256,6 +266,11 @@ export const api = {
         max_exposure_pct: maxExposurePct,
         player_exposure_caps: playerExposureCaps,
         roi_boosts: roiBoosts,
+        require_teams: requireTeams,
+        exclude_teams: excludeTeams,
+        require_player_ids: requirePlayerIds,
+        exclude_player_ids: excludePlayerIds,
+        stack_types: stackTypes,
       }),
     }),
 

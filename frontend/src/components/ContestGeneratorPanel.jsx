@@ -44,6 +44,15 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [globalMaxExposure, setGlobalMaxExposure] = useState('')
   const [reshaping, setReshaping] = useState(false)
 
+  // Filters -- post-hoc, surgical include/exclude by stack team, a
+  // specific player combo, or a named stack shape. Runs BEFORE the
+  // boost/cap ranking above, narrowing the candidate pool first.
+  const [requirePlayers, setRequirePlayers] = useState(new Set())
+  const [excludePlayers, setExcludePlayers] = useState(new Set())
+  const [requireTeams, setRequireTeams] = useState(new Set())
+  const [excludeTeams, setExcludeTeams] = useState(new Set())
+  const [stackTypeFilter, setStackTypeFilter] = useState(new Set())
+
   const [dkUploading, setDkUploading] = useState(false)
   const [dkUploadError, setDkUploadError] = useState('')
   const [dkContests, setDkContests] = useState(null)
@@ -101,6 +110,25 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const preset = contestTypes?.[contestType]
   const overRequested = preset && numLineups > preset.field_size
 
+  // Filters' own option lists -- derived from the untouched original
+  // batch (not whatever's currently reshaped/kept) so a filter option
+  // never disappears just because an earlier filter already trimmed
+  // it out of view.
+  const availableTeams = useMemo(() => {
+    const teams = new Set()
+    for (const e of originalReady?.sample_entries || []) {
+      for (const p of e.players || []) if (p.team) teams.add(p.team)
+    }
+    return [...teams].sort()
+  }, [originalReady])
+  const availableStackTypes = useMemo(() => {
+    const shapes = new Set()
+    for (const e of originalReady?.sample_entries || []) {
+      if (e.stack_type) shapes.add(e.stack_type)
+    }
+    return [...shapes].sort()
+  }, [originalReady])
+
   // Shared by run() and runDkEntries(): a fresh build/simulate is always
   // the new "original" a Reshape starts back from, so any in-progress
   // boosts/caps from a previous batch don't silently carry over.
@@ -111,6 +139,19 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
     setExposureCaps({})
     setTargetCount('')
     setGlobalMaxExposure('')
+    setRequirePlayers(new Set())
+    setExcludePlayers(new Set())
+    setRequireTeams(new Set())
+    setExcludeTeams(new Set())
+    setStackTypeFilter(new Set())
+  }
+
+  function toggleSetMember(setter, value) {
+    setter((prev) => {
+      const next = new Set(prev)
+      next.has(value) ? next.delete(value) : next.add(value)
+      return next
+    })
   }
 
   async function run() {
@@ -203,12 +244,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         maxExposurePct: globalMaxExposure.trim() ? Number(globalMaxExposure) : null,
         playerExposureCaps: Object.keys(exposureCaps).length ? exposureCaps : null,
         roiBoosts: Object.keys(roiBoosts).length ? roiBoosts : null,
+        requireTeams: requireTeams.size ? [...requireTeams] : null,
+        excludeTeams: excludeTeams.size ? [...excludeTeams] : null,
+        requirePlayerIds: requirePlayers.size ? [...requirePlayers] : null,
+        excludePlayerIds: excludePlayers.size ? [...excludePlayers] : null,
+        stackTypes: stackTypeFilter.size ? [...stackTypeFilter] : null,
       })
       setState({
         ...originalReady,
         batch_id: result.batch_id,
         num_entries_built: result.num_kept,
         num_dropped: result.num_dropped,
+        num_filtered_out: result.num_filtered_out,
         exposure: result.exposure,
         sample_entries: result.sample_entries,
         results: result.results,
@@ -227,6 +274,11 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
     setExposureCaps({})
     setTargetCount('')
     setGlobalMaxExposure('')
+    setRequirePlayers(new Set())
+    setExcludePlayers(new Set())
+    setRequireTeams(new Set())
+    setExcludeTeams(new Set())
+    setStackTypeFilter(new Set())
     if (originalReady) setState(originalReady)
   }
 
@@ -805,9 +857,78 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="sub-line" style={{ marginBottom: 8 }}>
                 Shape your portfolio — no rebuild, this re-ranks and re-filters the real simulated
-                results above. Set an ROI boost or exposure cap on individual players in the table
-                below, then Reshape.
+                results above. Filters narrow the pool first; then an ROI boost or exposure cap
+                (set per player in the table below) ranks and trims what's left. Then Reshape.
               </div>
+              {(availableTeams.length > 0 || availableStackTypes.length > 0) && (
+                <div className="controls" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
+                  {availableTeams.length > 0 && (
+                    <>
+                      <label className="dim" style={{ fontSize: 13 }} title="Keep only entries rostering a player from EVERY team selected">
+                        Require team(s){' '}
+                        <select
+                          multiple
+                          size={Math.min(4, availableTeams.length)}
+                          value={[...requireTeams]}
+                          onChange={(e) =>
+                            setRequireTeams(new Set([...e.target.selectedOptions].map((o) => o.value)))
+                          }
+                          style={{ minWidth: 90 }}
+                        >
+                          {availableTeams.map((t) => (
+                            <option key={t} value={t}>
+                              {t}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="dim" style={{ fontSize: 13 }} title="Drop any entry rostering a player from ANY team selected">
+                        Exclude team(s){' '}
+                        <select
+                          multiple
+                          size={Math.min(4, availableTeams.length)}
+                          value={[...excludeTeams]}
+                          onChange={(e) =>
+                            setExcludeTeams(new Set([...e.target.selectedOptions].map((o) => o.value)))
+                          }
+                          style={{ minWidth: 90 }}
+                        >
+                          {availableTeams.map((t) => (
+                            <option key={t} value={t}>
+                              {t}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </>
+                  )}
+                  {availableStackTypes.length > 0 && (
+                    <label className="dim" style={{ fontSize: 13 }} title="Keep only entries whose own stack shape (e.g. 5-3, 4-4) is one of these">
+                      Stack shape(s){' '}
+                      <select
+                        multiple
+                        size={Math.min(4, availableStackTypes.length)}
+                        value={[...stackTypeFilter]}
+                        onChange={(e) =>
+                          setStackTypeFilter(new Set([...e.target.selectedOptions].map((o) => o.value)))
+                        }
+                        style={{ minWidth: 70 }}
+                      >
+                        {availableStackTypes.map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {(requirePlayers.size > 0 || excludePlayers.size > 0) && (
+                    <span className="badge" title="Set per-player in the Req/Excl columns of the exposure table below">
+                      {requirePlayers.size} required player(s), {excludePlayers.size} excluded player(s)
+                    </span>
+                  )}
+                </div>
+              )}
               <div className="controls" style={{ flexWrap: 'wrap' }}>
                 <label className="dim" style={{ fontSize: 13 }}>
                   Keep top{' '}
@@ -844,6 +965,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                 {state.reshaped && (
                   <span className="badge" title="How many of the original batch's entries survived this reshape">
                     {state.num_entries_built} kept, {state.num_dropped} dropped
+                    {state.num_filtered_out > 0 ? `, ${state.num_filtered_out} filtered out` : ''}
                   </span>
                 )}
               </div>
@@ -875,6 +997,12 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                           title="This player's own exposure cap in the reshaped portfolio -- overrides the global Max exposure above"
                         >
                           Cap %
+                        </th>
+                        <th className="num" title="Filter: keep only entries rostering this player">
+                          Req
+                        </th>
+                        <th className="num" title="Filter: drop any entry rostering this player">
+                          Excl
                         </th>
                       </>
                     )}
@@ -908,6 +1036,20 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                               value={exposureCaps[e.id] ?? ''}
                               onChange={(ev) => setExposureCap(e.id, ev.target.value)}
                               style={{ width: 56 }}
+                            />
+                          </td>
+                          <td className="num">
+                            <input
+                              type="checkbox"
+                              checked={requirePlayers.has(e.id)}
+                              onChange={() => toggleSetMember(setRequirePlayers, e.id)}
+                            />
+                          </td>
+                          <td className="num">
+                            <input
+                              type="checkbox"
+                              checked={excludePlayers.has(e.id)}
+                              onChange={() => toggleSetMember(setExcludePlayers, e.id)}
                             />
                           </td>
                         </>

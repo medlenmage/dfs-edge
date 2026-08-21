@@ -4534,6 +4534,76 @@ async def main() -> int:
           "override lets that player's lineups all survive despite a tight global cap",
           overridden["num_kept"] == 4, str(overridden["num_kept"]))
 
+    print("\nPost-hoc portfolio shaping: reshape_batch Filters -- stack team / player combo / stack shape")
+
+    def _filter_entry(player_specs, roi, stack_type=""):
+        return (
+            {
+                "players": [{"id": pid, "name": f"P{pid}", "team": team} for pid, team in player_specs],
+                "stack_type": stack_type,
+            },
+            {"roi_pct": roi, "lineup_index": 0},
+        )
+
+    f_e1, f_r1 = _filter_entry([(301, "CLE"), (311, "CLE"), (312, "CLE")], 40.0, "3")
+    f_e2, f_r2 = _filter_entry([(302, "NYY"), (321, "NYY")], 35.0, "2")
+    f_e3, f_r3 = _filter_entry([(301, "CLE"), (331, "BOS")], 20.0, "")
+    f_e4, f_r4 = _filter_entry([(303, "BOS"), (341, "BOS"), (342, "BOS")], 10.0, "3")
+    filter_entries = [f_e1, f_e2, f_e3, f_e4]
+    filter_results = [f_r1, f_r2, f_r3, f_r4]
+
+    require_cle = contest.reshape_batch(filter_entries, filter_results, require_teams=["CLE"])
+    check("require_teams keeps only entries rostering a player from that team (e1, e3 have CLE)",
+          [r["roi_pct"] for r in require_cle["results"]] == [40.0, 20.0], str(require_cle["results"]))
+    check("require_teams reports the rest as num_filtered_out, not num_dropped",
+          require_cle["num_filtered_out"] == 2 and require_cle["num_dropped"] == 0, str(require_cle))
+
+    exclude_cle = contest.reshape_batch(filter_entries, filter_results, exclude_teams=["CLE"])
+    check("exclude_teams keeps only entries with NO player from that team (e2, e4 have no CLE)",
+          [r["roi_pct"] for r in exclude_cle["results"]] == [35.0, 10.0], str(exclude_cle["results"]))
+
+    require_301 = contest.reshape_batch(filter_entries, filter_results, require_player_ids=[301])
+    check("require_player_ids keeps only entries rostering that exact player (301 is in e1, e3)",
+          [r["roi_pct"] for r in require_301["results"]] == [40.0, 20.0], str(require_301["results"]))
+
+    exclude_301 = contest.reshape_batch(filter_entries, filter_results, exclude_player_ids=[301])
+    check("exclude_player_ids drops any entry rostering that player (e1, e3 dropped)",
+          [r["roi_pct"] for r in exclude_301["results"]] == [35.0, 10.0], str(exclude_301["results"]))
+
+    stack3_only = contest.reshape_batch(filter_entries, filter_results, stack_types=["3"])
+    check("stack_types keeps only entries with a matching named stack shape (e1, e4 are '3')",
+          [r["roi_pct"] for r in stack3_only["results"]] == [40.0, 10.0], str(stack3_only["results"]))
+
+    combo = contest.reshape_batch(filter_entries, filter_results, stack_types=["3"], require_teams=["CLE"])
+    check("multiple filters combine as AND -- only e1 is both a '3' stack AND has CLE",
+          [r["roi_pct"] for r in combo["results"]] == [40.0], str(combo["results"]))
+
+    # target is computed against the FILTERED pool (2 entries: e1, e3),
+    # not the original batch of 4 -- a 50% cap means exactly 1 of those
+    # 2 entries can carry player 301 (1/2 = 50%, right at the cap;
+    # a 2nd occurrence would be 2/2 = 100%, over it). If target were
+    # miscomputed against the original 4, 50% would instead allow 2
+    # occurrences (2/4), and both e1 and e3 would wrongly survive.
+    filter_then_cap = contest.reshape_batch(
+        filter_entries, filter_results, require_teams=["CLE"], max_exposure_pct=50.0,
+    )
+    check("target_count/exposure caps apply to the FILTERED pool, not the original batch -- "
+          "player 301 (in both remaining CLE entries) hits a 50% cap against just those 2, "
+          "so only the higher-roi one (e1) survives",
+          filter_then_cap["num_kept"] == 1 and filter_then_cap["results"][0]["roi_pct"] == 40.0,
+          str(filter_then_cap))
+
+    try:
+        contest.reshape_batch(filter_entries, filter_results, require_teams=["NOTATEAM"])
+        check("reshape_batch raises when a filter matches nothing at all", False)
+    except contest.ContestError:
+        check("reshape_batch raises when a filter matches nothing at all", True)
+
+    no_filter = contest.reshape_batch(filter_entries, filter_results)
+    check("no filters given: num_filtered_out is 0 and every entry is a real candidate, "
+          "same behavior as before Filters existed",
+          no_filter["num_filtered_out"] == 0 and no_filter["num_kept"] == 4, str(no_filter))
+
     try:
         contest.reshape_batch([], [])
         check("reshape_batch rejects an empty batch", False)
