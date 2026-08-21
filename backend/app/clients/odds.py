@@ -8,14 +8,26 @@ The Odds API charges "credits". Roughly:
   * One /odds call for a whole sport costs
         (number of markets) x (number of regions)
     ...so pulling h2h + spreads + totals for all of MLB costs 3 credits.
-    Refreshing every 10 minutes for 12 hours = ~216 credits/day. That
-    already exceeds the free tier's 500/month.
 
-  * Player props are priced PER GAME. Pulling 4 prop markets across a
-    15-game slate costs ~60 credits per refresh. Cache aggressively.
+  * Player props are priced PER GAME (there's no bulk multi-game props
+    call, only per-event). Pulling this app's 3 prop markets
+    (batter_home_runs, batter_hits, pitcher_strikeouts) across a
+    15-game slate costs ~45 credits per full refresh.
 
-The $30/month plan gives 20,000 credits, which comfortably covers game
-lines refreshed every 10 minutes plus a few prop pulls per slate.
+Both `get_game_lines()` and `get_player_props()` cache by CALENDAR DAY
+(the cache key embeds `day`, with a multi-day TTL) rather than a short
+rolling TTL -- the first request for a given day fetches, everything
+after that for the rest of the day is served from cache, regardless of
+how many times the slate gets rebuilt. Pass `force=True` (the existing
+"Refresh matchups" button already does) to explicitly bypass this and
+pull a genuinely fresh line/prop within the same day.
+
+At that once-a-day cadence, a real 500-credit/month free-tier budget
+covers game lines (3 credits/day = ~90/month) plus 3-market props on a
+realistic ~10-game slate (30 credits/day = ~900/month for props ALONE
+if pulled every single day) -- still tight for a full-season daily
+habit, but the $30/month/20,000-credit plan comfortably covers both at
+this cadence with a lot of room to spare.
 
 Your remaining balance comes back in response headers on every call and
 is surfaced at /api/health so you can keep an eye on it.
@@ -37,15 +49,24 @@ log = logging.getLogger(__name__)
 BASE = "https://api.the-odds-api.com/v4"
 SPORT_KEYS = {"mlb": "baseball_mlb", "nfl": "americanfootball_nfl", "nba": "basketball_nba"}
 
-# Batter/pitcher prop markets worth pulling for MLB DFS.
+# Batter/pitcher prop markets worth pulling for MLB DFS. batter_total_bases
+# was deliberately dropped (kept the 3 markets with the clearest, most
+# directly DFS-relevant read) to cut the per-game cost from 4 credits to 3.
 MLB_PROP_MARKETS = [
     "batter_home_runs",
     "batter_hits",
-    "batter_total_bases",
     "pitcher_strikeouts",
 ]
 
 _USAGE_KEY = "odds:usage"
+
+# Cache TTL for both game lines and player props -- day-keyed cache
+# entries (see get_game_lines/get_player_props below) only ever need to
+# outlive the day they're for, but a multi-day TTL matches this app's
+# existing convention for every other day-keyed cache (projections.py,
+# salaries.py, dk_entries.py all use the same value) and costs nothing
+# extra, since a stale prior day's key is simply never looked up again.
+_DAILY_TTL = 60 * 60 * 24 * 7
 
 
 async def _get(path: str, params: dict[str, Any]) -> Any:
@@ -104,13 +125,19 @@ def get_usage() -> dict[str, Any] | None:
 # Game lines
 # --------------------------------------------------------------------------
 
-async def get_game_lines(sport: str = "mlb", *, force: bool = False) -> list[dict[str, Any]]:
+async def get_game_lines(
+    sport: str = "mlb", *, day: str, force: bool = False
+) -> list[dict[str, Any]]:
     """
     Moneyline, run line and total for every upcoming game.
 
     The total is the single most useful number on the whole dashboard:
     it is the market's estimate of combined runs, and it correlates with
     DFS scoring better than almost anything you can compute yourself.
+
+    Cached once per `day` (see the module docstring's credit-cost math)
+    -- pass `force=True` to explicitly bypass and pull a fresh line
+    within the same day (the existing "Refresh matchups" button does).
     """
     settings = get_settings()
     if not settings.odds_api_key:
@@ -131,7 +158,7 @@ async def get_game_lines(sport: str = "mlb", *, force: bool = False) -> list[dic
 
     try:
         events = await cached(
-            f"odds:{sport}:lines", settings.ttl_odds, _load, force=force
+            f"odds:{sport}:lines:{day}", _DAILY_TTL, _load, force=force
         )
     except ApiError as exc:
         log.warning("Odds fetch failed: %s", exc)
@@ -221,6 +248,9 @@ async def get_player_props(
     event_id: str,
     sport: str = "mlb",
     markets: list[str] | None = None,
+    *,
+    day: str,
+    force: bool = False,
 ) -> dict[str, Any]:
     """
     Prop lines for a single game. Only called when ODDS_FETCH_PROPS=true.
@@ -228,6 +258,11 @@ async def get_player_props(
     Props are gold for DFS -- a batter priced at +320 to hit a home run
     is the market telling you his HR probability is about 24%, which you
     can compare against his salary.
+
+    Cached once per `day` per event, same "once a day, force to bypass"
+    policy as get_game_lines() -- see the module docstring's credit-cost
+    math for why this matters so much more here (props are billed per
+    GAME, not once for the whole slate).
     """
     settings = get_settings()
     if not settings.odds_api_key or not settings.odds_fetch_props:
@@ -249,7 +284,7 @@ async def get_player_props(
 
     try:
         payload = await cached(
-            f"odds:props:{event_id}", settings.ttl_odds, _load
+            f"odds:props:{event_id}:{day}", _DAILY_TTL, _load, force=force
         )
     except ApiError as exc:
         log.warning("Prop fetch failed for %s: %s", event_id, exc)

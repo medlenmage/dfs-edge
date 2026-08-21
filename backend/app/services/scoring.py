@@ -25,10 +25,10 @@ from typing import Any
 # Weights -- these must sum to 1.0
 # --------------------------------------------------------------------------
 WEIGHTS = {
-    "platoon": 0.15,          # how the hitter performs vs this pitcher's hand
-    "team_total": 0.17,       # Vegas implied runs for his team
-    "pitcher": 0.14,          # how vulnerable this pitcher is to this hand
-    "contact_quality": 0.13,  # Statcast barrel/hard-hit/xwOBA vs league average
+    "platoon": 0.14,          # how the hitter performs vs this pitcher's hand
+    "team_total": 0.16,       # Vegas implied runs for his team
+    "pitcher": 0.13,          # how vulnerable this pitcher is to this hand
+    "contact_quality": 0.12,  # Statcast barrel/hard-hit/xwOBA vs league average
     "stolen_base": 0.07,      # his own season-long stolen-base rate vs league average
     "park": 0.08,             # ballpark HR factor for his handedness
     "bullpen": 0.05,          # opposing team's relief corps' SEASON-long quality (ERA vs league)
@@ -36,12 +36,13 @@ WEIGHTS = {
     "weather": 0.06,          # temperature + wind
     "form": 0.03,             # last 15 games vs season baseline
     "home_road": 0.01,        # his own home/road split
-    "home_run": 0.07,         # his own individual HR probability vs this specific pitcher
+    "home_run": 0.06,         # his own individual HR probability vs this specific pitcher, blended with a real market HR prop when one exists
+    "hit_probability": 0.05,  # real market "will he get a hit tonight" prop -- neutral (no opinion) when no prop line was fetched
 }
-# All twelve trimmed down proportionally to make room for `home_run`
-# below, rather than carving the new weight entirely out of one or two
-# components -- every existing signal loses a little ground, none loses
-# most of it.
+# Thirteen weights, each trimmed a little (never gutted) to make room
+# for the newest addition -- same philosophy each prior addition here
+# used (see `home_run`'s own original note): every existing signal
+# loses a little ground, none loses most of it.
 
 # Baselines used when a component is missing entirely.
 NEUTRAL = 1.0
@@ -231,6 +232,17 @@ def weather_component(
     }
 
 
+# How much weight the real market gets vs. this app's own season-rate
+# model, whenever a real batter_home_runs/pitcher_strikeouts prop line
+# was actually fetched for a player -- weighted toward the market since
+# real sportsbook pricing captures live information (today's actual
+# lineup construction, weather already baked in by the book, sharp
+# money) a season-average-only model has no way to see. Not 100%
+# market, though -- a single book's line can move on thin liquidity or
+# outright error, so the model still anchors it a little.
+MARKET_BLEND_WEIGHT = 0.7
+
+
 def home_run_component(
     season_stat: dict[str, Any] | None,
     league_avg_hr_per_pa: float | None,
@@ -239,6 +251,7 @@ def home_run_component(
     pitcher_hr_per_9: float | None,
     league_avg_pitcher_hr_per_9: float | None,
     expected_pa: float = 4.3,
+    market_hr_probability_pct: float | None = None,
 ) -> dict[str, Any]:
     """
     Individual home-run probability -- how likely is THIS batter,
@@ -251,6 +264,13 @@ def home_run_component(
     tonight's park/weather context to turn it into a real "at least one
     home run tonight" probability -- the same framing a real HR prop
     line uses.
+
+    `market_hr_probability_pct`, when a real batter_home_runs prop line
+    was fetched for this player tonight (clients/odds.py, gated behind
+    ODDS_FETCH_PROPS), blends the market's own implied probability in at
+    MARKET_BLEND_WEIGHT -- both the display `probability_pct` and the
+    `value` multiplier that actually feeds `combine()`. Neutral (no
+    change) whenever no prop line exists for this player.
 
     Returns two different things by design:
       - `value`: the 1.00-centred multiplier that feeds `combine()`.
@@ -267,7 +287,16 @@ def home_run_component(
     own_rate = (season_stat or {}).get("hr_per_pa")
     pa = (season_stat or {}).get("pa") or 0
     if own_rate is None or not league_avg_hr_per_pa:
-        return {"value": NEUTRAL, "probability_pct": None, "detail": "no home-run rate data"}
+        if market_hr_probability_pct is None:
+            return {"value": NEUTRAL, "probability_pct": None, "detail": "no home-run rate data"}
+        # No model rate to blend against (a very thin or missing season
+        # sample) -- the market is the only real signal available, so
+        # use it outright rather than discarding it.
+        return {
+            "value": NEUTRAL,
+            "probability_pct": market_hr_probability_pct,
+            "detail": f"{market_hr_probability_pct}% market-implied HR chance (no season rate to blend against)",
+        }
 
     # A true HR-rate talent gap between players is much wider, proportionally,
     # than an OPS split -- same reasoning `stolen_base_component` already
@@ -282,13 +311,63 @@ def home_run_component(
         min(0.5, (league_avg_hr_per_pa * own_ratio) * park_hr_factor * weather_hr_multiplier * pitcher_factor),
     )
     probability_pct = round(max(0.0, min(70.0, (1 - (1 - adjusted_rate) ** expected_pa) * 100)), 1)
+    detail = f"{probability_pct}% HR chance tonight ({own_rate:.3f} HR/PA season rate)"
+
+    if market_hr_probability_pct is not None:
+        # Compare the market's probability against a LEAGUE-AVERAGE
+        # equivalent (the same binomial expansion above, at the league
+        # rate) to get a comparable "how much better/worse than average
+        # tonight" ratio, the same shape `value` already is -- then
+        # blend both the multiplier and the display probability.
+        league_avg_probability_pct = max(
+            0.0, min(70.0, (1 - (1 - league_avg_hr_per_pa) ** expected_pa) * 100)
+        )
+        if league_avg_probability_pct:
+            market_value = max(0.5, min(1.6, market_hr_probability_pct / league_avg_probability_pct))
+            value = round(
+                (1 - MARKET_BLEND_WEIGHT) * value + MARKET_BLEND_WEIGHT * market_value, 3
+            )
+        probability_pct = round(
+            (1 - MARKET_BLEND_WEIGHT) * probability_pct + MARKET_BLEND_WEIGHT * market_hr_probability_pct, 1
+        )
+        detail = f"{probability_pct}% HR chance tonight (blended with a real {market_hr_probability_pct}% market prop)"
 
     return {
         "value": value,
         "probability_pct": probability_pct,
         "hr_per_pa": own_rate,
         "sample": pa,
-        "detail": f"{probability_pct}% HR chance tonight ({own_rate:.3f} HR/PA season rate)",
+        "detail": detail,
+    }
+
+
+# Empirical, roughly league-average probability a starting hitter records
+# at least one hit across a typical game's worth of PA -- a fixed
+# reference point, same spirit as LEAGUE_IMPLIED_RUNS above. No
+# per-slate baseline exists for this today (unlike hr_per_pa/sb_per_pa/
+# etc, which mlb_slate.py already computes from real league splits), so
+# this component is deliberately market-only rather than inventing a
+# from-scratch season-rate model to blend against.
+LEAGUE_AVG_HIT_PROBABILITY_PCT = 68.0
+
+
+def hit_probability_component(market_hit_probability_pct: float | None) -> dict[str, Any]:
+    """
+    Real market signal only -- unlike `home_run_component`, there's no
+    in-house model here to blend against. Converts a real "at least one
+    hit tonight" market-implied probability (clients/odds.py's
+    batter_hits prop) into a 1.00-centred multiplier against
+    LEAGUE_AVG_HIT_PROBABILITY_PCT. Neutral (1.0, no opinion) whenever
+    no real prop line was fetched for this player tonight -- this
+    component never fabricates a hit probability on its own.
+    """
+    if market_hit_probability_pct is None:
+        return {"value": NEUTRAL, "probability_pct": None, "detail": "no market hit prop available"}
+    value = round(max(0.6, min(1.4, market_hit_probability_pct / LEAGUE_AVG_HIT_PROBABILITY_PCT)), 3)
+    return {
+        "value": value,
+        "probability_pct": market_hit_probability_pct,
+        "detail": f"{market_hit_probability_pct}% market-implied chance of a hit tonight",
     }
 
 
@@ -495,14 +574,26 @@ def strikeout_potential_component(
     league_avg_k9: float | None,
     opposing_hitters: list[dict[str, Any]] | None,
     league_avg_hitter_k_pct: float | None,
+    market_k_line: float | None = None,
+    expected_ip: float = 5.5,
 ) -> dict[str, Any]:
     """
     Strikeout upside: his own swing-and-miss stuff, blended with how
     strikeout-prone the lineup he's facing is.
 
-    A power arm against a whiff-prone lineup should score well here even
-    on a night his ERA is nothing special -- that's the point of
-    splitting this out from `own_quality` instead of burying it in ERA.
+    A power arm against a whiff-prone lineup should score well even on
+    a night his ERA is nothing special -- that's the point of splitting
+    this out from `own_quality` instead of burying it in ERA.
+
+    `market_k_line`, when a real pitcher_strikeouts prop line was
+    fetched for this pitcher tonight (clients/odds.py, gated behind
+    ODDS_FETCH_PROPS), converts the market's own posted strikeout total
+    into an equivalent K/9 pace (assuming `expected_ip` innings, a
+    typical current-era start) and blends it into `value` at
+    MARKET_BLEND_WEIGHT -- real sportsbook pricing already accounts for
+    tonight's specific opponent and any info this app's own model can't
+    see. Neutral (no change) whenever no prop line exists for this
+    pitcher.
     """
     own_k9 = (season_stat or {}).get("k_per_9")
     pitcher_factor = (
@@ -529,10 +620,20 @@ def strikeout_potential_component(
         bits.append(f"{own_k9} K/9")
     if opp_avg_k_pct is not None:
         bits.append(f"opponent strikes out {opp_avg_k_pct:.1%} of PA")
+
+    if market_k_line is not None and league_avg_k9 and expected_ip:
+        market_k9_pace = market_k_line / expected_ip * 9
+        market_factor = max(0.6, min(1.4, market_k9_pace / league_avg_k9))
+        value = round(
+            (1 - MARKET_BLEND_WEIGHT) * value + MARKET_BLEND_WEIGHT * market_factor, 3
+        )
+        bits.append(f"market line {market_k_line} Ks")
+
     return {
         "value": value,
         "own_k_per_9": own_k9,
         "opp_avg_k_pct": round(opp_avg_k_pct, 4) if opp_avg_k_pct is not None else None,
+        "market_k_line": market_k_line,
         "detail": ", ".join(bits) or "no strikeout data",
     }
 

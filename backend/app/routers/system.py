@@ -39,10 +39,14 @@ async def health() -> dict[str, Any]:
             "cache_ttl_seconds": {
                 "schedule": settings.ttl_schedule,
                 "stats": settings.ttl_stats,
-                "odds": settings.ttl_odds,
                 "weather": settings.ttl_weather,
                 "injuries": settings.ttl_injuries,
             },
+            # Not a TTL window like the ones above -- game lines and
+            # player props each cache by CALENDAR DAY (see clients/odds.py's
+            # own docstring), so this is a real, fixed policy rather than a
+            # number of seconds.
+            "odds_refresh_policy": "once per calendar day per game (force-refresh to bypass)",
         },
         "odds_api_credits": odds.get_usage(),
     }
