@@ -44,6 +44,13 @@ than silently assumed, so nobody mistakes "simplified" for "wrong":
     projected starter scratches, a projected bench bat unexpectedly
     plays). Lets a slate simulate well before real lineups lock, at
     that real accuracy cost.
+  - Same fallback for the starting pitcher (see
+    mlb_slate._projected_starter() / _pitcher_id_for_side()): with no
+    real MLB probable pitcher announced yet, falls back to RotoWire's
+    own highest-projected pitcher-position player for that team,
+    resolved to a real MLB id by name-matching against the active
+    roster -- also a guess, and also kept clearly separate from the
+    real `probable_pitcher` field.
 """
 
 from __future__ import annotations
@@ -545,6 +552,20 @@ def _side_ready(side: dict[str, Any]) -> bool:
     return len(_batting_order_for_side(side)) >= MIN_PROJECTED_LINEUP_SIZE
 
 
+def _pitcher_id_for_side(side: dict[str, Any]) -> int | None:
+    """
+    The pitcher id to simulate for one side -- MLB's real probable
+    pitcher if announced, or (see mlb_slate._projected_starter())
+    RotoWire's own projected starter as a fallback when it hasn't been
+    yet. Same confirmed-vs-projected pattern _batting_order_for_side()
+    already uses for hitters.
+    """
+    real = (side.get("probable_pitcher") or {}).get("id")
+    if real:
+        return real
+    return (side.get("projected_probable_pitcher") or {}).get("id")
+
+
 async def _game_pa_rates(
     game: dict[str, Any], season: int, bullpen_by_team: dict[int, dict[str, Any]]
 ) -> dict[str, Any]:
@@ -558,8 +579,8 @@ async def _game_pa_rates(
     probable_pitcher id.
     """
     home, away = game["home"], game["away"]
-    home_pitcher_id = home["probable_pitcher"]["id"]
-    away_pitcher_id = away["probable_pitcher"]["id"]
+    home_pitcher_id = _pitcher_id_for_side(home)
+    away_pitcher_id = _pitcher_id_for_side(away)
 
     home_order = _batting_order_for_side(home)
     away_order = _batting_order_for_side(away)
@@ -647,8 +668,8 @@ async def simulate_slate_trials(
         if not (
             _side_ready(g["home"])
             and _side_ready(g["away"])
-            and (g["home"].get("probable_pitcher") or {}).get("id")
-            and (g["away"].get("probable_pitcher") or {}).get("id")
+            and _pitcher_id_for_side(g["home"])
+            and _pitcher_id_for_side(g["away"])
         )
     ]
     if not_ready:
@@ -659,7 +680,8 @@ async def simulate_slate_trials(
             "At-bat simulation needs a usable batting order (confirmed, or a projected one from "
             "an uploaded RotoWire file with at least "
             f"{MIN_PROJECTED_LINEUP_SIZE} projected starters) on both sides, and a resolvable "
-            f"probable pitcher, for every slate game -- not yet ready: {names}."
+            "probable pitcher (real, or RotoWire's own projected starter), for every slate game "
+            f"-- not yet ready: {names}."
         )
 
     bullpen_by_team = await mlb.get_bullpen_stats(season)

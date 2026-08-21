@@ -22,9 +22,11 @@ import io
 from typing import Any
 
 from app.cache import get, put
-from app.services.player_match import build_lookup, match, normalize_name
+from app.services.player_match import build_lookup, match, normalize_name, normalize_team
 
-__all__ = ["build_lookup", "match", "normalize_name", "parse_rotowire_csv", "store", "load"]
+__all__ = [
+    "build_lookup", "match", "normalize_name", "normalize_team", "parse_rotowire_csv", "store", "load",
+]
 
 _CACHE_PREFIX = "projections"
 # A week -- long enough that an upload survives you closing the tab,

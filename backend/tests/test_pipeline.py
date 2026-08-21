@@ -577,6 +577,57 @@ async def main() -> int:
     check("the same two-way player is excluded from hitters on his own start day",
           not any(h["id"] == TWP_ID for h in hitters_on_start_day), str(hitters_on_start_day))
 
+    print("\nProjected starting pitcher fallback (mlb_slate._projected_starter, no real "
+          "probable pitcher announced yet)")
+
+    async def fake_roster_projstarter(team_id, season):
+        return [70001, 70002] if team_id == 900 else []
+
+    async def fake_people_projstarter(ids):
+        return {
+            70001: {"id": 70001, "name": "Ace Starter", "throws": "R"},
+            70002: {"id": 70002, "name": "Middle Reliever", "throws": "L"},
+        }
+
+    original_get_active_roster = mlb.get_active_roster
+    original_get_people_2 = mlb.get_people
+    mlb.get_active_roster = fake_roster_projstarter
+    mlb.get_people = fake_people_projstarter
+
+    projstarter_lookup = projections.build_lookup(
+        [
+            projection_row("Ace Starter", "LAD", 18.5, 20.0, lineup_spot=None),
+            projection_row("Middle Reliever", "LAD", 3.2, 1.0, lineup_spot=None),
+        ]
+    )
+    # position defaults to "" in projection_row -- real projected-pitcher
+    # rows need an actual pitcher position tag to be considered at all.
+    for row in projstarter_lookup.values():
+        row["position"] = "P"
+
+    resolved_starter = await mlb_slate._projected_starter(900, "LAD", 2026, projstarter_lookup)
+    check("_projected_starter picks the highest-FPTS pitcher-position row for the team (the real "
+          "starter, not a lower-usage reliever also in the pool) and resolves his real MLB id via "
+          "roster name-matching",
+          resolved_starter == {"id": 70001, "name": "Ace Starter"}, str(resolved_starter))
+
+    check("_projected_starter returns None with no projections data loaded at all",
+          await mlb_slate._projected_starter(900, "LAD", 2026, {}) is None)
+    check("_projected_starter returns None for a team with no pitcher-position rows in the "
+          "projections file",
+          await mlb_slate._projected_starter(900, "NYY", 2026, projstarter_lookup) is None)
+
+    unmatched_lookup = projections.build_lookup(
+        [projection_row("Totally Unrostered Arm", "LAD", 15.0, 10.0, lineup_spot=None)]
+    )
+    unmatched_lookup[list(unmatched_lookup)[0]]["position"] = "P"
+    check("_projected_starter returns None when the projected name doesn't match anyone on the "
+          "team's actual active roster, rather than guessing",
+          await mlb_slate._projected_starter(900, "LAD", 2026, unmatched_lookup) is None)
+
+    mlb.get_active_roster = original_get_active_roster
+    mlb.get_people = original_get_people_2
+
     print("\nDK slate detection (Game Info column -> which games are in this slate)")
     check("parse_game_info extracts the away@home pair, ignoring date/time",
           salaries.parse_game_info("NYY@BOS 08/16/2026 07:05PM ET") == ("NYY", "BOS"))
@@ -3681,6 +3732,55 @@ async def main() -> int:
               "lineup is too thin (below MIN_PROJECTED_LINEUP_SIZE) to trust",
               "HOM" in str(e), str(e))
 
+    print("\nAt-bat-level projected-pitcher fallback (RotoWire's projected starter, no real "
+          "probable pitcher announced yet)")
+
+    def _slate_side_no_pitcher(team_id, abbrev, hitter_ids, projected_pitcher_id=None):
+        return {
+            "team_id": team_id,
+            "abbrev": abbrev,
+            "hitters": [{"id": pid, "batting_order": i + 1} for i, pid in enumerate(hitter_ids)],
+            "probable_pitcher": None,
+            "projected_probable_pitcher": (
+                {"id": projected_pitcher_id, "name": "Fallback Starter"} if projected_pitcher_id else None
+            ),
+            "lineup_confirmed": True,
+        }
+
+    no_real_pitcher_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                "home": _slate_side_no_pitcher(9001, "HOM", list(range(401, 410)), projected_pitcher_id=5001),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    fallback_pitcher_trials = await atbat_sim.simulate_slate_trials(
+        no_real_pitcher_slate, VARIANCE_SEASON, num_trials=5, seed=4
+    )
+    check("simulate_slate_trials falls back to RotoWire's projected starter when there's no real "
+          "probable pitcher announced yet, simulating successfully instead of raising",
+          len(fallback_pitcher_trials.get(5001, [])) == 5, str(fallback_pitcher_trials.get(5001)))
+
+    no_pitcher_at_all_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                # Neither a real nor a projected probable pitcher.
+                "home": _slate_side_no_pitcher(9001, "HOM", list(range(401, 410))),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    try:
+        await atbat_sim.simulate_slate_trials(no_pitcher_at_all_slate, VARIANCE_SEASON, num_trials=5)
+        check("simulate_slate_trials still raises SlateNotSimulatableError with neither a real "
+              "nor a projected probable pitcher", False, "no exception raised")
+    except atbat_sim.SlateNotSimulatableError as e:
+        check("simulate_slate_trials still raises SlateNotSimulatableError with neither a real "
+              "nor a projected probable pitcher", "HOM" in str(e), str(e))
+
     print("\nContest generator: at-bat engine wiring (evaluate_batch_simulated engine='atbat')")
 
     def _atbat_entry(hitter_ids):
@@ -3712,6 +3812,27 @@ async def main() -> int:
     except contest.ContestError:
         check("evaluate_batch_simulated(engine='atbat') requires slate -- raises ContestError without it",
               True, "")
+
+    # Regression guard for a real bug: atbat_sim.SlateNotSimulatableError
+    # is a plain Exception (atbat_sim.py has no dependency on contest.py),
+    # so if _simulate_lineups_atbat() ever stops converting it to a
+    # ContestError, this propagates uncaught all the way to the router,
+    # which only catches ContestError -- surfacing as an opaque HTTP 500
+    # instead of a clear 400 with the real reason. Caught live: a real
+    # not-fully-confirmed slate 500'd instead of returning the "not
+    # ready" message.
+    try:
+        await contest.evaluate_batch_simulated(
+            atbat_entries, atbat_field, atbat_contest, season=VARIANCE_SEASON,
+            num_trials=5, engine="atbat", slate=unconfirmed_slate,
+        )
+        check("a not-ready slate (atbat_sim.SlateNotSimulatableError) surfaces as a catchable "
+              "contest.ContestError, not an uncaught exception that would 500 the request",
+              False, "no exception raised")
+    except contest.ContestError as e:
+        check("a not-ready slate (atbat_sim.SlateNotSimulatableError) surfaces as a catchable "
+              "contest.ContestError, not an uncaught exception that would 500 the request",
+              "HOM" in str(e) and "AWY" in str(e), str(e))
 
     atbat_missing_player_entry = [_atbat_entry([401, 402, 403, 404, 405, 406, 407, 999999])]
     try:
