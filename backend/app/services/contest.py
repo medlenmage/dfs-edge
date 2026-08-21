@@ -958,19 +958,40 @@ def generate_entries(
     return entries
 
 
-def field_exposure(field: list[dict[str, Any]], top_n: int = 15) -> list[dict[str, Any]]:
-    """How often each player showed up across the sampled field -- the
-    field's own chalk, same shape as the optimizer's exposure report."""
+def field_exposure(
+    field: list[dict[str, Any]],
+    top_n: int = 15,
+    *,
+    results: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    How often each player showed up across the sampled field -- the
+    field's own chalk, same shape as the optimizer's exposure report.
+
+    `results`, if given (index-aligned with `field`, each carrying a
+    real simulated `roi_pct`), also folds in each player's own average
+    ROI across every lineup containing them -- not the lineup-level
+    ROI already shown elsewhere, but which INDIVIDUAL PLAYERS are
+    actually driving a batch's simulated payoff. A player rostered in
+    a few lineups that all cash big shows a real, high avg_roi_pct
+    here even if his own ownership% is low.
+    """
     counts: dict[int, dict[str, Any]] = {}
-    for lineup in field:
+    roi_sums: dict[int, float] = {}
+    for i, lineup in enumerate(field):
+        roi = results[i]["roi_pct"] if results is not None else None
         for p in lineup["players"]:
             entry = counts.setdefault(
                 p["id"], {"id": p["id"], "name": p["name"], "team": p["team"], "count": 0}
             )
             entry["count"] += 1
+            if roi is not None:
+                roi_sums[p["id"]] = roi_sums.get(p["id"], 0.0) + roi
     ranked = sorted(counts.values(), key=lambda e: -e["count"])[:top_n]
     for e in ranked:
         e["pct"] = round(100 * e["count"] / len(field), 1)
+        if results is not None:
+            e["avg_roi_pct"] = round(roi_sums[e["id"]] / e["count"], 1)
     return ranked
 
 
@@ -1120,7 +1141,7 @@ def reshape_batch(
     return {
         "entries": kept_entries,
         "results": kept_results,
-        "exposure": field_exposure(kept_entries, top_n=20),
+        "exposure": field_exposure(kept_entries, top_n=20, results=kept_results),
         "num_kept": len(kept_entries),
         "num_dropped": len(entries) - len(kept_entries),
         # How many of the ORIGINAL batch (before any filter ran) never
@@ -1905,6 +1926,7 @@ async def build_contest_entries_simulated(
     self_play: bool = False,
     engine: str = "bootstrap",
     field_sharpness: str = "marquee",
+    first_place_pct: float | None = None,
 ) -> dict[str, Any]:
     """
     Like build_contest_entries, but ranks the batch against a real Monte
@@ -1947,6 +1969,16 @@ async def build_contest_entries_simulated(
     matters for the `self_play=False` default -- self_play=True never
     samples a separate opponent field, it mirrors your own batch
     against itself.
+
+    `first_place_pct`, if given, overrides `contest_type`'s own preset
+    percent-to-first (what share of the prize pool 1st place wins) for
+    this run only -- same override mechanism `evaluate_batch_simulated`/
+    `evaluate_field_mirrored`/`build_dk_entries_simulated` already
+    accept. A lower percent-to-first flattens the payout curve (more
+    spread across the paid ranks, less concentrated at 1st), which
+    changes every entry's simulated ROI -- letting a user see how
+    sensitive their batch's ROI actually is to the real payout
+    structure, rather than only the preset's own baked-in assumption.
     """
     if self_play:
         contest, entries = _build_contest_and_entries(
@@ -1964,6 +1996,7 @@ async def build_contest_entries_simulated(
         )
         evaluation = await evaluate_field_mirrored(
             entries, contest, season=season, num_trials=num_trials, seed=seed,
+            first_place_pct=first_place_pct,
             engine=engine, slate=slate, included_game_pks=included_game_pks,
         )
     else:
@@ -1989,6 +2022,7 @@ async def build_contest_entries_simulated(
             season=season,
             num_trials=num_trials,
             seed=(seed + 2) if seed is not None else None,
+            first_place_pct=first_place_pct,
             engine=engine,
             slate=slate,
             included_game_pks=included_game_pks,
@@ -2030,6 +2064,11 @@ async def build_contest_entries_simulated(
         "paid_count": evaluation["paid_count"],
         "prize_pool": evaluation["prize_pool"],
         "num_trials": evaluation["num_trials"],
+        # The percent-to-first actually used this run -- either the
+        # override given, or contest_type's own preset value when none
+        # was given, so the frontend can show what was really applied
+        # rather than echoing back a possibly-null override.
+        "first_place_pct": first_place_pct if first_place_pct is not None else contest.get("first_place_pct"),
         "summary": {
             "avg_cash_probability_pct": round(sum(cash_probs) / len(cash_probs), 1),
             "avg_first_place_pct": round(sum(first_place_pcts) / len(first_place_pcts), 2),
@@ -2043,7 +2082,7 @@ async def build_contest_entries_simulated(
         "field_baseline": _field_baseline(
             contest["payout_pct"], evaluation["prize_pool"], contest["entry_fee"], evaluation["field_size"]
         ),
-        "exposure": field_exposure(entries, top_n=20),
+        "exposure": field_exposure(entries, top_n=20, results=evaluation["results"]),
         "entries": entries,
         "results": evaluation["results"],
         "self_play": self_play,
@@ -2311,6 +2350,7 @@ async def build_dk_entries_simulated(
         "paid_count": evaluation["paid_count"],
         "prize_pool": evaluation["prize_pool"],
         "num_trials": evaluation["num_trials"],
+        "first_place_pct": first_place_pct,
         "summary": {
             "avg_cash_probability_pct": round(sum(cash_probs) / len(cash_probs), 1),
             "avg_first_place_pct": round(sum(first_place_pcts_sim) / len(first_place_pcts_sim), 2),
@@ -2324,7 +2364,7 @@ async def build_dk_entries_simulated(
         "field_baseline": _field_baseline(
             contest["payout_pct"], evaluation["prize_pool"], entry_fee, evaluation["field_size"]
         ),
-        "exposure": field_exposure(entries, top_n=20),
+        "exposure": field_exposure(entries, top_n=20, results=evaluation["results"]),
         "entries": entries,
         "results": evaluation["results"],
         "engine": engine,

@@ -290,6 +290,7 @@ export const api = {
       selfPlay = false,
       engine = 'bootstrap',
       fieldSharpness = 'marquee',
+      firstPlacePct = null,
     } = {},
   ) =>
     request('/api/mlb/contest-entries-simulated', {
@@ -309,6 +310,7 @@ export const api = {
         self_play: selfPlay,
         engine,
         field_sharpness: fieldSharpness,
+        first_place_pct: firstPlacePct,
       }),
     }),
 

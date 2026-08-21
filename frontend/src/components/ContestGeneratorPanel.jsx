@@ -25,6 +25,11 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [maxSalary, setMaxSalary] = useState('')
   const [allowDuplicates, setAllowDuplicates] = useState(false)
   const [fieldSharpness, setFieldSharpness] = useState('marquee')
+  // Percent-to-first override for the SIMULATED payout curve, Stokastic-
+  // style -- '' means "use the contest preset's own value." Only ever
+  // sent when Simulate is on; the fast deterministic path doesn't
+  // support an override today.
+  const [firstPlacePct, setFirstPlacePct] = useState('')
   const [simulate, setSimulate] = useState(false)
   const [selfPlay, setSelfPlay] = useState(false)
   const [atbatEngine, setAtbatEngine] = useState(false)
@@ -166,7 +171,13 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         fieldSharpness,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
-        ...(simulate ? { selfPlay, engine: atbatEngine ? 'atbat' : 'bootstrap' } : {}),
+        ...(simulate
+          ? {
+              selfPlay,
+              engine: atbatEngine ? 'atbat' : 'bootstrap',
+              firstPlacePct: firstPlacePct === '' ? null : Number(firstPlacePct),
+            }
+          : {}),
       }
       const result = simulate
         ? await api.buildContestEntriesSimulated(date, contestType, numLineups, opts)
@@ -410,6 +421,23 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
           <input type="checkbox" checked={simulate} onChange={(e) => setSimulate(e.target.checked)} />
           Simulate
         </label>
+        {simulate && (
+          <label
+            className="dim"
+            style={{ fontSize: 13 }}
+            title="Override the contest's own percent-to-first (share of the prize pool 1st place wins) for this simulated run. A lower value flattens the payout curve -- more spread across the paid ranks, less concentrated at 1st -- which changes every entry's simulated ROI. Defaults to the contest preset's own value."
+          >
+            % to first{' '}
+            <select value={firstPlacePct} onChange={(e) => setFirstPlacePct(e.target.value)}>
+              <option value="">preset default</option>
+              {[5, 10, 15, 20, 25, 30, 35].map((n) => (
+                <option key={n} value={n}>
+                  {n}%
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {simulate && (
           <label
             className="dim"
@@ -662,6 +690,14 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             <span className="badge">${state.contest.entry_fee.toLocaleString()} entry</span>
             <span className="badge">{state.paid_count.toLocaleString()} paid</span>
             <span className="badge">${state.prize_pool.toLocaleString()} prize pool</span>
+            {state.first_place_pct != null && (
+              <span
+                className="badge"
+                title="Share of the prize pool 1st place wins in this run's simulated payout curve"
+              >
+                {state.first_place_pct}% to first
+              </span>
+            )}
             {state.simulated && (
               <span className="badge">{state.num_trials.toLocaleString()} sim trials</span>
             )}
@@ -988,6 +1024,12 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                       <>
                         <th
                           className="num"
+                          title="This player's own average simulated ROI, across every lineup in the batch that rosters him -- which INDIVIDUAL PLAYERS are actually driving the batch's real simulated payoff, not just who's rostered the most."
+                        >
+                          ROI
+                        </th>
+                        <th
+                          className="num"
                           title="ROI percentage points to add to every lineup containing this player, for RANKING purposes only -- the real simulated roi_pct is never changed. Negative nudges a player's lineups down."
                         >
                           Boost (pts)
@@ -1017,6 +1059,16 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                       <td className="num">{e.pct}%</td>
                       {state.simulated && (
                         <>
+                          <td className="num">
+                            {e.avg_roi_pct != null ? (
+                              <span className={`badge ${e.avg_roi_pct >= 0 ? 'ok' : 'risk'}`}>
+                                {e.avg_roi_pct >= 0 ? '+' : ''}
+                                {e.avg_roi_pct}%
+                              </span>
+                            ) : (
+                              <span className="dim">—</span>
+                            )}
+                          </td>
                           <td className="num">
                             <input
                               type="number"

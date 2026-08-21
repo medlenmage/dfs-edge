@@ -792,6 +792,11 @@ async def build_contest_entries_simulated(
         embed=True,
         description="How sharp the simulated opponent field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays). Ignored when self_play=True -- self-play never samples a separate field.",
     ),
+    first_place_pct: float | None = Body(
+        None,
+        embed=True,
+        description="Override the contest preset's own percent-to-first (% of the prize pool 1st place wins) for this run -- a lower value flattens the payout curve, which changes every entry's simulated ROI. Defaults to the preset's own value when omitted.",
+    ),
 ) -> dict[str, Any]:
     """
     Like POST /contest-entries, but ranks the batch against a genuine
@@ -831,6 +836,7 @@ async def build_contest_entries_simulated(
             self_play=self_play,
             engine=engine,
             field_sharpness=field_sharpness,
+            first_place_pct=first_place_pct,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
