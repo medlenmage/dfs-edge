@@ -38,6 +38,12 @@ than silently assumed, so nobody mistakes "simplified" for "wrong":
     not MLB's real "leading when he left, and his team never
     relinquished that lead" rule, which needs inning-by-inning score
     tracking this engine doesn't do.
+  - Without a CONFIRMED real lineup yet, a team's batting order falls
+    back to RotoWire's own PROJECTED one (see _batting_order_for_side())
+    -- someone else's guess, not a fact, and it can turn out wrong (a
+    projected starter scratches, a projected bench bat unexpectedly
+    plays). Lets a slate simulate well before real lineups lock, at
+    that real accuracy cost.
 """
 
 from __future__ import annotations
@@ -491,17 +497,52 @@ def _simulate_half_inning_tracking_starter(
     return idx % len(order), starter_line["outs"], starter_line
 
 
+# Fewer than this many projected batting-order spots isn't a usable
+# stand-in for a real 9-hitter lineup -- see _batting_order_for_side().
+MIN_PROJECTED_LINEUP_SIZE = 8
+
+
 class SlateNotSimulatableError(Exception):
     """
     Raised by simulate_slate_trials() when at least one game on the
     slate isn't ready to at-bat-simulate -- V1 has no partial/hybrid
     fallback (mixing at-bat-simulated players with any other engine's
     players within the same lineup sum would need a whole reconciliation
-    layer of its own, and a slate where every real lineup has posted is
-    the common case for a serious player who waits for confirmation
-    anyway). Callers should surface this message directly -- it already
-    names exactly which game(s) are blocking.
+    layer of its own). A side counts as ready with either a real
+    CONFIRMED lineup or, failing that, a usable RotoWire PROJECTED
+    lineup (see _batting_order_for_side()) -- so this only actually
+    fires when a side has neither: no real lineup posted yet AND no
+    projections file uploaded (or RotoWire's own projected lineup for
+    that team is too thin to use). Callers should surface this message
+    directly -- it already names exactly which game(s) are blocking.
     """
+
+
+def _batting_order_for_side(side: dict[str, Any]) -> list[int]:
+    """
+    The hitter ids for one side of a game, in batting-order sequence --
+    the REAL confirmed order if the lineup has posted
+    (`lineup_confirmed`), or RotoWire's own PROJECTED batting spot
+    (`projected_batting_order`, from an uploaded projections file's
+    LINEUP column) as a fallback when it hasn't. This is what lets
+    simulate_slate_trials() run well before real lineups lock -- at the
+    real cost of simulating against someone else's lineup GUESS instead
+    of the confirmed truth, which can turn out wrong (a projected
+    starter gets a late scratch, a projected bench bat unexpectedly
+    starts). Falling back is opt-in in effect only, in that it happens
+    automatically whenever a real lineup isn't confirmed yet and a
+    projections file is loaded -- there's no separate flag to force it
+    off, since a caller who wants confirmed-only can just wait.
+    """
+    key = "batting_order" if side.get("lineup_confirmed") else "projected_batting_order"
+    ordered = sorted((h for h in side.get("hitters", []) if h.get(key)), key=lambda h: h[key])
+    return [h["id"] for h in ordered]
+
+
+def _side_ready(side: dict[str, Any]) -> bool:
+    if side.get("lineup_confirmed"):
+        return True
+    return len(_batting_order_for_side(side)) >= MIN_PROJECTED_LINEUP_SIZE
 
 
 async def _game_pa_rates(
@@ -513,18 +554,15 @@ async def _game_pa_rates(
     opposing starter), both bullpens' aggregate rates, and both
     starters' outs targets. Assumes the game has already been confirmed
     simulatable (see simulate_slate_trials()) -- both sides have a
-    confirmed lineup and a resolvable probable_pitcher id.
+    usable (confirmed or projected) batting order and a resolvable
+    probable_pitcher id.
     """
     home, away = game["home"], game["away"]
     home_pitcher_id = home["probable_pitcher"]["id"]
     away_pitcher_id = away["probable_pitcher"]["id"]
 
-    home_order = [h["id"] for h in sorted(
-        (h for h in home["hitters"] if h.get("batting_order")), key=lambda h: h["batting_order"]
-    )]
-    away_order = [h["id"] for h in sorted(
-        (h for h in away["hitters"] if h.get("batting_order")), key=lambda h: h["batting_order"]
-    )]
+    home_order = _batting_order_for_side(home)
+    away_order = _batting_order_for_side(away)
 
     home_pitcher_log, away_pitcher_log = await asyncio.gather(
         mlb.get_player_game_log(home_pitcher_id, season, group="pitching"),
@@ -585,9 +623,10 @@ async def simulate_slate_trials(
     game in `slate["games"]` marked `in_slate` (or, if `included_game_pks`
     is given, every one of THOSE games -- the same slate-restriction
     every other entry-building path in contest.py already respects) must
-    have both sides' `lineup_confirmed=True` and a resolvable
-    `probable_pitcher["id"]`, or this raises rather than silently mixing
-    engines within a lineup.
+    have a USABLE batting order on both sides -- a real confirmed lineup,
+    or (see _batting_order_for_side()) RotoWire's own projected one as a
+    fallback -- and a resolvable `probable_pitcher["id"]`, or this raises
+    rather than silently mixing engines within a lineup.
 
     A trial index `t` means "one simulated game" for whichever game a
     given player belongs to -- consistent (and therefore correlated)
@@ -606,8 +645,8 @@ async def simulate_slate_trials(
     not_ready = [
         g for g in games
         if not (
-            g["home"].get("lineup_confirmed")
-            and g["away"].get("lineup_confirmed")
+            _side_ready(g["home"])
+            and _side_ready(g["away"])
             and (g["home"].get("probable_pitcher") or {}).get("id")
             and (g["away"].get("probable_pitcher") or {}).get("id")
         )
@@ -617,8 +656,10 @@ async def simulate_slate_trials(
             f"{g['away'].get('abbrev', '?')} @ {g['home'].get('abbrev', '?')}" for g in not_ready
         )
         raise SlateNotSimulatableError(
-            "At-bat simulation needs a confirmed lineup on both sides and a resolvable "
-            f"probable pitcher for every slate game -- not yet ready: {names}."
+            "At-bat simulation needs a usable batting order (confirmed, or a projected one from "
+            "an uploaded RotoWire file with at least "
+            f"{MIN_PROJECTED_LINEUP_SIZE} projected starters) on both sides, and a resolvable "
+            f"probable pitcher, for every slate game -- not yet ready: {names}."
         )
 
     bullpen_by_team = await mlb.get_bullpen_stats(season)

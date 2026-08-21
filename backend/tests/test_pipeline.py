@@ -209,15 +209,19 @@ SALARIES = [
 ]
 
 
-def projection_row(name, team, fpts, ownership_pct):
+def projection_row(name, team, fpts, ownership_pct, lineup_spot=None):
     return {
         "name": name, "normalized_name": projections.normalize_name(name),
         "team": team, "position": "", "fpts": fpts, "ownership_pct": ownership_pct,
+        "lineup_spot": lineup_spot,
     }
 
 
 PROJECTIONS = [
-    projection_row("Big Righty Bat", "NYY", 12.4, 18.7),
+    # lineup_spot=3 -- RotoWire's own projected batting order, real
+    # end-to-end coverage for mlb_slate.py attaching it onto the hitter
+    # as `projected_batting_order` (see the platoon-logic checks below).
+    projection_row("Big Righty Bat", "NYY", 12.4, 18.7, lineup_spot=3),
     projection_row("Lefty McLefterson", "BOS", 17.2, 25.3),
     # "Punchless Lefty" absent here too, and "Boston Slugger" is
     # deliberately absent from THIS list (but present in SALARIES) to
@@ -428,6 +432,9 @@ async def main() -> int:
     )
     check("parse_rotowire_csv captures the SAL column alongside FPTS/RST%",
           [r["salary"] for r in rw_with_sal] == [7000, 6000, 2400], str(rw_with_sal))
+    check("parse_rotowire_csv captures LINEUP as a real int projected batting spot, and 'BN' "
+          "(bench, not projected to start) as None rather than a bogus value",
+          [r["lineup_spot"] for r in rw_with_sal] == [1, 2, None], str(rw_with_sal))
 
     derived = salaries.from_rotowire_rows(rw_with_sal)
     check("from_rotowire_rows builds one DK-salary-shaped row per priced player",
@@ -1894,6 +1901,12 @@ async def main() -> int:
           righty["vs_hand"]["ops"] == 0.980)
     check("righty's score is above average", righty["edge"]["score"] > 50,
           str(righty["edge"]["score"]))
+    check("mlb_slate.py attaches RotoWire's projected batting spot onto the hitter as "
+          "projected_batting_order, wired end to end through _projection_info()",
+          righty["projected_batting_order"] == 3, str(righty["projected_batting_order"]))
+    check("a hitter with no matching projections row (or no lineup_spot in it) has "
+          "projected_batting_order left None, not a fabricated guess",
+          lefty["projected_batting_order"] is None, str(lefty["projected_batting_order"]))
     check("righty's score is not clipped at the ceiling",
           righty["edge"]["score"] < 100, str(righty["edge"]["score"]))
     check("lefty's score is below average", lefty["edge"]["score"] < 50,
@@ -1921,13 +1934,13 @@ async def main() -> int:
           lefty["salary"] is None, str(lefty["salary"]))
 
     check("hitter matched a projection by name + team",
-          righty["projection"] == {"fpts": 12.4, "ownership_pct": 18.7},
+          righty["projection"] == {"fpts": 12.4, "ownership_pct": 18.7, "lineup_spot": 3},
           str(righty["projection"]))
     check("hitter present in salaries but absent from projections gets None",
           sox["Boston Slugger"]["projection"] is None,
           str(sox["Boston Slugger"]["projection"]))
     check("home starter matched a projection",
-          game["home"]["probable_pitcher"]["projection"] == {"fpts": 17.2, "ownership_pct": 25.3},
+          game["home"]["probable_pitcher"]["projection"] == {"fpts": 17.2, "ownership_pct": 25.3, "lineup_spot": None},
           str(game["home"]["probable_pitcher"]["projection"]))
     check("projection never leaks into the edge score components",
           "fpts" not in righty["edge"]["components"]
@@ -3509,11 +3522,24 @@ async def main() -> int:
 
     mlb.get_player_game_log = fake_slate_game_log
 
-    def _slate_side(team_id, abbrev, hitter_ids, pitcher_id, confirmed=True):
+    def _slate_side(team_id, abbrev, hitter_ids, pitcher_id, confirmed=True, projected_order=None):
+        # projected_order: optional list of hitter ids (order matters) to
+        # assign a 1-based projected_batting_order to, standing in for
+        # what an uploaded RotoWire file's LINEUP column would carry.
+        # None leaves every hitter's projected_batting_order unset (the
+        # "no projections file loaded" case).
+        projected_spot = {pid: i + 1 for i, pid in enumerate(projected_order or [])}
         return {
             "team_id": team_id,
             "abbrev": abbrev,
-            "hitters": [{"id": pid, "batting_order": i + 1} for i, pid in enumerate(hitter_ids)],
+            "hitters": [
+                {
+                    "id": pid,
+                    "batting_order": (i + 1) if confirmed else None,
+                    "projected_batting_order": projected_spot.get(pid),
+                }
+                for i, pid in enumerate(hitter_ids)
+            ],
             "probable_pitcher": {"id": pitcher_id},
             "lineup_confirmed": confirmed,
         }
@@ -3599,6 +3625,61 @@ async def main() -> int:
     except atbat_sim.SlateNotSimulatableError:
         check("simulate_slate_trials without included_game_pks still requires EVERY in_slate game "
               "ready, including the unready second one", True, "")
+
+    print("\nAt-bat-level projected-lineup fallback (RotoWire LINEUP column, no confirmed lineup yet)")
+
+    # Home side has NO confirmed lineup yet, but 8 of its 9 hitters carry
+    # a RotoWire-projected batting spot (>= MIN_PROJECTED_LINEUP_SIZE) --
+    # should fall back to using those, in projected order, instead of
+    # raising SlateNotSimulatableError the way the plain unconfirmed_slate
+    # fixture above (no projection data at all) correctly does.
+    projected_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                "home": _slate_side(
+                    9001, "HOM", list(range(401, 410)), 5001,
+                    confirmed=False, projected_order=list(range(401, 409)),  # 8 of the 9
+                ),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    projected_trials = await atbat_sim.simulate_slate_trials(
+        projected_slate, VARIANCE_SEASON, num_trials=5, seed=3
+    )
+    projected_expected_ids = list(range(401, 409)) + list(range(501, 510)) + [5001, 5002]
+    check("simulate_slate_trials falls back to RotoWire's projected batting order when a lineup "
+          "isn't confirmed yet, simulating the game successfully instead of raising",
+          all(len(projected_trials.get(pid, [])) == 5 for pid in projected_expected_ids),
+          str({pid: len(projected_trials.get(pid, [])) for pid in projected_expected_ids}))
+    check("the hitter left OUT of the projected order (409 has no projected_batting_order set) "
+          "never appears in the simulated results -- only the projected 8 were actually used",
+          409 not in projected_trials, str(sorted(projected_trials.keys())))
+
+    # Too few projected spots (below MIN_PROJECTED_LINEUP_SIZE) -- still
+    # not ready, same as having no projection data at all.
+    thin_projected_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                "home": _slate_side(
+                    9001, "HOM", list(range(401, 410)), 5001,
+                    confirmed=False, projected_order=list(range(401, 406)),  # only 5
+                ),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    try:
+        await atbat_sim.simulate_slate_trials(thin_projected_slate, VARIANCE_SEASON, num_trials=5)
+        check("simulate_slate_trials still raises SlateNotSimulatableError when the projected "
+              "lineup is too thin (below MIN_PROJECTED_LINEUP_SIZE) to trust",
+              False, "no exception raised")
+    except atbat_sim.SlateNotSimulatableError as e:
+        check("simulate_slate_trials still raises SlateNotSimulatableError when the projected "
+              "lineup is too thin (below MIN_PROJECTED_LINEUP_SIZE) to trust",
+              "HOM" in str(e), str(e))
 
     print("\nContest generator: at-bat engine wiring (evaluate_batch_simulated engine='atbat')")
 

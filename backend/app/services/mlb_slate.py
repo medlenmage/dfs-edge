@@ -544,7 +544,7 @@ def _projection_info(
     row = projections.match(lookup, name, team_abbrev, fuzzy=True)
     if not row:
         return None
-    return {"fpts": row["fpts"], "ownership_pct": row["ownership_pct"]}
+    return {"fpts": row["fpts"], "ownership_pct": row["ownership_pct"], "lineup_spot": row.get("lineup_spot")}
 
 
 def _salary_info(
@@ -788,6 +788,7 @@ async def _team_hitters(
             ),
         }
         edge = scoring.combine(components)
+        projection = _projection_info(projection_lookup, bio.get("name"), team_abbrev)
 
         out.append(
             {
@@ -796,11 +797,19 @@ async def _team_hitters(
                 "position": bio.get("position"),
                 "bats": bats,
                 "batting_order": idx + 1 if confirmed else None,
+                # RotoWire's own PROJECTED batting spot (1-9, from its
+                # uploaded LINEUP column), kept separate from the real
+                # `batting_order` above -- a guess, not a fact, but
+                # services/atbat_sim.py falls back on it to simulate a
+                # slate before real lineups confirm. None with no
+                # projections file loaded, no match, or RotoWire has
+                # this player projected to the bench.
+                "projected_batting_order": (projection or {}).get("lineup_spot"),
                 "season": season_stat,
                 "vs_hand": split_stat,
                 "edge": {**edge, "components": components},
                 "salary": _salary_info(salary_lookup, bio.get("name"), team_abbrev, edge["score"]),
-                "projection": _projection_info(projection_lookup, bio.get("name"), team_abbrev),
+                "projection": projection,
             }
         )
 
