@@ -4154,8 +4154,10 @@ async def main() -> int:
               for r in sim_batch["results"]
           ),
           str([(r["payout_p10"], r["expected_payout"], r["payout_p90"]) for r in sim_batch["results"]]))
-    check("every entry's simulated_points_floor/ceiling are the true min/max across all trials, "
-          "so floor <= p10 <= mean <= p90 <= ceiling for every entry",
+    check("every entry's simulated_points_floor/ceiling are the FLOOR_CEILING_PERCENTILE-th/"
+          "(100-that)-th percentile across all trials (not the true min/max -- a single "
+          "freak-outcome trial reads as implausible even under a well-calibrated model), so "
+          "floor <= p10 <= mean <= p90 <= ceiling still holds for every entry",
           all(
               r["simulated_points_floor"] <= r["simulated_points_p10"] <= r["simulated_points_mean"]
               <= r["simulated_points_p90"] <= r["simulated_points_ceiling"]
@@ -4163,6 +4165,51 @@ async def main() -> int:
           ),
           str([(r["simulated_points_floor"], r["simulated_points_p10"], r["simulated_points_mean"],
                 r["simulated_points_p90"], r["simulated_points_ceiling"]) for r in sim_batch["results"][:2]]))
+
+    # Direct, exact proof (not just ordering) that floor/ceiling are
+    # really the 5th/95th percentile and not still the true min/max --
+    # a known, fixed simulated-trials array with a controlled min (10.0)
+    # and max (200.0) lets floor/ceiling be checked against an exact
+    # expected value instead of just "some number in between".
+    import numpy as np_floor_test
+
+    fixed_sim_array = np_floor_test.array([
+        [float(v) for v in range(10, 201, 10)],  # 10.0 .. 200.0, step 10 -- 20 values
+    ])
+
+    async def fake_player_pools_floor_test(lineups, season):
+        return {}
+
+    def fake_simulate_batch_floor_test(entries, player_pools, *, num_trials, seed=None):
+        return fixed_sim_array
+
+    original_player_pools_floor_test = variance.player_pools_for_entries
+    original_simulate_batch_floor_test = variance.simulate_batch
+    variance.player_pools_for_entries = fake_player_pools_floor_test
+    variance.simulate_batch = fake_simulate_batch_floor_test
+
+    floor_eval = await contest.evaluate_batch_simulated(
+        [{"players": [{"id": 1}]}], [{"players": [{"id": 2}]}],
+        dict(contest.CONTEST_TYPES["gpp_small"]), season=2026, num_trials=20,
+    )
+
+    variance.player_pools_for_entries = original_player_pools_floor_test
+    variance.simulate_batch = original_simulate_batch_floor_test
+
+    expected_floor = round(float(np_floor_test.percentile(fixed_sim_array[0], contest.FLOOR_CEILING_PERCENTILE)), 2)
+    expected_ceiling = round(
+        float(np_floor_test.percentile(fixed_sim_array[0], 100 - contest.FLOOR_CEILING_PERCENTILE)), 2
+    )
+    floor_result = floor_eval["results"][0]
+    check("simulated_points_floor/ceiling exactly match the 5th/95th percentile of a known fixture "
+          "with a controlled true min (10.0) and max (200.0) -- and land strictly inside that true "
+          "range, proving they're no longer the literal min/max",
+          floor_result["simulated_points_floor"] == expected_floor
+          and floor_result["simulated_points_ceiling"] == expected_ceiling
+          and 10.0 < floor_result["simulated_points_floor"] < floor_result["simulated_points_ceiling"] < 200.0,
+          str((floor_result["simulated_points_floor"], expected_floor,
+               floor_result["simulated_points_ceiling"], expected_ceiling)))
+
     check("build_contest_entries_simulated's avg_cash_probability_pct matches its own per-entry results",
           abs(sim_batch["summary"]["avg_cash_probability_pct"] - sum(cash_pcts) / len(cash_pcts)) < 0.15,
           str((sim_batch["summary"]["avg_cash_probability_pct"], round(sum(cash_pcts) / len(cash_pcts), 1))))
@@ -4863,8 +4910,8 @@ async def main() -> int:
           all(dk_sim["results"][i]["roi_pct"] >= dk_sim["results"][i + 1]["roi_pct"]
               for i in range(len(dk_sim["results"]) - 1)),
           str([r["roi_pct"] for r in dk_sim["results"][:5]]))
-    check("build_dk_entries_simulated's simulated_points_floor/ceiling are the true min/max across "
-          "all trials, so floor <= p10 <= mean <= p90 <= ceiling for every sampled lineup",
+    check("build_dk_entries_simulated's simulated_points_floor/ceiling are percentiles (not the "
+          "true min/max), so floor <= p10 <= mean <= p90 <= ceiling for every sampled lineup",
           all(
               r["simulated_points_floor"] <= r["simulated_points_p10"] <= r["simulated_points_mean"]
               <= r["simulated_points_p90"] <= r["simulated_points_ceiling"]

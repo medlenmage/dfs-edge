@@ -835,10 +835,10 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                     <th className="num">Proj FPTS</th>
                     {state.simulated && (
                       <>
-                        <th className="num" title="The lowest this lineup scored in any simulated trial">
+                        <th className="num" title="5th percentile -- this lineup scored below this in only 1 of 20 simulated trials. Not the true minimum, which is a single freak outcome even under a well-calibrated model.">
                           Floor
                         </th>
-                        <th className="num" title="The highest this lineup scored in any simulated trial">
+                        <th className="num" title="95th percentile -- this lineup scored above this in only 1 of 20 simulated trials. Not the true maximum, which is a single freak outcome even under a well-calibrated model.">
                           Ceiling
                         </th>
                       </>

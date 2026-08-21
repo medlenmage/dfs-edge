@@ -74,6 +74,18 @@ MAX_FIELD_SIZE = 200_000
 MAX_USER_LINEUPS = 10_000
 _OWNERSHIP_FLOOR = 0.5  # even an unowned player gets a sliver of sampling weight
 
+# "Floor"/"ceiling" report the 5th/95th percentile of a lineup's own
+# simulated trials, not the true min/max -- the literal single most
+# extreme outcome out of num_trials (usually 10,000) draws reads as an
+# implausible freak event even under a genuinely well-calibrated model
+# (confirmed with the user after a real diagnostic: the 10th/90th
+# percentile on a real batch already landed in a realistic range, e.g.
+# ~50-60 to ~130, while the true max routinely reached 220-260+, a gap
+# consistent with a fatter-than-normal right tail regardless of any
+# labeling choice). p5/p95 is still a genuinely extreme outcome -- one
+# trial in twenty -- just not the single rarest of thousands.
+FLOOR_CEILING_PERCENTILE = 5
+
 # DraftKings Classic MLB's own roster rule: no more than 5 hitters from
 # the same team in a single lineup. STACK_SHAPES below never targets
 # more than 5 in one group, but a shape's genuine leftover/free picks
@@ -1443,8 +1455,8 @@ async def evaluate_batch_simulated(
                 "simulated_points_mean": round(float(row.mean()), 2),
                 "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
                 "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
-                "simulated_points_floor": round(float(row.min()), 2),
-                "simulated_points_ceiling": round(float(row.max()), 2),
+                "simulated_points_floor": round(float(np.percentile(row, FLOOR_CEILING_PERCENTILE)), 2),
+                "simulated_points_ceiling": round(float(np.percentile(row, 100 - FLOOR_CEILING_PERCENTILE)), 2),
             }
         )
 
@@ -2023,8 +2035,8 @@ async def evaluate_field_mirrored(
                 "simulated_points_mean": round(float(row.mean()), 2),
                 "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
                 "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
-                "simulated_points_floor": round(float(row.min()), 2),
-                "simulated_points_ceiling": round(float(row.max()), 2),
+                "simulated_points_floor": round(float(np.percentile(row, FLOOR_CEILING_PERCENTILE)), 2),
+                "simulated_points_ceiling": round(float(np.percentile(row, 100 - FLOOR_CEILING_PERCENTILE)), 2),
             }
         )
 
