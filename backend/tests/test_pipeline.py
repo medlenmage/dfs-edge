@@ -587,12 +587,21 @@ async def main() -> int:
         return {
             70001: {"id": 70001, "name": "Ace Starter", "throws": "R"},
             70002: {"id": 70002, "name": "Middle Reliever", "throws": "L"},
+            70003: {"id": 70003, "name": "Coming Off IL", "throws": "R"},
         }
+
+    async def fake_injuries_projstarter(team_id, season):
+        # Not on the ACTIVE roster fake above -- only reachable through
+        # the injured-list fallback, standing in for a real 60-day-IL
+        # pitcher whose activation transaction hasn't posted yet.
+        return [{"id": 70003, "name": "Coming Off IL", "status_code": "D60"}] if team_id == 900 else []
 
     original_get_active_roster = mlb.get_active_roster
     original_get_people_2 = mlb.get_people
+    original_get_injuries_projstarter = mlb.get_team_injuries
     mlb.get_active_roster = fake_roster_projstarter
     mlb.get_people = fake_people_projstarter
+    mlb.get_team_injuries = fake_injuries_projstarter
 
     projstarter_lookup = projections.build_lookup(
         [
@@ -625,8 +634,30 @@ async def main() -> int:
           "team's actual active roster, rather than guessing",
           await mlb_slate._projected_starter(900, "LAD", 2026, unmatched_lookup) is None)
 
+    # A pitcher RotoWire projects as the team's TOP starter (highest
+    # FPTS) but who isn't on the active roster fake at all -- only
+    # resolvable via the injured-list fallback. Confirmed with the user:
+    # RotoWire listing an injured pitcher as a team's top projected
+    # starter typically means he's being activated that same day to
+    # make the start, so this should resolve, not silently fail the
+    # way it would have before the injured-list fallback existed.
+    il_activation_lookup = projections.build_lookup(
+        [
+            projection_row("Coming Off IL", "LAD", 22.0, 25.0, lineup_spot=None),
+            projection_row("Ace Starter", "LAD", 18.5, 20.0, lineup_spot=None),
+        ]
+    )
+    for row in il_activation_lookup.values():
+        row["position"] = "P"
+    il_resolved = await mlb_slate._projected_starter(900, "LAD", 2026, il_activation_lookup)
+    check("_projected_starter resolves a same-day-activation candidate (RotoWire's own top "
+          "projected starter) who's on the injured list, not the active roster, via the "
+          "injured-list fallback rather than returning None",
+          il_resolved == {"id": 70003, "name": "Coming Off IL"}, str(il_resolved))
+
     mlb.get_active_roster = original_get_active_roster
     mlb.get_people = original_get_people_2
+    mlb.get_team_injuries = original_get_injuries_projstarter
 
     print("\nDK slate detection (Game Info column -> which games are in this slate)")
     check("parse_game_info extracts the away@home pair, ignoring date/time",
