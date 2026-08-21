@@ -1105,6 +1105,46 @@ async def main() -> int:
     except optimizer.OptimizerError:
         check("build_player_pool rejects an unknown projection_source", True)
 
+    # MIN_POOL_FPTS: a cheap mitigation (confirmed with the user) for
+    # the entry-builder drafting a bench/unlisted player the at-bat
+    # engine has no simulated data for -- a real bench player's own
+    # projected FPTS is reliably near zero, so filtering the pool to
+    # real contributors cuts that collision down without threading
+    # at-bat-eligibility through generation itself.
+    fpts_floor_slate = {
+        "games": [
+            {
+                "home": {
+                    "abbrev": "FLR",
+                    "hitters": [
+                        {
+                            "id": 9501, "name": "RealContributor",
+                            "salary": {"salary": 4000, "position": "1B", "avg_points": None, "value": None},
+                            "projection": {"fpts": 3.01, "ownership_pct": 10.0},
+                        },
+                        {
+                            "id": 9502, "name": "RightAtTheFloor",
+                            "salary": {"salary": 3000, "position": "2B", "avg_points": None, "value": None},
+                            "projection": {"fpts": 3.0, "ownership_pct": 5.0},
+                        },
+                        {
+                            "id": 9503, "name": "BenchGuy",
+                            "salary": {"salary": 2000, "position": "OF", "avg_points": None, "value": None},
+                            "projection": {"fpts": 0.5, "ownership_pct": 1.0},
+                        },
+                    ],
+                    "probable_pitcher": None,
+                    "scratches": [],
+                },
+                "away": {"abbrev": "FLR2", "hitters": [], "probable_pitcher": None, "scratches": []},
+            }
+        ]
+    }
+    fpts_floor_pool = {p["id"] for p in optimizer.build_player_pool(fpts_floor_slate)}
+    check("build_player_pool excludes a player projected below MIN_POOL_FPTS (a real proxy for "
+          "'not actually going to play'), but keeps one projected right at or above it",
+          fpts_floor_pool == {9501, 9502}, str(fpts_floor_pool))
+
     # Regression for a real bug found by backtesting the contest
     # simulator against real GPP results: RotoWire's export doesn't
     # cover every player on a slate, and a missing ownership_pct used

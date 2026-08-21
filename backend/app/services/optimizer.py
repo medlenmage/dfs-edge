@@ -45,6 +45,18 @@ SALARY_CAP = 50_000
 # always leaving real projected points on the table, so this is a
 # sensible default rather than an opt-in.
 DEFAULT_MIN_SALARY = 47_000
+
+# A cheap, temporary mitigation (confirmed with the user, revisit
+# later) for a real gap: this pool has no idea which players the
+# at-bat simulation engine can actually score (it needs a confirmed or
+# projected batting-order spot -- see atbat_sim.py), so it could draft
+# a bench/unlisted player into an entry that engine then can't
+# simulate at all. A real bench/deep-reserve player's own projected
+# FPTS is reliably near zero -- filtering the pool to real contributors
+# cuts that collision down sharply without threading at-bat-eligibility
+# through generation itself, which is the real, more precise fix for a
+# later pass.
+MIN_POOL_FPTS = 3.0
 SLOT_REQUIREMENTS = {
     "P": 2,
     "C": 1,
@@ -393,7 +405,9 @@ def build_player_pool(
     """
     Flatten every hitter and probable pitcher across the slate into one
     optimizable pool. Skips anyone missing a matched salary or
-    projection, anyone with a DK position we can't map to a roster slot,
+    projection, anyone projected below MIN_POOL_FPTS (see its own
+    comment -- a cheap stand-in for "is this player actually going to
+    play"), anyone with a DK position we can't map to a roster slot,
     and anyone the lineup watcher has flagged as scratched today.
 
     `included_game_pks`, if given, restricts the pool to those specific
@@ -457,6 +471,8 @@ def build_player_pool(
                 if not salary_info or not salary_info.get("salary"):
                     continue
                 if not proj_info or proj_info.get(fpts_key) is None:
+                    continue
+                if proj_info[fpts_key] < MIN_POOL_FPTS:
                     continue
                 slots = _eligible_slots(salary_info.get("position") or "")
                 if not slots:
