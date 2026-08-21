@@ -599,6 +599,10 @@ def _sample_one_lineup(
                 "projected_fpts": p["projected_fpts"],
                 "ownership_pct": p["ownership_pct"],
                 "edge_composite": p.get("edge_composite"),
+                # DK's own numeric player id, carried through for
+                # dk_entry_manager.py's real-CSV export -- empty string
+                # when no DK salary file is loaded (optimizer.build_player_pool()).
+                "dk_id": p.get("dk_id") or "",
             }
             for p in picks
         ],
@@ -753,6 +757,10 @@ def build_chalk_lineup(
                 "projected_fpts": p["projected_fpts"],
                 "ownership_pct": p["ownership_pct"],
                 "edge_composite": p.get("edge_composite"),
+                # DK's own numeric player id, carried through for
+                # dk_entry_manager.py's real-CSV export -- empty string
+                # when no DK salary file is loaded (optimizer.build_player_pool()).
+                "dk_id": p.get("dk_id") or "",
             }
             for p in picks
         ],

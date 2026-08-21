@@ -490,6 +490,14 @@ def build_player_pool(
                         # making late_swap the only consumer that needs a
                         # separate slate lookup.
                         "game_pk": game.get("game_pk"),
+                        # DK's own numeric player id, verbatim from the
+                        # uploaded DK salary CSV (empty string when only a
+                        # RotoWire file is loaded -- see
+                        # salaries.from_rotowire_rows()) -- needed to fill
+                        # a real DK contest-entry template CSV back in
+                        # (services/dk_entry_manager.py), never used for
+                        # this app's own MLB Stats API-keyed matching.
+                        "dk_id": salary_info.get("dk_id") or "",
                         "salary": salary_info["salary"],
                         "projected_fpts": proj_info[fpts_key],
                         "ownership_pct": proj_info.get(ownership_key) or proj_info.get(fallback_ownership_key) or 0,
@@ -640,6 +648,7 @@ def _solve_one(
                         "projected_fpts": p["projected_fpts"],
                         "ownership_pct": p["ownership_pct"],
                         "edge_composite": p["edge_composite"],
+                        "dk_id": p.get("dk_id") or "",
                     }
                 )
                 salary_used += p["salary"]

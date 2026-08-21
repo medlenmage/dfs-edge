@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date as date_cls
 from typing import Any
 from uuid import uuid4
@@ -17,6 +18,7 @@ from app.services import (
     contest,
     contest_results,
     dk_entries,
+    dk_entry_manager,
     lineup_export,
     mlb_slate,
     optimizer,
@@ -871,6 +873,55 @@ async def download_contest_entries_csv(batch_id: str) -> Response:
         content=csv_text,
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="contest-entries-{batch_id}.csv"'},
+    )
+
+
+@router.get("/dk-entries/fill")
+async def fill_dk_entries(
+    date: str | None = Query(None, description="The date the uploaded DK entries template (POST /dk-entries) was stored under"),
+    contest_id: str = Query(..., description="One of GET /dk-entries's returned contest_id values"),
+    batch_id: str = Query(..., description="A batch_id from POST /contest-entries or /contest-entries-simulated -- its own already-ranked order is used, strongest lineup first"),
+    only_blank: bool = Query(True, description="Only fill entry rows with no picks yet (default) -- false overwrites every row for this contest, blank or not"),
+) -> Response:
+    """
+    Entry Manager: fill a real DraftKings bulk-entries template (already
+    uploaded via POST /dk-entries for this date) with lineups from an
+    already-built batch, one lineup per blank entry row in the batch's
+    own order, and return the completed CSV -- ready to literally
+    reupload to DraftKings, no manual copy/paste.
+
+    Requires a real DK salary CSV to have been loaded for the slate (not
+    just RotoWire projections) -- DraftKings' own reupload format needs
+    each player's real numeric DK id, which only a DK salary file
+    carries.
+    """
+    day = date or date_cls.today().isoformat()
+    text = dk_entries.load(day)
+    if not text:
+        raise HTTPException(
+            status_code=404,
+            detail="No DK entries template uploaded for that date yet -- upload one via POST /dk-entries first.",
+        )
+    cached = cache.get(f"contest_batch:{batch_id}")
+    if not cached:
+        raise HTTPException(
+            status_code=404,
+            detail="That batch has expired or doesn't exist -- generate a new one first.",
+        )
+    try:
+        filled_csv, summary = dk_entry_manager.fill_entries(
+            text, contest_id, cached["entries"], only_blank=only_blank,
+        )
+    except dk_entry_manager.EntryManagerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return Response(
+        content=filled_csv,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="dk-entries-filled-{contest_id}.csv"',
+            "X-Fill-Summary": json.dumps(summary),
+        },
     )
 
 

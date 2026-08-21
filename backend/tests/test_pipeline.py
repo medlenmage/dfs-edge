@@ -12,6 +12,8 @@ Run it with:
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import random
 import sys
 from pathlib import Path
@@ -26,6 +28,7 @@ from app.services import (  # noqa: E402
     contest,
     contest_results,
     dk_entries,
+    dk_entry_manager,
     inhouse_projections,
     lineup_export,
     lineup_watch,
@@ -5074,6 +5077,95 @@ async def main() -> int:
           contests_by_id["7000001"]["num_entries"] == 2 and contests_by_id["7000001"]["num_filled"] == 1
           and contests_by_id["7000002"]["num_entries"] == 1 and contests_by_id["7000002"]["num_filled"] == 0,
           str(contests_by_id))
+
+    print("\nEntry Manager (dk_entry_manager.py) -- filling a real DK template with generated lineups")
+
+    def fake_lineup(dk_ids, names=None):
+        names = names or [f"P{d}" for d in dk_ids]
+        return {"players": [{"name": n, "dk_id": d} for n, d in zip(names, dk_ids)]}
+
+    # 10 fake DK ids in fixed roster order (P,P,C,1B,2B,3B,SS,OF,OF,OF),
+    # deliberately distinct from dk_pool_rows' own 90001-90010 so a
+    # successful fill is unambiguous in the output, not a coincidental
+    # match against what the file already had.
+    em_lineup_a = fake_lineup(
+        ["91001", "91002", "91003", "91004", "91005", "91006", "91007", "91008", "91009", "91010"],
+        ["EA_P1", "EA_P2", "EA_C", "EA_1B", "EA_2B", "EA_3B", "EA_SS", "EA_OF1", "EA_OF2", "EA_OF3"],
+    )
+    em_lineup_b = fake_lineup(
+        ["92001", "92002", "92003", "92004", "92005", "92006", "92007", "92008", "92009", "92010"],
+        ["EB_P1", "EB_P2", "EB_C", "EB_1B", "EB_2B", "EB_3B", "EB_SS", "EB_OF1", "EB_OF2", "EB_OF3"],
+    )
+
+    filled_csv, em_summary = dk_entry_manager.fill_entries(dk_entries_csv, "7000001", [em_lineup_a])
+    em_rows = list(csv.reader(io.StringIO(filled_csv)))
+    check("fill_entries fills exactly the one blank entry for that contest (only_blank default)",
+          em_summary == {
+              "contest_id": "7000001", "filled_count": 1, "entry_ids_filled": ["5000000002"],
+              "unfilled_row_count": 0, "lineups_unused": 0,
+          },
+          str(em_summary))
+    check("the already-filled entry (5000000001) is left completely untouched",
+          em_rows[1] == list(csv.reader(io.StringIO(dk_entry_rows[0])))[0],
+          str(em_rows[1]))
+    check("the previously-blank entry now carries 'Name (dk_id)' in fixed roster order",
+          em_rows[2][4:14] == [
+              "EA_P1 (91001)", "EA_P2 (91002)", "EA_C (91003)", "EA_1B (91004)", "EA_2B (91005)",
+              "EA_3B (91006)", "EA_SS (91007)", "EA_OF1 (91008)", "EA_OF2 (91009)", "EA_OF3 (91010)",
+          ],
+          str(em_rows[2][4:14]))
+    check("the OTHER contest's untouched row is byte-identical to the original file",
+          em_rows[3] == list(csv.reader(io.StringIO(dk_entry_rows[2])))[0],
+          str(em_rows[3]))
+
+    original_rows = list(csv.reader(io.StringIO(dk_entries_csv)))
+    check("the embedded player-pool table (every row after the entries table) is byte-identical after fill",
+          em_rows[len(dk_entry_rows) + 1 :] == original_rows[len(dk_entry_rows) + 1 :],
+          str(em_rows[len(dk_entry_rows) + 1 :][:1]))
+
+    filled_csv_overwrite, overwrite_summary = dk_entry_manager.fill_entries(
+        dk_entries_csv, "7000001", [em_lineup_a, em_lineup_b], only_blank=False,
+    )
+    overwrite_rows = list(csv.reader(io.StringIO(filled_csv_overwrite)))
+    check("only_blank=False overwrites an ALREADY-filled entry too, in file order",
+          overwrite_rows[1][4:14][0] == "EA_P1 (91001)" and overwrite_rows[2][4:14][0] == "EB_P1 (92001)",
+          str((overwrite_rows[1][4], overwrite_rows[2][4])))
+
+    _, no_room_summary = dk_entry_manager.fill_entries(
+        dk_entries_csv, "7000001", [em_lineup_a, em_lineup_b],
+    )
+    check("more lineups than blank target rows: the leftover lineup is reported as unused, not an error",
+          no_room_summary == {
+              "contest_id": "7000001", "filled_count": 1, "entry_ids_filled": ["5000000002"],
+              "unfilled_row_count": 0, "lineups_unused": 1,
+          },
+          str(no_room_summary))
+
+    _, no_lineups_summary = dk_entry_manager.fill_entries(dk_entries_csv, "7000002", [])
+    check("more blank target rows than lineups: the leftover row is reported unfilled, not an error",
+          no_lineups_summary == {
+              "contest_id": "7000002", "filled_count": 0, "entry_ids_filled": [],
+              "unfilled_row_count": 1, "lineups_unused": 0,
+          },
+          str(no_lineups_summary))
+
+    try:
+        dk_entry_manager.fill_entries(dk_entries_csv, "9999999", [em_lineup_a])
+        check("fill_entries raises for a contest_id with no rows in the file at all", False)
+    except dk_entry_manager.EntryManagerError:
+        check("fill_entries raises for a contest_id with no rows in the file at all", True)
+
+    lineup_missing_dk_id = fake_lineup(
+        ["93001", "93002", "93003", "93004", "93005", "93006", "93007", "93008", "", "93010"],
+    )
+    try:
+        dk_entry_manager.fill_entries(dk_entries_csv, "7000001", [lineup_missing_dk_id])
+        check("fill_entries raises a clear error when a lineup player has no dk_id "
+              "(RotoWire-only projections, no real DK salary CSV loaded)", False)
+    except dk_entry_manager.EntryManagerError as exc:
+        check("fill_entries raises a clear error when a lineup player has no dk_id "
+              "(RotoWire-only projections, no real DK salary CSV loaded)",
+              "dk id" in str(exc).lower(), str(exc))
 
     curve = contest._custom_payout_curve(10, 1000.0, "top_heavy", 40.0)
     check("_custom_payout_curve pins rank 1's payout to exactly first_place_pct of the pool",
