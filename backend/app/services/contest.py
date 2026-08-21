@@ -974,6 +974,36 @@ def field_exposure(field: list[dict[str, Any]], top_n: int = 15) -> list[dict[st
     return ranked
 
 
+def _entry_passes_filters(
+    entry: dict[str, Any],
+    *,
+    require_teams: frozenset[str],
+    exclude_teams: frozenset[str],
+    require_player_ids: frozenset[int],
+    exclude_player_ids: frozenset[int],
+    stack_types: frozenset[str] | None,
+) -> bool:
+    """
+    One entry's pass/fail against reshape_batch()'s Filters -- surgical
+    include/exclude by stack team, specific player combo, or named
+    stack shape, applied BEFORE ranking/exposure-capping so those steps
+    only ever see entries that already satisfy every filter.
+    """
+    entry_teams = {p["team"] for p in entry["players"]}
+    entry_player_ids = {p["id"] for p in entry["players"]}
+    if require_teams and not require_teams <= entry_teams:
+        return False
+    if exclude_teams and entry_teams & exclude_teams:
+        return False
+    if require_player_ids and not require_player_ids <= entry_player_ids:
+        return False
+    if exclude_player_ids and entry_player_ids & exclude_player_ids:
+        return False
+    if stack_types is not None and entry.get("stack_type") not in stack_types:
+        return False
+    return True
+
+
 def reshape_batch(
     entries: list[dict[str, Any]],
     results: list[dict[str, Any]],
@@ -982,6 +1012,11 @@ def reshape_batch(
     max_exposure_pct: float | None = None,
     player_exposure_caps: dict[int, float] | None = None,
     roi_boosts: dict[int, float] | None = None,
+    require_teams: list[str] | None = None,
+    exclude_teams: list[str] | None = None,
+    require_player_ids: list[int] | None = None,
+    exclude_player_ids: list[int] | None = None,
+    stack_types: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Re-rank and/or re-filter an ALREADY-SIMULATED batch's real results on
@@ -989,6 +1024,15 @@ def reshape_batch(
     post-hoc reshape over numbers that are already genuine, so a user
     can shape their actual submitted portfolio without a full rebuild
     every time they want to try a different exposure cap.
+
+    Filters (`require_teams`/`exclude_teams`/`require_player_ids`/
+    `exclude_player_ids`/`stack_types`) run FIRST, narrowing the
+    candidate pool to only entries that satisfy every one given (see
+    `_entry_passes_filters`) -- e.g. "only 5-3 shapes stacking CLE" is
+    `stack_types=["5-3"], require_teams=["CLE"]`. `target_count`/
+    exposure caps below then apply to that narrowed pool, not the
+    original batch -- "keep the top N of what's left after filtering,"
+    the natural reading of combining a filter with a portfolio size.
 
     `roi_boosts` (player_id -> ROI PERCENTAGE POINTS, additive, may be
     negative) nudges the SORT ORDER only: each entry's real `roi_pct`
@@ -1002,14 +1046,14 @@ def reshape_batch(
     `max_exposure_pct`/`player_exposure_caps` (the latter overrides the
     former for specific players) then greedily keep entries -- highest
     `adjusted_roi_pct` first -- up to `target_count` (defaults to the
-    whole batch), dropping any entry that would push a player's exposure
-    over their cap relative to `target_count` (the size of the FINAL
-    portfolio being shaped, not the original batch) -- same incremental
-    exposure-counting technique already used during generation
-    (`_sample_one_lineup`'s `exposure_count`), just applied to a
-    pre-sorted candidate list instead of random sampling. A dropped
-    entry doesn't stop the walk -- a lower-ranked entry further down the
-    list may still fit within the caps.
+    whole FILTERED pool), dropping any entry that would push a player's
+    exposure over their cap relative to `target_count` (the size of the
+    FINAL portfolio being shaped) -- same incremental exposure-counting
+    technique already used during generation (`_sample_one_lineup`'s
+    `exposure_count`), just applied to a pre-sorted candidate list
+    instead of random sampling. A dropped entry doesn't stop the walk --
+    a lower-ranked entry further down the list may still fit within the
+    caps.
     """
     if not entries or not results:
         raise ContestError("Need at least one entry to reshape.")
@@ -1018,6 +1062,32 @@ def reshape_batch(
 
     roi_boosts = roi_boosts or {}
     player_exposure_caps = player_exposure_caps or {}
+    original_count = len(entries)
+
+    require_teams_set = frozenset(require_teams or ())
+    exclude_teams_set = frozenset(exclude_teams or ())
+    require_player_ids_set = frozenset(require_player_ids or ())
+    exclude_player_ids_set = frozenset(exclude_player_ids or ())
+    stack_types_set = frozenset(stack_types) if stack_types else None
+
+    if require_teams_set or exclude_teams_set or require_player_ids_set or exclude_player_ids_set or stack_types_set is not None:
+        filtered = [
+            (entry, result)
+            for entry, result in zip(entries, results)
+            if _entry_passes_filters(
+                entry,
+                require_teams=require_teams_set,
+                exclude_teams=exclude_teams_set,
+                require_player_ids=require_player_ids_set,
+                exclude_player_ids=exclude_player_ids_set,
+                stack_types=stack_types_set,
+            )
+        ]
+        entries = [e for e, _ in filtered]
+        results = [r for _, r in filtered]
+        if not entries:
+            raise ContestError("No entries in this batch match every filter given.")
+
     target = len(entries) if target_count is None else max(1, min(target_count, len(entries)))
 
     scored = []
@@ -1053,6 +1123,11 @@ def reshape_batch(
         "exposure": field_exposure(kept_entries, top_n=20),
         "num_kept": len(kept_entries),
         "num_dropped": len(entries) - len(kept_entries),
+        # How many of the ORIGINAL batch (before any filter ran) never
+        # even reached the ranking/exposure-cap walk -- distinct from
+        # num_dropped above, which only counts entries that DID reach
+        # that walk but got capped out. Zero when no filter was given.
+        "num_filtered_out": original_count - len(entries),
     }
 
 
