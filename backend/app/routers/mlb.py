@@ -603,6 +603,11 @@ async def build_contest_field(
     max_salary: int = Body(
         optimizer.SALARY_CAP, embed=True, description="Ceiling on each sampled field lineup's salary"
     ),
+    field_sharpness: str = Body(
+        "marquee",
+        embed=True,
+        description="How sharp the simulated public field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays).",
+    ),
 ) -> dict[str, Any]:
     """
     Build a synthetic public field for a named contest type, sampled by
@@ -632,6 +637,7 @@ async def build_contest_field(
             included_game_pks=included_game_pks,
             min_salary=min_salary,
             max_salary=max_salary,
+            field_sharpness=field_sharpness,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -670,6 +676,11 @@ async def build_contest_entries(
         False,
         embed=True,
         description="Allow exact duplicate entries in the batch (a real GPP move -- entering a signature build multiple times). Each entry reports duplicate_count",
+    ),
+    field_sharpness: str = Body(
+        "marquee",
+        embed=True,
+        description="How sharp the simulated opponent field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays).",
     ),
 ) -> dict[str, Any]:
     """
@@ -711,6 +722,7 @@ async def build_contest_entries(
             min_salary=min_salary,
             max_salary=max_salary,
             allow_duplicates=allow_duplicates,
+            field_sharpness=field_sharpness,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -773,6 +785,11 @@ async def build_contest_entries_simulated(
         embed=True,
         description="'bootstrap' (default) samples each player's own historical DK-point outcome pool. 'atbat' instead runs genuine at-bat-level (plate-appearance by plate-appearance) simulated games for the whole slate -- correlation is a natural consequence of shared simulated game state rather than a team multiplier, but it requires a CONFIRMED lineup on both sides and a resolvable probable pitcher for every game on the slate, and fails with a clear error otherwise.",
     ),
+    field_sharpness: str = Body(
+        "marquee",
+        embed=True,
+        description="How sharp the simulated opponent field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays). Ignored when self_play=True -- self-play never samples a separate field.",
+    ),
 ) -> dict[str, Any]:
     """
     Like POST /contest-entries, but ranks the batch against a genuine
@@ -811,6 +828,7 @@ async def build_contest_entries_simulated(
             allow_duplicates=allow_duplicates,
             self_play=self_play,
             engine=engine,
+            field_sharpness=field_sharpness,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -997,6 +1015,11 @@ async def simulate_dk_entries(
         embed=True,
         description="'bootstrap' (default) samples each player's own historical DK-point outcome pool. 'atbat' instead runs genuine at-bat-level simulated games for the whole slate -- requires a confirmed lineup on both sides and a resolvable probable pitcher for every game on the slate.",
     ),
+    field_sharpness: str = Body(
+        "marquee",
+        embed=True,
+        description="How sharp the simulated field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays).",
+    ),
 ) -> dict[str, Any]:
     """
     Mirror and simulate a real contest's whole field from an uploaded
@@ -1050,6 +1073,7 @@ async def simulate_dk_entries(
             min_salary=min_salary,
             max_salary=max_salary,
             engine=engine,
+            field_sharpness=field_sharpness,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -2502,6 +2502,56 @@ async def main() -> int:
     except contest.ContestError:
         check("generate_field raises ContestError when a hitter slot has no candidates", True)
 
+    print("\nContest field generator: stakes-tiered field sharpness")
+
+    try:
+        contest.generate_field(mul_slate, 10, field_sharpness="ultra")
+        check("generate_field rejects an unknown field_sharpness", False)
+    except contest.ContestError:
+        check("generate_field rejects an unknown field_sharpness", True)
+
+    # Direct unit test of the weight function itself, isolated from the
+    # noisy statistics of a full random-sampled field -- a heavily
+    # chalk-owned, mediocre-value player vs. a lightly-owned, strong-
+    # value one, run through each sharpness level's actual weight_fn.
+    chalk_player = {"ownership_pct": 40.0, "salary": 5000, "projected_fpts": 10.0}
+    value_player = {"ownership_pct": 5.0, "salary": 4000, "projected_fpts": 12.0}
+
+    marquee_ratio = contest._field_weight_fn("marquee")(chalk_player) / contest._field_weight_fn("marquee")(value_player)
+    low_ratio = contest._field_weight_fn("low")(chalk_player) / contest._field_weight_fn("low")(value_player)
+    high_ratio = contest._field_weight_fn("high")(chalk_player) / contest._field_weight_fn("high")(value_player)
+
+    check("'marquee' field_sharpness weighs the chalk player over the value player in "
+          "direct proportion to ownership% (8x)",
+          marquee_ratio == 8.0, str(marquee_ratio))
+    check("'low' field_sharpness compresses the ownership gap -- the chalk player's edge "
+          "over the value player shrinks vs. 'marquee'",
+          low_ratio < marquee_ratio,
+          f"low={low_ratio:.2f} marquee={marquee_ratio:.2f}")
+    check("'high' field_sharpness's points-per-dollar bonus narrows the chalk player's "
+          "edge vs. 'marquee' (the value player closes the gap on pure value)",
+          high_ratio < marquee_ratio,
+          f"high={high_ratio:.2f} marquee={marquee_ratio:.2f}")
+    check("'high' field_sharpness still weighs the chalk player above zero (still "
+          "ownership-aware, not ownership-blind)",
+          contest._field_weight_fn("high")(chalk_player) > 0,
+          str(contest._field_weight_fn("high")(chalk_player)))
+
+    # mul_slate never sets real ownership_pct values (see the "Rake
+    # sanity check" section below), so every player floors to the same
+    # sampling weight regardless of field_sharpness -- proving the
+    # weight function differs (above) but not that it actually changes
+    # which players a real field-sample walk picks. That statistical
+    # check runs later, against chalk_slate (a genuinely
+    # ownership-differentiated fixture already built for exactly this).
+    default_field = contest.generate_field(mul_slate, 60, seed=41)
+    marquee_field = contest.generate_field(mul_slate, 60, seed=41, field_sharpness="marquee")
+    default_ids = [frozenset(p["id"] for p in lu["players"]) for lu in default_field]
+    marquee_ids = [frozenset(p["id"] for p in lu["players"]) for lu in marquee_field]
+    check("field_sharpness defaults to 'marquee' -- an unspecified call reproduces the "
+          "same field as an explicit field_sharpness='marquee' call at the same seed",
+          default_ids == marquee_ids)
+
     print("\nContest field generator: ranking and payout curve")
 
     synthetic_field = [
@@ -4747,6 +4797,30 @@ async def main() -> int:
           "never the clearly-lower-owned ones",
           {9720, 9721, 9722} <= chalk_ids and not ({9723, 9724} & chalk_ids),
           str(sorted(chalk_ids)))
+
+    print("\nContest field generator: stakes-tiered field sharpness, against a genuinely "
+          "ownership-differentiated field (chalk_slate)")
+
+    # Every single-position slot here (C/1B/2B/3B/SS) offers exactly a
+    # "hi" (heavily owned) and "lo" (lightly owned) option at similar
+    # value -- real choice for the sampler to make, unlike mul_slate
+    # (every player floors to the same weight there). Sampling a large
+    # field at each sharpness level and counting how often the "lo" ids
+    # get rostered turns the weight-function difference proven above
+    # into an observable effect on actual field composition.
+    LO_IDS = {9711, 9713, 9715, 9717, 9719}  # CHKA's lightly-owned C/1B/2B/3B/SS options
+
+    def lo_pick_rate(field_sharpness):
+        field = contest.generate_field(chalk_slate, 300, seed=606, field_sharpness=field_sharpness)
+        picks = sum(1 for lu in field for p in lu["players"] if p["id"] in LO_IDS)
+        return picks / (len(field) * 5)  # 5 single-position slots per lineup
+
+    marquee_lo_rate = lo_pick_rate("marquee")
+    low_lo_rate = lo_pick_rate("low")
+    check("'low' field_sharpness's compressed ownership weighting rosters the lightly-owned "
+          "same-position alternative measurably more often than 'marquee' does",
+          low_lo_rate > marquee_lo_rate * 1.5,
+          f"low={low_lo_rate:.3f} marquee={marquee_lo_rate:.3f}")
 
     # sample_size=250 is a deliberate exact divisor of both field_size
     # values used below (500 and 100,000) -- when field_size isn't an

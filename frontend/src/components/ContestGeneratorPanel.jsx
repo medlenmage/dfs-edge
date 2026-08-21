@@ -24,6 +24,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [minSalary, setMinSalary] = useState('47000')
   const [maxSalary, setMaxSalary] = useState('')
   const [allowDuplicates, setAllowDuplicates] = useState(false)
+  const [fieldSharpness, setFieldSharpness] = useState('marquee')
   const [simulate, setSimulate] = useState(false)
   const [selfPlay, setSelfPlay] = useState(false)
   const [atbatEngine, setAtbatEngine] = useState(false)
@@ -115,6 +116,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         minSalary: minSalary.trim() ? Number(minSalary) : 0,
         maxSalary: maxSalary.trim() ? Number(maxSalary) : 50000,
         allowDuplicates,
+        fieldSharpness,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
         ...(simulate ? { selfPlay, engine: atbatEngine ? 'atbat' : 'bootstrap' } : {}),
@@ -156,6 +158,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
         engine: atbatEngine ? 'atbat' : 'bootstrap',
+        fieldSharpness,
       })
       applyReady({ status: 'ready', simulated: true, mode: 'dk-entries', ...result })
     } catch (err) {
@@ -319,6 +322,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         </label>
         <label
           className="dim"
+          style={{ fontSize: 13 }}
+          title="How sharp the simulated opponent field is. Low: softer/chalkier, ownership spread out more evenly. Marquee (default): a realistic large-field GPP. High: sharp bettors converging tightly on the best pure points-per-dollar plays."
+        >
+          Field sharpness{' '}
+          <select value={fieldSharpness} onChange={(e) => setFieldSharpness(e.target.value)}>
+            <option value="low">Low</option>
+            <option value="marquee">Marquee</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+        <label
+          className="dim"
           style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}
           title="Allow exact duplicate entries in the batch -- a real GPP move (entering a signature build multiple times). Duplicates report how many identical copies are in the batch, and their cash probability/payout/ROI are averaged across the tied group, matching how DK actually splits a payout between literally identical lineups."
         >
@@ -449,6 +464,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
               />
               At-bat-level engine (beta)
             </label>
+            <label
+              className="dim"
+              style={{ fontSize: 13 }}
+              title="How sharp the simulated field is. Low: softer/chalkier, ownership spread out more evenly. Marquee (default): a realistic large-field GPP. High: sharp bettors converging tightly on the best pure points-per-dollar plays."
+            >
+              Field sharpness{' '}
+              <select value={fieldSharpness} onChange={(e) => setFieldSharpness(e.target.value)}>
+                <option value="low">Low</option>
+                <option value="marquee">Marquee</option>
+                <option value="high">High</option>
+              </select>
+            </label>
             <button
               className="primary"
               onClick={runDkEntries}
@@ -566,6 +593,14 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
               </span>
             )}
             <span className="badge">{state.field_size.toLocaleString()}-entry contest</span>
+            {state.field_sharpness && state.field_sharpness !== 'marquee' && (
+              <span
+                className="badge"
+                title="How sharp the simulated field was built to be for this batch"
+              >
+                {state.field_sharpness} sharpness
+              </span>
+            )}
             <span className="badge">${state.contest.entry_fee.toLocaleString()} entry</span>
             <span className="badge">{state.paid_count.toLocaleString()} paid</span>
             <span className="badge">${state.prize_pool.toLocaleString()} prize pool</span>
