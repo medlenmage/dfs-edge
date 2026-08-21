@@ -3491,6 +3491,39 @@ async def main() -> int:
     check("pitcher_allowed_rates derives 1B allowed as hits minus 2B/3B/HR allowed",
           abs(pitcher_rates_100bf["1B"] - 0.16) < 1e-9, str(pitcher_rates_100bf))  # 22 - 4 - 0 - 2 = 16
 
+    # _apply_edge_composite: ties the at-bat engine's blended PA rates
+    # back to scoring.py's own matchup-quality signal -- the real fix
+    # for a real, measured gap (simulated lineup results only weakly
+    # tracking their own projected_points, r=0.48 on a live batch).
+    neutral_rates = dict(atbat_sim.LEAGUE_AVG_PA_RATES)
+    check("_apply_edge_composite leaves the rates unchanged with no composite signal at all",
+          atbat_sim._apply_edge_composite(neutral_rates, None) == neutral_rates)
+
+    hot_matchup = atbat_sim._apply_edge_composite(neutral_rates, 1.5)
+    check("_apply_edge_composite's output still sums to (almost) exactly 1.0",
+          abs(sum(hot_matchup.values()) - 1.0) < 1e-9, str(sum(hot_matchup.values())))
+    check("a favorable (>1.0) composite raises every reach-base event's probability",
+          all(hot_matchup[e] > neutral_rates[e] for e in ("1B", "2B", "3B", "HR", "BB")),
+          str(hot_matchup))
+    check("a favorable (>1.0) composite lowers every out event's probability",
+          all(hot_matchup[e] < neutral_rates[e] for e in ("K", "OUT")), str(hot_matchup))
+
+    cold_matchup = atbat_sim._apply_edge_composite(neutral_rates, 0.6)
+    check("an unfavorable (<1.0) composite does the exact opposite -- lower reach-base, higher outs",
+          all(cold_matchup[e] < neutral_rates[e] for e in ("1B", "2B", "3B", "HR", "BB"))
+          and all(cold_matchup[e] > neutral_rates[e] for e in ("K", "OUT")),
+          str(cold_matchup))
+
+    check("_apply_edge_composite clamps an extreme composite to EDGE_COMPOSITE_MAX rather than "
+          "letting one extreme signal blow the distribution out to an implausible shape",
+          atbat_sim._apply_edge_composite(neutral_rates, 99.0)
+          == atbat_sim._apply_edge_composite(neutral_rates, atbat_sim.EDGE_COMPOSITE_MAX),
+          "")
+    check("_apply_edge_composite clamps an extreme low composite to EDGE_COMPOSITE_MIN",
+          atbat_sim._apply_edge_composite(neutral_rates, 0.01)
+          == atbat_sim._apply_edge_composite(neutral_rates, atbat_sim.EDGE_COMPOSITE_MIN),
+          "")
+
     no_bullpen_data = atbat_sim.bullpen_pa_rates(None)
     check("bullpen_pa_rates falls back to the neutral league-average with no real bullpen data",
           no_bullpen_data == atbat_sim.LEAGUE_AVG_PA_RATES, str(no_bullpen_data))
@@ -3728,13 +3761,17 @@ async def main() -> int:
 
     mlb.get_player_game_log = fake_slate_game_log
 
-    def _slate_side(team_id, abbrev, hitter_ids, pitcher_id, confirmed=True, projected_order=None):
+    def _slate_side(team_id, abbrev, hitter_ids, pitcher_id, confirmed=True, projected_order=None, composites=None):
         # projected_order: optional list of hitter ids (order matters) to
         # assign a 1-based projected_batting_order to, standing in for
         # what an uploaded RotoWire file's LINEUP column would carry.
         # None leaves every hitter's projected_batting_order unset (the
-        # "no projections file loaded" case).
+        # "no projections file loaded" case). composites: optional
+        # {hitter_id: composite} to attach as edge.composite -- unset
+        # hitters get no "edge" key at all, same as a real hitter dict
+        # with no computed edge.
         projected_spot = {pid: i + 1 for i, pid in enumerate(projected_order or [])}
+        composites = composites or {}
         return {
             "team_id": team_id,
             "abbrev": abbrev,
@@ -3743,6 +3780,7 @@ async def main() -> int:
                     "id": pid,
                     "batting_order": (i + 1) if confirmed else None,
                     "projected_batting_order": projected_spot.get(pid),
+                    **({"edge": {"composite": composites[pid]}} if pid in composites else {}),
                 }
                 for i, pid in enumerate(hitter_ids)
             ],
@@ -3773,6 +3811,34 @@ async def main() -> int:
           await atbat_sim.simulate_slate_trials(ready_slate, VARIANCE_SEASON, num_trials=25, seed=5)
           == slate_trials,
           "")
+
+    # End-to-end proof the edge.composite fix actually changes simulated
+    # results: two hitters with IDENTICAL game logs (same underlying
+    # season rate), one given a strongly favorable matchup composite and
+    # the other a strongly unfavorable one -- their simulated DK-point
+    # means should now differ clearly, which they could NOT before this
+    # fix (the engine had no way to tell them apart at all).
+    composite_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                "home": _slate_side(
+                    9001, "HOM", list(range(401, 410)), 5001,
+                    composites={401: 1.6, 402: 0.6},
+                ),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    composite_trials = await atbat_sim.simulate_slate_trials(
+        composite_slate, VARIANCE_SEASON, num_trials=400, seed=11
+    )
+    hot_mean = statistics_module.mean(composite_trials[401])
+    cold_mean = statistics_module.mean(composite_trials[402])
+    check("a hitter with a strongly favorable edge.composite simulates meaningfully higher DK "
+          "points, over enough trials, than an otherwise-identical hitter with a strongly "
+          "unfavorable one -- proof the composite signal actually reaches the simulated output",
+          hot_mean > cold_mean * 1.3, str((round(hot_mean, 2), round(cold_mean, 2))))
 
     unconfirmed_slate = {
         "games": [
