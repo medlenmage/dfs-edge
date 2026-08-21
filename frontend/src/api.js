@@ -62,6 +62,12 @@ export const api = {
 
   uploadProjections: (date, file) => uploadFile(`/api/mlb/projections?date=${date}`, file),
 
+  refreshRotowireProjections: ({ refresh = false } = {}) =>
+    request('/api/mlb/projections/refresh-rotowire', {
+      method: 'POST',
+      body: JSON.stringify({ refresh }),
+    }),
+
   dkSlates: (date, { refresh = false } = {}) =>
     request(`/api/mlb/dk-slates?date=${date}${refresh ? '&refresh=true' : ''}`),
 

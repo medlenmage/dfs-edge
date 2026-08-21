@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import draftkings, mlb, odds, savant, weather  # noqa: E402
+from app.clients import draftkings, mlb, odds, rotowire, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     atbat_sim,
@@ -790,6 +790,90 @@ async def main() -> int:
           }, str(dk_rows[0]))
     check("the game_info DraftKings gives us (with spaces) still matches this app's own parse_game_info()",
           salaries.parse_game_info(dk_rows[0]["game_info"]) == ("LAD", "COL"), str(dk_rows[0]["game_info"]))
+
+    print("\nRotoWire live projections import (clients/rotowire.py) -- no manual CSV needed")
+
+    # Fixture shaped exactly like RotoWire's real slate-list.php response
+    # (confirmed live against https://www.rotowire.com/daily/mlb/api/
+    # slate-list.php and .../players.php while building this feature):
+    # the main "All" Classic slate (the one this app wants), a Turbo
+    # Classic slate on the same day (not the default -- must be
+    # excluded), and a Showdown slate (wrong contest type -- excluded).
+    rw_slate_list_fixture = {
+        "slates": [
+            {
+                "slateID": 26987, "contestType": "Classic", "slateName": "All",
+                "startDateOnly": "2026-08-21", "defaultSlate": True,
+            },
+            {
+                "slateID": 26989, "contestType": "Classic", "slateName": "Turbo",
+                "startDateOnly": "2026-08-21", "defaultSlate": False,
+            },
+            {
+                "slateID": 26985, "contestType": "Showdown", "slateName": "ATL @ MIL",
+                "startDateOnly": "2026-08-21", "defaultSlate": True,
+            },
+        ]
+    }
+    rw_slate = rotowire._pick_classic_slate(rw_slate_list_fixture)
+    check("_pick_classic_slate picks the main default Classic slate, not the Turbo or Showdown ones",
+          rw_slate["slateID"] == 26987, str(rw_slate))
+    check("_pick_classic_slate's slate carries the real slate date this app should trust as the "
+          "day these projections belong to",
+          rw_slate["startDateOnly"] == "2026-08-21", str(rw_slate))
+
+    try:
+        rotowire._pick_classic_slate({"slates": []})
+        check("_pick_classic_slate raises a clear ApiError with no live Classic slate at all", False, "")
+    except rotowire.ApiError:
+        check("_pick_classic_slate raises a clear ApiError with no live Classic slate at all", True, "")
+
+    rw_players_fixture = [
+        {
+            "firstName": "Shohei", "lastName": "Ohtani",
+            "pos": ["1B", "OF"], "team": {"abbr": "LAD"},
+            "salary": 6500, "pts": "11.94", "rostership": 6.52,
+            "lineup": {"slot": "1", "isConfirmed": False},
+        },
+        {
+            "firstName": "Yoshinobu", "lastName": "Yamamoto",
+            "pos": ["P"], "team": {"abbr": "LAD"},
+            "salary": 10600, "pts": "20.02", "rostership": 17.35,
+            "lineup": {"slot": "SP", "isConfirmed": True},
+        },
+        {
+            # Bench -- an empty lineup slot, must come through as a None
+            # lineup_spot (RotoWire's own "not starting" marker, same as
+            # a manual CSV upload's "BN").
+            "firstName": "Bench", "lastName": "Guy",
+            "pos": ["OF"], "team": {"abbr": "LAD"},
+            "salary": 2000, "pts": "0.00", "rostership": 0.1,
+            "lineup": {"slot": "", "isConfirmed": False},
+        },
+        {
+            # No salary -- must be skipped, same rule draftkings.py's own client uses.
+            "firstName": "No", "lastName": "Salary",
+            "pos": ["OF"], "team": {"abbr": "LAD"},
+            "salary": None, "pts": "5.00", "rostership": 1.0,
+            "lineup": {"slot": "", "isConfirmed": False},
+        },
+    ]
+    rw_rows = rotowire._parse_players(rw_players_fixture)
+    check("_parse_players skips players with no salary",
+          len(rw_rows) == 3, str(rw_rows))
+    check("_parse_players produces the exact row shape projections.parse_rotowire_csv() does, "
+          "so projections.store() accepts it with no changes downstream",
+          rw_rows[0] == {
+              "name": "Shohei Ohtani", "normalized_name": "shohei ohtani", "team": "LAD",
+              "position": "1B/OF", "fpts": 11.94, "ownership_pct": 6.52, "salary": 6500,
+              "lineup_spot": 1,
+          }, str(rw_rows[0]))
+    check("_parse_players reads a pitcher's 'SP' lineup slot as lineup_spot=None -- not a real "
+          "batting-order spot, matching how a manual CSV's LINEUP='SP' already reads",
+          rw_rows[1]["lineup_spot"] is None, str(rw_rows[1]))
+    check("_parse_players reads an empty (bench) lineup slot as lineup_spot=None, same as a "
+          "manual CSV upload's 'BN'",
+          rw_rows[2]["lineup_spot"] is None, str(rw_rows[2]))
 
     def fake_salary_load_in_slate(day):
         return [salary_row("Big Righty Bat", "NYY", 4200, 9.5, game_info="NYY@BOS 08/14/2026 07:10PM ET")]

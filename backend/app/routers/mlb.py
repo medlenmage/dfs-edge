@@ -11,7 +11,7 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, Response, Uploa
 import asyncio
 
 from app import cache, history_db
-from app.clients import draftkings
+from app.clients import draftkings, rotowire
 from app.services import (
     analysis,
     contest,
@@ -340,6 +340,58 @@ async def upload_projections(
         # a RotoWire/DraftKings spelling mismatch (nicknames, accents,
         # a real typo) shows up immediately instead of silently leaving
         # that player's projection blank on the Hitters/Pitchers tabs.
+        lookup = salaries.build_lookup(existing_salaries)
+        bad = player_match.unmatched(rows, lookup, fuzzy=True)
+        result["matched_to_slate"] = len(rows) - len(bad)
+        if bad:
+            result["unmatched"] = bad
+    else:
+        derived = salaries.from_rotowire_rows(rows)
+        if derived:
+            salaries.store(day, derived)
+            result["salaries_derived"] = len(derived)
+
+    return result
+
+
+@router.post("/projections/refresh-rotowire")
+async def refresh_rotowire_projections(
+    refresh: bool = Body(
+        False, embed=True,
+        description="Bypass the cache and re-pull live from RotoWire -- use close to lock for newly confirmed lineups",
+    ),
+) -> dict[str, Any]:
+    """
+    Pull RotoWire's own live optimizer player pool directly from their
+    site (clients/rotowire.py) instead of a manual CSV download/upload.
+
+    Always stores under THAT slate's own real date (RotoWire's, not
+    whatever date this app's UI currently has selected) -- the
+    response's `date` field tells the caller which one, since it can
+    differ from what's currently showing.
+    """
+    try:
+        slate = await rotowire.get_current_slate(force=refresh)
+        rows = await rotowire.get_slate_players(slate["slateID"], force=refresh)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Couldn't reach RotoWire: {exc}") from exc
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No players found in RotoWire's live slate -- it may not be posted yet.",
+        )
+
+    day = slate["startDateOnly"]
+    projections.store(day, rows)
+    asyncio.create_task(history_db.archive_slate_projections(day, rows))
+    result = {"date": day, "players_loaded": len(rows)}
+
+    existing_salaries = salaries.load(day)
+    if existing_salaries:
+        # A DK slate is already loaded for this date -- run the same
+        # name-matching used for the live slate now, so a RotoWire/
+        # DraftKings spelling mismatch shows up immediately instead of
+        # silently leaving that player's projection blank.
         lookup = salaries.build_lookup(existing_salaries)
         bad = player_match.unmatched(rows, lookup, fuzzy=True)
         result["matched_to_slate"] = len(rows) - len(bad)
