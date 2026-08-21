@@ -690,11 +690,20 @@ async def _projected_starter(
     the "P" position tag, a simpler and more robust signal than trying
     to parse "SP" vs "RP" labeling that isn't consistent across every
     real export), then resolves a real MLB id for that name by matching
-    against the team's own active roster -- the same name/team fuzzy
-    matching salaries.py and projections.py already use elsewhere,
-    just pointed at a roster lookup instead of a projections lookup.
-    Returns None with no projections file loaded, no pitcher-position
-    row for this team, or no roster match found.
+    against the team's roster -- the same name/team fuzzy matching
+    salaries.py and projections.py already use elsewhere, just pointed
+    at a roster lookup instead of a projections lookup.
+
+    Matches against the ACTIVE roster plus the injured list (confirmed
+    with the user: RotoWire listing an injured pitcher as a team's top
+    projected starter typically means he's being activated that same
+    day to make the start, not that RotoWire's data is stale) -- a
+    projected starter still coming off the 60-day IL that day wouldn't
+    resolve against the active roster alone, since MLB doesn't add him
+    back to it until the actual activation transaction posts, which can
+    land close to first pitch. Returns None with no projections file
+    loaded, no pitcher-position row for this team, or no match on
+    either roster.
     """
     if not team_id or not projection_lookup:
         return None
@@ -707,7 +716,10 @@ async def _projected_starter(
         return None
     best = max(candidates, key=lambda row: row.get("fpts") or 0)
 
-    roster_ids = await mlb.get_active_roster(team_id, season)
+    active_ids, injuries = await asyncio.gather(
+        mlb.get_active_roster(team_id, season), mlb.get_team_injuries(team_id, season)
+    )
+    roster_ids = list({*active_ids, *(inj["id"] for inj in injuries if inj.get("id"))})
     if not roster_ids:
         return None
     bios = await mlb.get_people(roster_ids)
