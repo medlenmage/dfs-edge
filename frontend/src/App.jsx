@@ -43,6 +43,7 @@ export default function App() {
     () => document.documentElement.dataset.theme || 'auto',
   )
   const [projectionMsg, setProjectionMsg] = useState(null)
+  const [rotowireLoading, setRotowireLoading] = useState(false)
   const projectionInputRef = useRef(null)
   // Which FPTS/ownership numbers feed the optimizer and contest
   // generator -- independent of whether the tables have fetched the
@@ -118,6 +119,38 @@ export default function App() {
 
   const handleProjectionUpload = makeUploadHandler(api.uploadProjections, setProjectionMsg, 'projections')
 
+  // Pulls RotoWire's own live optimizer player pool directly -- no
+  // manual CSV download/upload. Always stored under THAT slate's own
+  // real date (RotoWire's, not whatever date is currently selected
+  // here), so if it differs, switch the date picker to match and
+  // reload -- otherwise a successful refresh would silently not show
+  // up anywhere.
+  async function refreshFromRotowire() {
+    setRotowireLoading(true)
+    setProjectionMsg('Pulling live projections from RotoWire…')
+    try {
+      const result = await api.refreshRotowireProjections({ refresh: true })
+      const derived = result.salaries_derived
+        ? ` (salaries pulled from the same data for ${result.salaries_derived} of them)`
+        : ''
+      const unmatched = result.unmatched?.length
+        ? ` -- ${result.unmatched.length} didn't match today's DK slate by name (${result.unmatched
+            .slice(0, 5)
+            .join(', ')}${result.unmatched.length > 5 ? ', …' : ''})`
+        : ''
+      setProjectionMsg(`Loaded ${result.players_loaded} live RotoWire projections for ${result.date}${derived}${unmatched}`)
+      if (result.date !== date) {
+        setDate(result.date)
+      } else {
+        load(true)
+      }
+    } catch (err) {
+      setProjectionMsg(`RotoWire refresh failed: ${err.message}`)
+    } finally {
+      setRotowireLoading(false)
+    }
+  }
+
   function cycleTheme() {
     const next = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'
     setTheme(next)
@@ -168,6 +201,13 @@ export default function App() {
                 title="Upload a RotoWire FPTS/ownership projections CSV for this date"
               >
                 Upload projections
+              </button>
+              <button
+                onClick={refreshFromRotowire}
+                disabled={rotowireLoading}
+                title="Pull RotoWire's own live optimizer player pool directly -- salary, position, opponent, projected/confirmed batting order, FPTS, and rostership% -- with no manual CSV download/upload. Always bypasses the cache for genuinely live data (newly confirmed lineups, late scratches). Stored under that slate's own real date, switching the date picker to match if it differs."
+              >
+                {rotowireLoading ? 'Loading…' : 'Refresh from RotoWire'}
               </button>
               <button
                 onClick={loadInhouse}
