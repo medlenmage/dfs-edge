@@ -658,8 +658,30 @@ def _pitcher_id_for_side(side: dict[str, Any]) -> int | None:
     return (side.get("projected_probable_pitcher") or {}).get("id")
 
 
+def _cutoff(game_log: list[dict[str, Any]], as_of_date: str | None) -> list[dict[str, Any]]:
+    """
+    Excludes any game on or after `as_of_date` (an ISO date string) --
+    for backtesting only, same purpose and mechanism as
+    variance.player_outcome_pool()'s own `as_of_date`: projecting a real
+    historical date's outcomes from a player's FULL current game log
+    (the correct, normal live-app behavior, where "today" has no future
+    games to leak) would let games that hadn't happened yet as of that
+    date leak into the "prediction" -- exactly the look-ahead bias a
+    real backtest against archived historical results needs to rule
+    out. A no-op (returns `game_log` unchanged) when `as_of_date` is
+    None, which is every real live call this app itself ever makes.
+    """
+    if as_of_date is None:
+        return game_log
+    return [g for g in game_log if (g.get("date") or "") < as_of_date]
+
+
 async def _game_pa_rates(
-    game: dict[str, Any], season: int, bullpen_by_team: dict[int, dict[str, Any]]
+    game: dict[str, Any],
+    season: int,
+    bullpen_by_team: dict[int, dict[str, Any]],
+    *,
+    as_of_date: str | None = None,
 ) -> dict[str, Any]:
     """
     Fetches and blends everything simulate_game() needs for one slate
@@ -669,6 +691,8 @@ async def _game_pa_rates(
     simulatable (see simulate_slate_trials()) -- both sides have a
     usable (confirmed or projected) batting order and a resolvable
     probable_pitcher id.
+
+    `as_of_date`: see _cutoff() -- backtesting only.
     """
     home, away = game["home"], game["away"]
     home_pitcher_id = _pitcher_id_for_side(home)
@@ -683,6 +707,8 @@ async def _game_pa_rates(
         mlb.get_player_game_log(home_pitcher_id, season, group="pitching"),
         mlb.get_player_game_log(away_pitcher_id, season, group="pitching"),
     )
+    home_pitcher_log = _cutoff(home_pitcher_log, as_of_date)
+    away_pitcher_log = _cutoff(away_pitcher_log, as_of_date)
     home_pitcher_allowed = pitcher_allowed_rates(home_pitcher_log)
     away_pitcher_allowed = pitcher_allowed_rates(away_pitcher_log)
     home_starter_outs = starter_outs_target(home_pitcher_log)
@@ -695,6 +721,7 @@ async def _game_pa_rates(
         hitter_id: int, opposing_pitcher_rates: dict[str, float], composites: dict[int, float | None]
     ) -> tuple[int, dict[str, float]]:
         game_log = await mlb.get_player_game_log(hitter_id, season, group="hitting")
+        game_log = _cutoff(game_log, as_of_date)
         own = pa_outcome_rates(game_log)
         batter_pa = sum(g.get("plate_appearances") or 0 for g in game_log)
         blended = blend_pa_rates(own, opposing_pitcher_rates, batter_pa=batter_pa)
@@ -726,6 +753,7 @@ async def simulate_slate_trials(
     num_trials: int,
     seed: int | None = None,
     included_game_pks: list[int] | None = None,
+    as_of_date: str | None = None,
 ) -> dict[int, list[float]]:
     """
     Real per-player DK-point arrays (length `num_trials`, one value per
@@ -738,13 +766,21 @@ async def simulate_slate_trials(
     simulated game each trial, not a separately-modeled multiplier.
 
     V1 scope (see module docstring and SlateNotSimulatableError): EVERY
-    game in `slate["games"]` marked `in_slate` (or, if `included_game_pks`
-    is given, every one of THOSE games -- the same slate-restriction
-    every other entry-building path in contest.py already respects) must
-    have a USABLE batting order on both sides -- a real confirmed lineup,
-    or (see _batting_order_for_side()) RotoWire's own projected one as a
-    fallback -- and a resolvable `probable_pitcher["id"]`, or this raises
-    rather than silently mixing engines within a lineup.
+    game in `slate["games"]` marked `in_slate` must have a USABLE
+    batting order on both sides -- a real confirmed lineup, or (see
+    _batting_order_for_side()) RotoWire's own projected one as a
+    fallback -- and a resolvable `probable_pitcher["id"]`, or this
+    raises rather than silently mixing engines within a lineup.
+    `included_game_pks`, if given, is authoritative -- selects exactly
+    those games regardless of `in_slate` (which requires a DK salary
+    CSV to have been loaded for this date; a historical/backtest date
+    never has one, so this is also how a caller simulates a past date's
+    real games at all, not just how live callers narrow a real slate).
+
+    `as_of_date`: see _cutoff() -- excludes any game log entry on or
+    after this date from every rate calculation, for backtesting a real
+    past date without look-ahead bias (the correct, normal live-app
+    behavior passes None, since "today" has no future games to leak).
 
     A trial index `t` means "one simulated game" for whichever game a
     given player belongs to -- consistent (and therefore correlated)
@@ -753,10 +789,10 @@ async def simulate_slate_trials(
     trials are simulated independently of every other game's, exactly
     like real MLB games on the same slate.
     """
-    games = [
-        g for g in slate.get("games", [])
-        if g.get("in_slate") and (included_game_pks is None or g.get("game_pk") in included_game_pks)
-    ]
+    if included_game_pks is not None:
+        games = [g for g in slate.get("games", []) if g.get("game_pk") in included_game_pks]
+    else:
+        games = [g for g in slate.get("games", []) if g.get("in_slate")]
     if not games:
         raise SlateNotSimulatableError("No slate games to simulate.")
 
@@ -782,7 +818,9 @@ async def simulate_slate_trials(
         )
 
     bullpen_by_team = await mlb.get_bullpen_stats(season)
-    per_game = await asyncio.gather(*(_game_pa_rates(g, season, bullpen_by_team) for g in games))
+    per_game = await asyncio.gather(
+        *(_game_pa_rates(g, season, bullpen_by_team, as_of_date=as_of_date) for g in games)
+    )
 
     player_trials: dict[int, list[float]] = {}
     rng = random.Random(seed)

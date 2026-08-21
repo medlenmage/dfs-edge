@@ -4002,6 +4002,99 @@ async def main() -> int:
         check("simulate_slate_trials still raises SlateNotSimulatableError with neither a real "
               "nor a projected probable pitcher", "HOM" in str(e), str(e))
 
+    print("\nAt-bat-level backtesting: as_of_date excludes look-ahead data (no future games leak in)")
+
+    def _dated_hit_game(date, hot):
+        if hot:
+            # A real "monster game" line: 3-for-4 with a double, a HR, and a walk.
+            return {
+                "plate_appearances": 5, "hits": 3, "doubles": 1, "triples": 0,
+                "home_runs": 1, "walks": 1, "hit_by_pitch": 0, "strikeouts": 0, "date": date,
+            }
+        # A modest, unremarkable game: 1-for-4 with a strikeout.
+        return {
+            "plate_appearances": 4, "hits": 1, "doubles": 0, "triples": 0,
+            "home_runs": 0, "walks": 0, "hit_by_pitch": 0, "strikeouts": 1, "date": date,
+        }
+
+    def _dated_pitch_game(date):
+        return {
+            "plate_appearances": 24, "hits_against": 6, "doubles": 0, "triples": 0,
+            "home_runs": 1, "walks_against": 2, "hit_batsmen": 0, "strikeouts": 6, "outs": 18,
+            "date": date,
+        }
+
+    # Hitter 401's real game log: modest, unremarkable games before the
+    # cutoff, a real hot streak (monster games) on/after it -- a real
+    # live app call (no as_of_date) should reflect that hot streak; a
+    # backtest AS OF the cutoff date must not see it at all.
+    asof_hitter_logs = {
+        401: [_dated_hit_game(f"2099-04-{i:02d}", hot=False) for i in range(1, 21)]
+             + [_dated_hit_game(f"2099-08-{i:02d}", hot=True) for i in range(1, 21)],
+    }
+    for pid in list(range(402, 410)) + list(range(501, 510)):
+        asof_hitter_logs[pid] = [_dated_hit_game(f"2099-04-{i:02d}", hot=False) for i in range(1, 21)]
+    asof_pitcher_logs = {
+        5001: [_dated_pitch_game(f"2099-04-{i:02d}") for i in range(1, 21)],
+        5002: [_dated_pitch_game(f"2099-04-{i:02d}") for i in range(1, 21)],
+    }
+
+    async def fake_asof_game_log(player_id, season, group="hitting"):
+        if group == "pitching":
+            return asof_pitcher_logs.get(player_id, [])
+        return asof_hitter_logs.get(player_id, [])
+
+    mlb.get_player_game_log = fake_asof_game_log
+
+    asof_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                "home": _slate_side(9001, "HOM", list(range(401, 410)), 5001),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    live_trials = await atbat_sim.simulate_slate_trials(asof_slate, VARIANCE_SEASON, num_trials=200, seed=21)
+    asof_trials = await atbat_sim.simulate_slate_trials(
+        asof_slate, VARIANCE_SEASON, num_trials=200, seed=21, as_of_date="2099-06-01"
+    )
+    live_mean = statistics_module.mean(live_trials[401])
+    asof_mean = statistics_module.mean(asof_trials[401])
+    check("simulate_slate_trials without as_of_date reflects a hitter's full game log, including "
+          "a real hot streak far in the 'future' relative to a real backtest date -- proof this "
+          "is the correct, normal live-app behavior (today has no future games to leak)",
+          live_mean > asof_mean * 1.3, str((live_mean, asof_mean)))
+
+    # included_game_pks, when given, is authoritative -- it must be able
+    # to select a game with in_slate=False (or unset) entirely, since a
+    # historical/backtest date never has a DK salary CSV loaded (the
+    # only thing that ever sets in_slate=True) but still needs to be
+    # simulatable by its real game_pk.
+    no_dk_csv_slate = {
+        "games": [
+            {
+                "game_pk": 777, "in_slate": False,
+                "home": _slate_side(9001, "HOM", list(range(401, 410)), 5001),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    try:
+        await atbat_sim.simulate_slate_trials(no_dk_csv_slate, VARIANCE_SEASON, num_trials=5)
+        check("simulate_slate_trials still requires in_slate=True with no included_game_pks given "
+              "(the normal live-app default)", False, "no exception raised")
+    except atbat_sim.SlateNotSimulatableError:
+        check("simulate_slate_trials still requires in_slate=True with no included_game_pks given "
+              "(the normal live-app default)", True, "")
+    no_dk_csv_trials = await atbat_sim.simulate_slate_trials(
+        no_dk_csv_slate, VARIANCE_SEASON, num_trials=5, included_game_pks=[777]
+    )
+    check("simulate_slate_trials simulates a game with in_slate=False when its game_pk is "
+          "explicitly passed via included_game_pks -- needed to backtest a historical date, "
+          "which never has a DK salary CSV (the only thing that sets in_slate) loaded",
+          len(no_dk_csv_trials.get(401, [])) == 5, str(no_dk_csv_trials.get(401)))
+
     print("\nContest generator: at-bat engine wiring (evaluate_batch_simulated engine='atbat')")
 
     def _atbat_entry(hitter_ids):
