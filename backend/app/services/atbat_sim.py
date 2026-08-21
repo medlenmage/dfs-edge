@@ -14,16 +14,19 @@ natural CONSEQUENCE of shared game state, not a separately-bolted-on
 mechanism, and disaster/blowout innings show up on their own instead
 of needing to be hand-modeled.
 
-Each hitter's own blended PA-outcome rates are further nudged by
-scoring.py's edge.composite -- the same matchup-quality signal (park,
-weather, bullpen quality, contact quality, recent form, Vegas implied
-team total) that already drives every projected_points number
-elsewhere in this app (see _apply_edge_composite()). Without this, a
-lineup's simulated results only weakly tracked its own projected
-points (confirmed live: r=0.48 on a real batch, when both describe the
-same thing) -- the engine had no way to know a batter was specifically
-favored or disfavored TODAY beyond his own season rate vs. the
-opposing starter's own season rate.
+Each hitter's own blended PA-outcome rates are further nudged (see
+_apply_edge_composite(), DAMPED -- applying it at full strength
+measurably distorted single-PA probabilities) by scoring.py's
+edge.composite -- the same matchup-quality signal (park, weather,
+bullpen quality, contact quality, recent form, Vegas implied team
+total) that already drives every projected_points number elsewhere in
+this app. Without ANY of this, a lineup's simulated results only
+weakly tracked its own projected points (confirmed live: r=0.48 on a
+real batch). This closed part of that gap, not all of it -- a
+controlled live comparison against variance.py's already-validated
+bootstrap engine, on the exact same entries, still shows meaningfully
+weaker correlation and a wider, less-contained ROI spread. Genuinely
+open, not yet root-caused to one specific mechanism.
 
 Deliberately simplified for a first version -- documented here rather
 than silently assumed, so nobody mistakes "simplified" for "wrong":
@@ -575,6 +578,32 @@ def _composites_for_side(side: dict[str, Any]) -> dict[int, float | None]:
 EDGE_COMPOSITE_MIN = 0.5
 EDGE_COMPOSITE_MAX = 1.8
 
+# Applying the raw composite directly (a 1.0-centered SEASON/roster-
+# construction-level multiplier) to single-PA reach-base/out
+# probabilities turned out to be far too strong a signal -- measured
+# directly: an undamped composite of just 1.3 (a good, not extreme,
+# matchup) pushed reach-base rate from a league-average 31.2% to 43.3%,
+# an OBP-equivalent no real hitter sustains for a full SEASON, let
+# alone deserves from one game's matchup edge. Damping to a fraction of
+# the raw composite's deviation from 1.0 before applying it keeps the
+# signal's DIRECTION and RELATIVE ordering intact (still the fix for
+# the original weak-correlation problem) while keeping single-PA
+# probabilities in a plausible range -- confirmed by the same direct
+# measurement: a damped 1.3 composite only reaches ~35% reach-base, a
+# few realistic points above league average rather than twelve.
+#
+# NOTE: this alone is a real, necessary fix but not a complete one. A
+# controlled live comparison (identical entries, identical field, fixed
+# seed, only this value varied 0.0-1.0) found correlation between
+# projected_points and simulated_points_mean barely moves with damping
+# strength (~0.34-0.42 throughout) -- well short of variance.py's
+# already-validated bootstrap engine on the SAME entries (~0.55, with a
+# far more contained ROI range). Something beyond this one signal --
+# most likely how much variance compounds across per-PA draws, or the
+# shared-game-state correlation strength -- still needs its own
+# investigation; not something one scalar here can fix alone.
+EDGE_COMPOSITE_DAMPING = 0.35
+
 _REACH_BASE_EVENTS = ("1B", "2B", "3B", "HR", "BB")
 _OUT_EVENTS = ("K", "OUT")
 
@@ -595,20 +624,22 @@ def _apply_edge_composite(rates: dict[str, float], composite: float | None) -> d
     rest of the app ranks highest could simulate as mediocre or worse.
 
     A composite above 1.0 (a favorable matchup) scales every reach-base
-    event UP and every out event DOWN by the same factor, renormalized
-    back to 1.0 -- the same "one scalar nudges the whole distribution"
-    approximation variance.py's own target-percentile bias already
-    uses for its bootstrap pool, not a claim that every real signal
-    composite blends affects every event type equally.
+    event UP and every out event DOWN by the same DAMPED factor (see
+    EDGE_COMPOSITE_DAMPING), renormalized back to 1.0 -- the same "one
+    scalar nudges the whole distribution" approximation variance.py's
+    own target-percentile bias already uses for its bootstrap pool, not
+    a claim that every real signal composite blends affects every event
+    type equally.
     """
     if composite is None:
         return rates
     composite = max(EDGE_COMPOSITE_MIN, min(EDGE_COMPOSITE_MAX, composite))
+    damped = 1.0 + (composite - 1.0) * EDGE_COMPOSITE_DAMPING
     adjusted = dict(rates)
     for event in _REACH_BASE_EVENTS:
-        adjusted[event] *= composite
+        adjusted[event] *= damped
     for event in _OUT_EVENTS:
-        adjusted[event] /= composite
+        adjusted[event] /= damped
     total = sum(adjusted.values())
     return {event: v / total for event, v in adjusted.items()} if total else rates
 
