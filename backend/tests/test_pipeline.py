@@ -3250,6 +3250,28 @@ async def main() -> int:
     check("pa_outcome_rates derives 1B as hits minus 2B/3B/HR, not double-counted",
           abs(rates_100pa["1B"] - 0.20) < 1e-9, str(rates_100pa))  # 30 hits - 6 - 1 - 3 = 20 singles
 
+    def _atbat_pitch_game(bf, hits, doubles, triples, hr, bb, hbp, k):
+        return {
+            "plate_appearances": bf, "hits_against": hits, "doubles": doubles, "triples": triples,
+            "home_runs": hr, "walks_against": bb, "hit_batsmen": hbp, "strikeouts": k,
+        }
+
+    check("pitcher_allowed_rates returns {} for a pitcher with no games at all",
+          atbat_sim.pitcher_allowed_rates([]) == {}, "")
+
+    pitcher_rates_100bf = atbat_sim.pitcher_allowed_rates([
+        _atbat_pitch_game(100, hits=22, doubles=4, triples=0, hr=2, bb=9, hbp=1, k=27)
+    ])
+    check("pitcher_allowed_rates' events all sum to (almost) exactly 1.0",
+          abs(sum(pitcher_rates_100bf.values()) - 1.0) < 1e-9, str(sum(pitcher_rates_100bf.values())))
+    check("pitcher_allowed_rates reads the pitching-log field names (hits_against/walks_against/"
+          "hit_batsmen/battersFaced-derived plate_appearances), not the hitting-log ones",
+          pitcher_rates_100bf["HR"] == 0.02 and pitcher_rates_100bf["BB"] == 0.09
+          and pitcher_rates_100bf["K"] == 0.27,
+          str(pitcher_rates_100bf))
+    check("pitcher_allowed_rates derives 1B allowed as hits minus 2B/3B/HR allowed",
+          abs(pitcher_rates_100bf["1B"] - 0.16) < 1e-9, str(pitcher_rates_100bf))  # 22 - 4 - 0 - 2 = 16
+
     no_bullpen_data = atbat_sim.bullpen_pa_rates(None)
     check("bullpen_pa_rates falls back to the neutral league-average with no real bullpen data",
           no_bullpen_data == atbat_sim.LEAGUE_AVG_PA_RATES, str(no_bullpen_data))
@@ -3381,7 +3403,7 @@ async def main() -> int:
     all_out_rates = {e: (1.0 if e == "OUT" else 0.0) for e in atbat_sim.PA_EVENTS}
     hr_lineup = list(range(1, 10))
     out_lineup = list(range(101, 110))
-    hr_box = atbat_sim.simulate_game(
+    hr_result = atbat_sim.simulate_game(
         home_order=hr_lineup, away_order=out_lineup,
         home_pa_rates={pid: hr_rates for pid in hr_lineup},
         away_pa_rates={pid: all_out_rates for pid in out_lineup},
@@ -3389,6 +3411,27 @@ async def main() -> int:
         home_starter_outs=27, away_starter_outs=27,
         rng=random.Random(1),
     )
+    hr_box = hr_result["box"]
+    check("simulate_game's home/away run totals match the sum of each lineup's own box-score runs",
+          hr_result["home_runs"] == sum(hr_box.get(pid, {"runs": 0})["runs"] for pid in hr_lineup)
+          and hr_result["away_runs"] == sum(hr_box.get(pid, {"runs": 0})["runs"] for pid in out_lineup),
+          str((hr_result["home_runs"], hr_result["away_runs"])))
+    check("the HOME starter -- who faces the AWAY (all-out) lineup -- records all 27 outs himself "
+          "and gets credited with a complete game, a shutout (the all-out lineup never scored), "
+          "and the win (his own team scored, theirs didn't)",
+          hr_result["home_starter_line"]["complete_games"] == 1
+          and hr_result["home_starter_line"]["shutouts"] == 1
+          and hr_result["home_starter_line"]["wins"] == 1,
+          str(hr_result["home_starter_line"]))
+    check("the AWAY starter -- who faces the HOME (all-HR) lineup all game (his 27-out budget "
+          "exactly matches the 27 real outs that occur across 9 innings, so he's never pulled) -- "
+          "allowed every hit and earned run charged in the game, and did not get the win",
+          hr_result["away_starter_line"]["hits_against"] == sum(
+              hr_box.get(pid, {"home_runs": 0})["home_runs"] for pid in hr_lineup
+          )
+          and hr_result["away_starter_line"]["earned_runs"] == hr_result["home_runs"]
+          and hr_result["away_starter_line"]["wins"] == 0,
+          str(hr_result["away_starter_line"]))
     check("a lineup that homers on literally every plate appearance scores exactly 1 run per "
           "plate appearance (solo shots, bases always empty from the previous batter's own HR)",
           all(hr_box[pid]["runs"] == hr_box[pid]["home_runs"] for pid in hr_lineup),
@@ -3406,7 +3449,7 @@ async def main() -> int:
     real_rates = atbat_sim.blend_pa_rates(rates_100pa, None, batter_pa=600)
     real_lineup_a = list(range(201, 210))
     real_lineup_b = list(range(301, 310))
-    real_box = atbat_sim.simulate_game(
+    real_result = atbat_sim.simulate_game(
         home_order=real_lineup_a, away_order=real_lineup_b,
         home_pa_rates={pid: real_rates for pid in real_lineup_a},
         away_pa_rates={pid: real_rates for pid in real_lineup_b},
@@ -3414,6 +3457,17 @@ async def main() -> int:
         home_starter_outs=15, away_starter_outs=15,
         rng=random.Random(2),
     )
+    real_box = real_result["box"]
+    check("each starter's own simulated pitching line converts cleanly through the EXISTING "
+          "mlb_dk_points.pitcher_game_points() scorer with no missing-field errors",
+          isinstance(mlb_dk_points.pitcher_game_points(real_result["home_starter_line"]), float)
+          and isinstance(mlb_dk_points.pitcher_game_points(real_result["away_starter_line"]), float),
+          str((real_result["home_starter_line"], real_result["away_starter_line"])))
+    check("a starter with only a 15-out (5 IP) budget against a real-rate lineup does NOT get "
+          "credited with a complete game",
+          real_result["home_starter_line"]["complete_games"] == 0
+          and real_result["away_starter_line"]["complete_games"] == 0,
+          str((real_result["home_starter_line"]["complete_games"], real_result["away_starter_line"]["complete_games"])))
     check("a realistic full game produces a genuine, plausible box score -- every lineup slot "
           "got at least 3 plate appearances (9 innings is plenty for a full lineup to bat "
           "multiple times) and the whole game produced at least one hit somewhere",
@@ -3429,6 +3483,167 @@ async def main() -> int:
               for pid in real_lineup_a + real_lineup_b if pid in real_box
           ),
           "")
+
+    print("\nAt-bat-level slate orchestration (atbat_sim.simulate_slate_trials)")
+
+    def _slate_hit_game():
+        return {
+            "plate_appearances": 4, "hits": 1, "doubles": 0, "triples": 0,
+            "home_runs": 0, "walks": 0, "hit_by_pitch": 0, "strikeouts": 1,
+        }
+
+    def _slate_pitch_game():
+        return {
+            "plate_appearances": 24, "hits_against": 6, "doubles": 0, "triples": 0,
+            "home_runs": 1, "walks_against": 2, "hit_batsmen": 0, "strikeouts": 6, "outs": 18,
+        }
+
+    slate_hitter_ids = list(range(401, 410)) + list(range(501, 510))
+    slate_hitting_logs = {pid: [_slate_hit_game()] * 50 for pid in slate_hitter_ids}
+    slate_pitching_logs = {5001: [_slate_pitch_game()] * 20, 5002: [_slate_pitch_game()] * 20}
+
+    async def fake_slate_game_log(player_id, season, group="hitting"):
+        if group == "pitching":
+            return slate_pitching_logs.get(player_id, [])
+        return slate_hitting_logs.get(player_id, [])
+
+    mlb.get_player_game_log = fake_slate_game_log
+
+    def _slate_side(team_id, abbrev, hitter_ids, pitcher_id, confirmed=True):
+        return {
+            "team_id": team_id,
+            "abbrev": abbrev,
+            "hitters": [{"id": pid, "batting_order": i + 1} for i, pid in enumerate(hitter_ids)],
+            "probable_pitcher": {"id": pitcher_id},
+            "lineup_confirmed": confirmed,
+        }
+
+    ready_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                "home": _slate_side(9001, "HOM", list(range(401, 410)), 5001),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+
+    slate_trials = await atbat_sim.simulate_slate_trials(ready_slate, VARIANCE_SEASON, num_trials=25, seed=5)
+    all_slate_ids = slate_hitter_ids + [5001, 5002]
+    check("simulate_slate_trials returns num_trials DK-point values for every hitter and both "
+          "starting pitchers on the slate",
+          all(len(slate_trials.get(pid, [])) == 25 for pid in all_slate_ids),
+          str({pid: len(slate_trials.get(pid, [])) for pid in all_slate_ids}))
+    check("every simulated value is a real float",
+          all(isinstance(v, float) for arr in slate_trials.values() for v in arr), "")
+    check("simulate_slate_trials is deterministic for a fixed seed -- re-running with the same "
+          "seed reproduces the exact same trial arrays",
+          await atbat_sim.simulate_slate_trials(ready_slate, VARIANCE_SEASON, num_trials=25, seed=5)
+          == slate_trials,
+          "")
+
+    unconfirmed_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                "home": _slate_side(9001, "HOM", list(range(401, 410)), 5001, confirmed=False),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    try:
+        await atbat_sim.simulate_slate_trials(unconfirmed_slate, VARIANCE_SEASON, num_trials=5)
+        check("simulate_slate_trials raises SlateNotSimulatableError when a game's lineup isn't "
+              "confirmed on both sides -- no partial/hybrid fallback in V1", False, "no exception raised")
+    except atbat_sim.SlateNotSimulatableError as e:
+        check("simulate_slate_trials raises SlateNotSimulatableError when a game's lineup isn't "
+              "confirmed on both sides -- no partial/hybrid fallback in V1, and the message names "
+              "the specific unready game",
+              "HOM" in str(e) and "AWY" in str(e), str(e))
+
+    try:
+        await atbat_sim.simulate_slate_trials({"games": []}, VARIANCE_SEASON, num_trials=5)
+        check("simulate_slate_trials raises SlateNotSimulatableError for a slate with no games", False, "")
+    except atbat_sim.SlateNotSimulatableError:
+        check("simulate_slate_trials raises SlateNotSimulatableError for a slate with no games", True, "")
+
+    # A slate with one ready game and one NOT-ready game -- included_game_pks
+    # should let a caller who only wants entries from the ready game skip
+    # requiring the whole slate to be confirmed, matching how every other
+    # entry-building path in contest.py already respects that same param.
+    mixed_slate = {
+        "games": [
+            {
+                "game_pk": 1, "in_slate": True,
+                "home": _slate_side(9001, "HOM", list(range(401, 410)), 5001),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            },
+            {
+                "game_pk": 2, "in_slate": True,
+                "home": _slate_side(9003, "HM2", list(range(401, 410)), 5001, confirmed=False),
+                "away": _slate_side(9004, "AW2", list(range(501, 510)), 5002),
+            },
+        ]
+    }
+    scoped_trials = await atbat_sim.simulate_slate_trials(
+        mixed_slate, VARIANCE_SEASON, num_trials=5, included_game_pks=[1]
+    )
+    check("simulate_slate_trials with included_game_pks scoped to only the ready game succeeds, "
+          "ignoring the other unready game on the same slate entirely",
+          all(len(scoped_trials.get(pid, [])) == 5 for pid in all_slate_ids),
+          str({pid: len(scoped_trials.get(pid, [])) for pid in all_slate_ids}))
+    try:
+        await atbat_sim.simulate_slate_trials(mixed_slate, VARIANCE_SEASON, num_trials=5)
+        check("simulate_slate_trials without included_game_pks still requires EVERY in_slate game "
+              "ready, including the unready second one", False, "no exception raised")
+    except atbat_sim.SlateNotSimulatableError:
+        check("simulate_slate_trials without included_game_pks still requires EVERY in_slate game "
+              "ready, including the unready second one", True, "")
+
+    print("\nContest generator: at-bat engine wiring (evaluate_batch_simulated engine='atbat')")
+
+    def _atbat_entry(hitter_ids):
+        return {"players": [{"id": pid} for pid in [5001, 5002] + list(hitter_ids)]}
+
+    atbat_entries = [_atbat_entry([401, 402, 403, 404, 405, 406, 407, 408])]
+    atbat_field = [
+        _atbat_entry([401, 402, 403, 404, 405, 406, 407, 409]),
+        _atbat_entry([501, 502, 503, 504, 505, 506, 507, 508]),
+    ]
+    atbat_contest = dict(contest.CONTEST_TYPES["gpp_small"])
+
+    atbat_eval = await contest.evaluate_batch_simulated(
+        atbat_entries, atbat_field, atbat_contest, season=VARIANCE_SEASON,
+        num_trials=25, seed=9, engine="atbat", slate=ready_slate,
+    )
+    check("evaluate_batch_simulated(engine='atbat') returns one real result per entry, genuinely "
+          "driven by atbat_sim's simulated games rather than variance.py's bootstrap pools",
+          len(atbat_eval["results"]) == 1 and isinstance(atbat_eval["results"][0]["roi_pct"], float),
+          str(atbat_eval["results"][0]))
+
+    try:
+        await contest.evaluate_batch_simulated(
+            atbat_entries, atbat_field, atbat_contest, season=VARIANCE_SEASON,
+            num_trials=5, engine="atbat",
+        )
+        check("evaluate_batch_simulated(engine='atbat') requires slate -- raises ContestError without it",
+              False, "no exception raised")
+    except contest.ContestError:
+        check("evaluate_batch_simulated(engine='atbat') requires slate -- raises ContestError without it",
+              True, "")
+
+    atbat_missing_player_entry = [_atbat_entry([401, 402, 403, 404, 405, 406, 407, 999999])]
+    try:
+        await contest.evaluate_batch_simulated(
+            atbat_missing_player_entry, atbat_field, atbat_contest, season=VARIANCE_SEASON,
+            num_trials=5, engine="atbat", slate=ready_slate,
+        )
+        check("evaluate_batch_simulated(engine='atbat') raises a clear ContestError for a player id "
+              "not present anywhere in the slate's simulated results", False, "no exception raised")
+    except contest.ContestError as e:
+        check("evaluate_batch_simulated(engine='atbat') raises a clear ContestError for a player id "
+              "not present anywhere in the slate's simulated results",
+              "999999" in str(e), str(e))
 
     print("\nContest generator: simulated economics (contest.py evaluate_batch_simulated)")
 

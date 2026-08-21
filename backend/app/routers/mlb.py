@@ -716,6 +716,11 @@ async def build_contest_entries_simulated(
         embed=True,
         description="Rank this batch against ITSELF instead of a separately-sampled public field -- every lineup competing against every other lineup you generated, in the same simulated trial. Use this to see how your own stacks/builds compare to each other; leave off (default) to see how your batch fares against a realistic public field.",
     ),
+    engine: str = Body(
+        "bootstrap",
+        embed=True,
+        description="'bootstrap' (default) samples each player's own historical DK-point outcome pool. 'atbat' instead runs genuine at-bat-level (plate-appearance by plate-appearance) simulated games for the whole slate -- correlation is a natural consequence of shared simulated game state rather than a team multiplier, but it requires a CONFIRMED lineup on both sides and a resolvable probable pitcher for every game on the slate, and fails with a clear error otherwise.",
+    ),
 ) -> dict[str, Any]:
     """
     Like POST /contest-entries, but ranks the batch against a genuine
@@ -753,6 +758,7 @@ async def build_contest_entries_simulated(
             max_salary=max_salary,
             allow_duplicates=allow_duplicates,
             self_play=self_play,
+            engine=engine,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -934,6 +940,11 @@ async def simulate_dk_entries(
     max_salary: int = Body(
         optimizer.SALARY_CAP, embed=True, description="Ceiling on each sampled field lineup's salary"
     ),
+    engine: str = Body(
+        "bootstrap",
+        embed=True,
+        description="'bootstrap' (default) samples each player's own historical DK-point outcome pool. 'atbat' instead runs genuine at-bat-level simulated games for the whole slate -- requires a confirmed lineup on both sides and a resolvable probable pitcher for every game on the slate.",
+    ),
 ) -> dict[str, Any]:
     """
     Mirror and simulate a real contest's whole field from an uploaded
@@ -986,6 +997,7 @@ async def simulate_dk_entries(
             included_game_pks=included_game_pks,
             min_salary=min_salary,
             max_salary=max_salary,
+            engine=engine,
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

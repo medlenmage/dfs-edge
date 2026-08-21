@@ -249,6 +249,7 @@ export const api = {
       maxSalary = 50000,
       allowDuplicates = false,
       selfPlay = false,
+      engine = 'bootstrap',
     } = {},
   ) =>
     request('/api/mlb/contest-entries-simulated', {
@@ -266,6 +267,7 @@ export const api = {
         max_salary: maxSalary,
         allow_duplicates: allowDuplicates,
         self_play: selfPlay,
+        engine,
       }),
     }),
 
@@ -303,6 +305,7 @@ export const api = {
       includedGamePks = null,
       minSalary = 47000,
       maxSalary = 50000,
+      engine = 'bootstrap',
     } = {},
   ) =>
     request('/api/mlb/dk-entries/simulate', {
@@ -318,6 +321,7 @@ export const api = {
         projection_source: projectionSource,
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
+        engine,
       }),
     }),
 
