@@ -169,6 +169,7 @@ export const api = {
       includedGamePks = null,
       minSalary = 47000,
       maxSalary = 50000,
+      fieldSharpness = 'marquee',
     } = {},
   ) =>
     request('/api/mlb/contest-field', {
@@ -183,6 +184,7 @@ export const api = {
         included_game_pks: includedGamePks,
         min_salary: minSalary,
         max_salary: maxSalary,
+        field_sharpness: fieldSharpness,
       }),
     }),
 
@@ -199,6 +201,7 @@ export const api = {
       minSalary = 47000,
       maxSalary = 50000,
       allowDuplicates = false,
+      fieldSharpness = 'marquee',
     } = {},
   ) =>
     request('/api/mlb/contest-entries', {
@@ -215,6 +218,7 @@ export const api = {
         min_salary: minSalary,
         max_salary: maxSalary,
         allow_duplicates: allowDuplicates,
+        field_sharpness: fieldSharpness,
       }),
     }),
 
@@ -256,6 +260,7 @@ export const api = {
       allowDuplicates = false,
       selfPlay = false,
       engine = 'bootstrap',
+      fieldSharpness = 'marquee',
     } = {},
   ) =>
     request('/api/mlb/contest-entries-simulated', {
@@ -274,6 +279,7 @@ export const api = {
         allow_duplicates: allowDuplicates,
         self_play: selfPlay,
         engine,
+        field_sharpness: fieldSharpness,
       }),
     }),
 
@@ -312,6 +318,7 @@ export const api = {
       minSalary = 47000,
       maxSalary = 50000,
       engine = 'bootstrap',
+      fieldSharpness = 'marquee',
     } = {},
   ) =>
     request('/api/mlb/dk-entries/simulate', {
@@ -328,6 +335,7 @@ export const api = {
         sample_size: sampleSize,
         included_game_pks: includedGamePks,
         engine,
+        field_sharpness: fieldSharpness,
       }),
     }),
 

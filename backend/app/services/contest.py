@@ -281,6 +281,47 @@ def _fpts_weight(p: dict[str, Any]) -> float:
     return max(p["projected_fpts"], _FPTS_FLOOR) ** _FPTS_SAMPLING_EXPONENT
 
 
+# Field sharpness -- how concentrated the simulated opponent field is
+# around the most obvious plays, independent of which real contest
+# (field_size/entry_fee/payout) is being modeled. Mirrors a real
+# competitor DFS tool's own "Contest Archetype" slider (confirmed via
+# its own published help docs): "marquee" (default) is the field this
+# app has always built -- pure ownership-weighted, mirroring a
+# realistic large-field GPP. "low" flattens that toward a more
+# DISPERSED sample -- a real low-stakes field's ownership still skews
+# toward the same obvious chalk, but casual entrants don't converge on
+# the exact same handful of builds the way sharper fields do, so the
+# field as a whole should show more variety, not just more chalk.
+# "high" pulls the sample further toward genuinely good point-per-
+# dollar VALUE on top of ownership -- real high-stakes fields are sharp
+# bettors converging tightly on the objectively best plays, not just
+# whoever happens to be popular.
+FIELD_SHARPNESS_LEVELS = ("low", "marquee", "high")
+# Exponent < 1 compresses the gap between a heavily-owned chalk play
+# and a lightly-owned one, so "low" sampling spreads out more instead
+# of clustering as hard on the very top of the ownership curve.
+_LOW_STAKES_OWNERSHIP_EXPONENT = 0.5
+# How hard "high" leans into point-per-dollar value on top of
+# ownership -- multiplies the usual ownership weight by
+# (fpts/salary)^this, so a good-value player gets sampled meaningfully
+# more even at middling ownership, without discarding the ownership
+# signal (chalk-but-bad-value still isn't what a sharp field plays).
+_HIGH_STAKES_VALUE_EXPONENT = 1.5
+
+
+def _field_weight_fn(field_sharpness: str) -> Callable[[dict[str, Any]], float]:
+    """The per-player sampling weight generate_field() should use for
+    one sharpness level -- see FIELD_SHARPNESS_LEVELS' own comment."""
+    if field_sharpness == "low":
+        return lambda p: _ownership_weight(p) ** _LOW_STAKES_OWNERSHIP_EXPONENT
+    if field_sharpness == "high":
+        def _high_stakes_weight(p: dict[str, Any]) -> float:
+            value = max(p["projected_fpts"], _FPTS_FLOOR) / max(p["salary"], 1)
+            return _ownership_weight(p) * (value ** _HIGH_STAKES_VALUE_EXPONENT)
+        return _high_stakes_weight
+    return _ownership_weight
+
+
 def _team_hitter_pools(
     candidates_by_slot: dict[str, list[dict[str, Any]]], slot_order: list[str]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -729,6 +770,7 @@ def generate_field(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     seed: int | None = None,
+    field_sharpness: str = "marquee",
 ) -> list[dict[str, Any]]:
     """
     Build `sample_size` synthetic opponent lineups, weighted toward
@@ -741,11 +783,20 @@ def generate_field(
     schedule returns for the date. `min_salary`/`max_salary` bound each
     sampled lineup's total salary (unconstrained by default here; the
     HTTP API applies a $47,000 floor unless overridden).
+
+    `field_sharpness`: one of FIELD_SHARPNESS_LEVELS -- see its own
+    comment for what "low"/"marquee"/"high" each actually change about
+    the sample.
     """
     if sample_size < 1:
         raise ContestError("sample_size must be at least 1.")
     if sample_size > MAX_SAMPLE_SIZE:
         raise ContestError(f"sample_size can't exceed {MAX_SAMPLE_SIZE}.")
+    if field_sharpness not in FIELD_SHARPNESS_LEVELS:
+        raise ContestError(
+            f"Unknown field_sharpness '{field_sharpness}'. Choose one of: "
+            f"{', '.join(FIELD_SHARPNESS_LEVELS)}."
+        )
     _validate_salary_range(min_salary, max_salary)
 
     candidates_by_slot, slot_order = _build_candidate_pool(
@@ -754,6 +805,7 @@ def generate_field(
     team_hitter_pools = _team_hitter_pools(candidates_by_slot, slot_order)
     feasible_shapes, feasible_weights = _feasible_stack_shapes(team_hitter_pools)
     one_off_quality_ids = _one_off_quality_ids(candidates_by_slot)
+    field_weight_fn = _field_weight_fn(field_sharpness)
 
     rng = random.Random(seed)
     field: list[dict[str, Any]] = []
@@ -770,7 +822,7 @@ def generate_field(
                 candidates_by_slot,
                 slot_order,
                 rng,
-                _ownership_weight,
+                field_weight_fn,
                 team_hitter_pools=team_hitter_pools,
                 stack_groups=shape,
                 min_salary=min_salary,
@@ -1492,6 +1544,7 @@ def build_contest_field(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     seed: int | None = None,
+    field_sharpness: str = "marquee",
 ) -> dict[str, Any]:
     """
     Top-level entry point: build a synthetic field for `contest_type`
@@ -1499,7 +1552,8 @@ def build_contest_field(
     `user_lineups` against it. `included_game_pks` should be whatever
     slate-game selection was used to build `user_lineups` in the first
     place -- otherwise the field could be drawn from games that aren't
-    even part of the slate being entered.
+    even part of the slate being entered. `field_sharpness`: see
+    FIELD_SHARPNESS_LEVELS.
     """
     if contest_type not in CONTEST_TYPES:
         raise ContestError(
@@ -1515,7 +1569,7 @@ def build_contest_field(
     field = generate_field(
         slate, size, projection_source=projection_source,
         included_game_pks=included_game_pks, min_salary=min_salary, max_salary=max_salary,
-        seed=seed,
+        seed=seed, field_sharpness=field_sharpness,
     )
     evaluation = evaluate_field(field, user_lineups, contest)
 
@@ -1531,6 +1585,7 @@ def build_contest_field(
             "max_total_ownership_pct": max(lu["total_ownership_pct"] for lu in field),
         },
         "field_exposure": field_exposure(field),
+        "field_sharpness": field_sharpness,
         "note": (
             f"Field lineups are sampled by {projection_source} ownership%, not "
             "simulated outcomes -- ranks and payouts are projected-points "
@@ -1611,6 +1666,7 @@ def _build_entries_and_field(
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
     seed: int | None,
+    field_sharpness: str = "marquee",
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Shared setup for build_contest_entries and
@@ -1618,6 +1674,7 @@ def _build_entries_and_field(
     validate, build the user's own entries, and sample an opponent field
     to rank them against. `seed`, if given, offsets the opponent field's
     own seed by one so the two random walks aren't identical.
+    `field_sharpness`: see FIELD_SHARPNESS_LEVELS.
     """
     contest, entries = _build_contest_and_entries(
         slate,
@@ -1642,6 +1699,7 @@ def _build_entries_and_field(
         min_salary=min_salary,
         max_salary=max_salary,
         seed=(seed + 1) if seed is not None else None,
+        field_sharpness=field_sharpness,
     )
     return contest, entries, field
 
@@ -1660,6 +1718,7 @@ def build_contest_entries(
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
     seed: int | None = None,
+    field_sharpness: str = "marquee",
 ) -> dict[str, Any]:
     """
     The contest generator's main entry point for mass multi-entry: build
@@ -1673,7 +1732,8 @@ def build_contest_entries(
     optimality for the ability to build thousands of entries in one
     request. Deterministic and fast, ranking against the field's
     *projected* points -- see build_contest_entries_simulated() for the
-    real Monte Carlo alternative.
+    real Monte Carlo alternative. `field_sharpness`: see
+    FIELD_SHARPNESS_LEVELS.
     """
     contest, entries, field = _build_entries_and_field(
         slate,
@@ -1688,6 +1748,7 @@ def build_contest_entries(
         max_salary=max_salary,
         allow_duplicates=allow_duplicates,
         seed=seed,
+        field_sharpness=field_sharpness,
     )
     evaluation = _evaluate_batch_against_field(entries, field, contest)
 
@@ -1724,6 +1785,7 @@ def build_contest_entries(
             contest["payout_pct"], evaluation["prize_pool"], contest["entry_fee"], evaluation["field_size"]
         ),
         "exposure": field_exposure(entries, top_n=20),
+        "field_sharpness": field_sharpness,
         # Full batch, deliberately not capped here -- routers/mlb.py
         # decides how much of this goes into the JSON response (the
         # aggregate `summary` above already covers the whole batch, so
@@ -1759,6 +1821,7 @@ async def build_contest_entries_simulated(
     seed: int | None = None,
     self_play: bool = False,
     engine: str = "bootstrap",
+    field_sharpness: str = "marquee",
 ) -> dict[str, Any]:
     """
     Like build_contest_entries, but ranks the batch against a real Monte
@@ -1796,6 +1859,11 @@ async def build_contest_entries_simulated(
     evaluate_batch_simulated()'s own docstring for what each means;
     `"atbat"` requires every game on `slate` to have a confirmed lineup
     on both sides and a resolvable probable pitcher.
+
+    `field_sharpness` (see generate_field()'s own docstring) only
+    matters for the `self_play=False` default -- self_play=True never
+    samples a separate opponent field, it mirrors your own batch
+    against itself.
     """
     if self_play:
         contest, entries = _build_contest_and_entries(
@@ -1829,6 +1897,7 @@ async def build_contest_entries_simulated(
             max_salary=max_salary,
             allow_duplicates=allow_duplicates,
             seed=seed,
+            field_sharpness=field_sharpness,
         )
         evaluation = await evaluate_batch_simulated(
             entries,
@@ -1872,6 +1941,7 @@ async def build_contest_entries_simulated(
         "contest": contest,
         "num_entries_requested": num_lineups,
         "num_entries_built": len(entries),
+        "field_sharpness": field_sharpness,
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
         "paid_count": evaluation["paid_count"],
@@ -2078,6 +2148,7 @@ async def build_dk_entries_simulated(
     max_salary: int = SALARY_CAP,
     seed: int | None = None,
     engine: str = "bootstrap",
+    field_sharpness: str = "marquee",
 ) -> dict[str, Any]:
     """
     Mirror a real DraftKings contest and simulate its whole field: an
@@ -2099,6 +2170,9 @@ async def build_dk_entries_simulated(
     dk_entries.contest_summary()), the rest are hand-entered since a
     bulk entries export has no payout-table data or field-size
     information at all.
+
+    `field_sharpness` -- see generate_field()'s own docstring -- controls
+    how sharp the simulated field is assumed to be.
     """
     if field_size < 1:
         raise ContestError("field_size must be at least 1.")
@@ -2107,7 +2181,7 @@ async def build_dk_entries_simulated(
     field_lineups = generate_field(
         slate, field_sample, projection_source=projection_source,
         included_game_pks=included_game_pks, min_salary=min_salary, max_salary=max_salary,
-        seed=seed,
+        seed=seed, field_sharpness=field_sharpness,
     )
 
     contest = {
@@ -2148,6 +2222,7 @@ async def build_dk_entries_simulated(
     return {
         "contest": contest,
         "num_entries_built": len(entries),
+        "field_sharpness": field_sharpness,
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
         "paid_count": evaluation["paid_count"],
