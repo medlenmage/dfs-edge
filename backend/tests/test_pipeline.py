@@ -3562,10 +3562,14 @@ async def main() -> int:
           ),
           str(no_batter_data_blend))
 
-    check("starter_outs_target averages real outs-per-start across his own logged starts",
-          atbat_sim.starter_outs_target([{"outs": 18}, {"outs": 15}, {"outs": 21}]) == 18, "")
-    check("starter_outs_target falls back to a reasonable 15-out (5 IP) default with no starts logged",
-          atbat_sim.starter_outs_target([]) == 15, "")
+    check("starter_outs_pool returns every real outs-per-start from his own logged starts, "
+          "unaveraged -- the actual bootstrap pool a trial samples from, not one fixed number",
+          atbat_sim.starter_outs_pool([{"outs": 18}, {"outs": 15}, {"outs": 21}]) == [18, 15, 21], "")
+    check("starter_outs_pool skips a logged game with zero outs (didn't actually pitch that day)",
+          atbat_sim.starter_outs_pool([{"outs": 18}, {"outs": 0}, {"outs": 21}]) == [18, 21], "")
+    check("starter_outs_pool falls back to a reasonable single-value [15]-out (5 IP) pool with no "
+          "starts logged",
+          atbat_sim.starter_outs_pool([]) == [15], "")
 
     print("\nAt-bat-level baserunner advancement (atbat_sim._advance_runners)")
 
@@ -3811,6 +3815,48 @@ async def main() -> int:
           await atbat_sim.simulate_slate_trials(ready_slate, VARIANCE_SEASON, num_trials=25, seed=5)
           == slate_trials,
           "")
+
+    # End-to-end proof starter-innings variance actually reaches the
+    # simulated output, not just starter_outs_pool()'s own return value:
+    # a pitcher whose real starts vary widely (6 to 27 outs) should
+    # produce genuinely more spread-out simulated DK points, over many
+    # trials, than an otherwise-identical pitcher whose starts never
+    # varied at all (always exactly 18 outs) -- the exact real gap a
+    # real backtest against archived contest data found (starting
+    # pitchers showed ZERO simulated innings variance before this fix).
+    def _varied_outs_pitch_game(outs):
+        return {
+            "plate_appearances": 24, "hits_against": 6, "doubles": 0, "triples": 0,
+            "home_runs": 1, "walks_against": 2, "hit_batsmen": 0, "strikeouts": 6, "outs": outs,
+        }
+
+    varied_pitching_logs = dict(slate_pitching_logs)
+    varied_pitching_logs[5001] = [_varied_outs_pitch_game(o) for o in (6, 12, 18, 24, 27)] * 4
+
+    async def fake_varied_outs_game_log(player_id, season, group="hitting"):
+        if group == "pitching":
+            return varied_pitching_logs.get(player_id, [])
+        return slate_hitting_logs.get(player_id, [])
+
+    mlb.get_player_game_log = fake_varied_outs_game_log
+    check("starter_outs_pool actually returns the pitcher's real varied outs-per-start, not "
+          "one averaged number",
+          sorted(set(atbat_sim.starter_outs_pool(varied_pitching_logs[5001]))) == [6, 12, 18, 24, 27],
+          str(atbat_sim.starter_outs_pool(varied_pitching_logs[5001])))
+
+    varied_outs_trials = await atbat_sim.simulate_slate_trials(
+        ready_slate, VARIANCE_SEASON, num_trials=300, seed=17
+    )
+    mlb.get_player_game_log = fake_slate_game_log  # back to the fixed-18-outs fixture
+    fixed_outs_trials = await atbat_sim.simulate_slate_trials(
+        ready_slate, VARIANCE_SEASON, num_trials=300, seed=17
+    )
+    varied_stdev = statistics_module.pstdev(varied_outs_trials[5001])
+    fixed_stdev = statistics_module.pstdev(fixed_outs_trials[5001])
+    check("a starter whose real starts vary widely (6-27 outs) shows meaningfully MORE simulated "
+          "DK-point spread, over many trials, than an otherwise-identical starter whose starts "
+          "never varied at all -- proof stochastic innings actually reach the simulated output",
+          varied_stdev > fixed_stdev * 1.3, str((round(varied_stdev, 2), round(fixed_stdev, 2))))
 
     # End-to-end proof the edge.composite fix actually changes simulated
     # results: two hitters with IDENTICAL game logs (same underlying

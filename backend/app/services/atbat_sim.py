@@ -38,10 +38,14 @@ than silently assumed, so nobody mistakes "simplified" for "wrong":
     probabilities (see _advance_runners()'s own docstring for the
     exact numbers), not real batted-ball location, exit velocity, or
     runner speed.
-  - A starting pitcher's innings are ONE deterministic estimate (his
-    own season IP/start, not itself stochastic) -- see
-    starter_outs_target(). Real start-to-start variance in how long a
-    starter goes isn't modeled yet.
+  - A starting pitcher's innings are resampled each trial from his own
+    real starts this season (see starter_outs_pool()) -- genuine
+    start-to-start variance (an early hook on a bad night, saving the
+    bullpen on a great one), not a single fixed estimate every trial
+    repeats. Still doesn't condition that length on how THIS trial's
+    start is actually going (a disaster 1st inning realistically raises
+    the odds of an early hook, which this doesn't model) -- draws
+    independently of the trial's own simulated events.
   - The bullpen that relieves him is ONE aggregate per-PA outcome
     distribution built from the team's real bullpen ERA/K9/BB9 (see
     bullpen_pa_rates()), not real reliever-by-reliever matchups.
@@ -209,18 +213,30 @@ def blend_pa_rates(
     return {event: v / total for event, v in combined.items()} if total else dict(league_rates)
 
 
-def starter_outs_target(pitcher_game_log: list[dict[str, Any]]) -> int:
+def starter_outs_pool(pitcher_game_log: list[dict[str, Any]]) -> list[int]:
     """
-    How many outs tonight's starter is assumed to record before the
-    bullpen takes over -- his own season average outs/start, rounded.
-    A single deterministic estimate for V1 (see module docstring);
-    falls back to 15 outs (5.0 IP, a reasonable league-average start)
-    with no real log to draw from.
+    Every recorded outs-total from this pitcher's own real starts this
+    season -- a bootstrap resampling pool (the same "draw from real
+    observed games" philosophy variance.py's own outcome pools already
+    use), sampled once per simulated trial by the caller
+    (simulate_slate_trials()) instead of averaged into one fixed
+    estimate. A real start has genuine game-to-game variance in how
+    long it goes (an early hook on a bad night, saving the bullpen on a
+    great one) that a single deterministic number can't produce at all
+    -- confirmed as a real, measurable gap: a real backtest against
+    archived contest data (scripts/backtest_atbat_engine.py) found
+    starting pitchers showed ZERO innings variance across every
+    simulated trial when this was a fixed average, and their
+    calibration against real outcomes was measurably worse than
+    hitters' as a direct result.
+
+    Falls back to [15] (5.0 IP, a reasonable league-average start) with
+    no real starts logged -- still a genuine (if single-valued) pool,
+    so the caller's own random.choice() never needs a separate empty-
+    pool branch.
     """
-    starts = [g for g in pitcher_game_log if (g.get("outs") or 0) > 0]
-    if not starts:
-        return 15
-    return round(sum(g["outs"] for g in starts) / len(starts))
+    starts = [g["outs"] for g in pitcher_game_log if (g.get("outs") or 0) > 0]
+    return starts or [15]
 
 
 def _empty_line() -> dict[str, int]:
@@ -711,8 +727,8 @@ async def _game_pa_rates(
     away_pitcher_log = _cutoff(away_pitcher_log, as_of_date)
     home_pitcher_allowed = pitcher_allowed_rates(home_pitcher_log)
     away_pitcher_allowed = pitcher_allowed_rates(away_pitcher_log)
-    home_starter_outs = starter_outs_target(home_pitcher_log)
-    away_starter_outs = starter_outs_target(away_pitcher_log)
+    home_starter_outs_pool = starter_outs_pool(home_pitcher_log)
+    away_starter_outs_pool = starter_outs_pool(away_pitcher_log)
 
     home_bullpen_rates = bullpen_pa_rates(bullpen_by_team.get(home["team_id"]))
     away_bullpen_rates = bullpen_pa_rates(bullpen_by_team.get(away["team_id"]))
@@ -739,8 +755,8 @@ async def _game_pa_rates(
         "away_pa_rates": dict(away_rate_pairs),
         "home_bullpen_rates": home_bullpen_rates,
         "away_bullpen_rates": away_bullpen_rates,
-        "home_starter_outs": home_starter_outs,
-        "away_starter_outs": away_starter_outs,
+        "home_starter_outs_pool": home_starter_outs_pool,
+        "away_starter_outs_pool": away_starter_outs_pool,
         "home_pitcher_id": home_pitcher_id,
         "away_pitcher_id": away_pitcher_id,
     }
@@ -831,11 +847,17 @@ async def simulate_slate_trials(
             player_trials.setdefault(pid, [])
 
         for _ in range(num_trials):
+            # Resampled every trial (not once per game) -- real
+            # start-to-start variance in how long a starter goes, not
+            # one fixed estimate every trial repeats. See
+            # starter_outs_pool()'s own docstring for why this matters.
+            home_starter_outs = rng.choice(g["home_starter_outs_pool"])
+            away_starter_outs = rng.choice(g["away_starter_outs_pool"])
             result = simulate_game(
                 home_ids, away_ids,
                 g["home_pa_rates"], g["away_pa_rates"],
                 g["home_bullpen_rates"], g["away_bullpen_rates"],
-                g["home_starter_outs"], g["away_starter_outs"],
+                home_starter_outs, away_starter_outs,
                 rng,
             )
             box = result["box"]
