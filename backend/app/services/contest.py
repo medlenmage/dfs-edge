@@ -1265,9 +1265,16 @@ async def _simulate_lineups_atbat(
     calculation in evaluate_batch_simulated()/evaluate_field_mirrored()
     is completely unchanged regardless of which engine produced it.
     """
-    player_trials = await atbat_sim.simulate_slate_trials(
-        slate, season, num_trials=num_trials, seed=seed, included_game_pks=included_game_pks
-    )
+    try:
+        player_trials = await atbat_sim.simulate_slate_trials(
+            slate, season, num_trials=num_trials, seed=seed, included_game_pks=included_game_pks
+        )
+    except atbat_sim.SlateNotSimulatableError as exc:
+        # A plain Exception, not a ContestError, since atbat_sim.py has no
+        # dependency on contest.py -- re-raised as one here so the router's
+        # existing `except ContestError` catch turns this into a clean 400
+        # instead of an uncaught 500.
+        raise ContestError(str(exc)) from exc
     flattened = [players_in_slot_order(lineup) for lineup in lineups]
 
     missing = sorted({p["id"] for players in flattened for p in players if p["id"] not in player_trials})

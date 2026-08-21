@@ -485,6 +485,17 @@ async def _build_game(
     result["home"]["injuries"] = home_injuries
     result["away"]["injuries"] = away_injuries
 
+    # Only spend the extra roster-lookup cost when the real probable
+    # pitcher is actually missing -- the common case has one already.
+    result["home"]["projected_probable_pitcher"] = (
+        await _projected_starter(home_t.get("id"), home_abbrev, season, projection_lookup)
+        if home_pitcher is None else None
+    )
+    result["away"]["projected_probable_pitcher"] = (
+        await _projected_starter(away_t.get("id"), away_t.get("abbreviation") or "", season, projection_lookup)
+        if away_pitcher is None else None
+    )
+
     # Late scratches the lineup watcher has caught for this game today --
     # see services/lineup_watch.py. Purely additive: this cache key is
     # only ever populated by the background poller, never by a request.
@@ -655,6 +666,62 @@ def _pitcher_card(
         "vs_lhb": data["pit_vl"].get(pid),
         "vs_rhb": data["pit_vr"].get(pid),
     }
+
+
+async def _projected_starter(
+    team_id: int | None,
+    team_abbrev: str,
+    season: int,
+    projection_lookup: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """
+    A fallback for when the real MLB API has no probable pitcher listed
+    for this team yet (rare, but real -- an undecided rotation slot, a
+    bullpen game, or simply too early in the day for MLB to have
+    announced one): RotoWire's OWN projected starter, from an uploaded
+    projections file, as a stand-in -- same "confirmed vs projected,
+    kept clearly separate, never silently blended" pattern
+    projected_batting_order already uses for hitters. Only ever called
+    when the real probable_pitcher is missing (see _build_game()).
+
+    A projections file identifies players by name only, with no MLB id
+    -- picks the highest-FPTS pitcher-position row for this team (a
+    real starter reliably outprojects a low-usage reliever also sharing
+    the "P" position tag, a simpler and more robust signal than trying
+    to parse "SP" vs "RP" labeling that isn't consistent across every
+    real export), then resolves a real MLB id for that name by matching
+    against the team's own active roster -- the same name/team fuzzy
+    matching salaries.py and projections.py already use elsewhere,
+    just pointed at a roster lookup instead of a projections lookup.
+    Returns None with no projections file loaded, no pitcher-position
+    row for this team, or no roster match found.
+    """
+    if not team_id or not projection_lookup:
+        return None
+    team_norm = projections.normalize_team(team_abbrev)
+    candidates = [
+        row for (t, _name), row in projection_lookup.items()
+        if t == team_norm and (row.get("position") or "").upper().split("/")[0] in PITCHER_POSITIONS
+    ]
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda row: row.get("fpts") or 0)
+
+    roster_ids = await mlb.get_active_roster(team_id, season)
+    if not roster_ids:
+        return None
+    bios = await mlb.get_people(roster_ids)
+    roster_lookup = projections.build_lookup(
+        [
+            {"team": team_abbrev, "normalized_name": projections.normalize_name(bio["name"]), "id": pid}
+            for pid, bio in bios.items()
+            if bio.get("name")
+        ]
+    )
+    matched = projections.match(roster_lookup, best["name"], team_abbrev, fuzzy=True)
+    if not matched:
+        return None
+    return {"id": matched["id"], "name": best["name"]}
 
 
 # --------------------------------------------------------------------------
