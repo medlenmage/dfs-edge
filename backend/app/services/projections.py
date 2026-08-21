@@ -50,14 +50,21 @@ def parse_rotowire_csv(text: str) -> list[dict[str, Any]]:
 
     Expected columns: PLAYER, RW Pick, TEAM, SAL, POS, VAL, RST%, OPP,
     LINEUP, FPTS, MIN EXP, MAX EXP. PLAYER/TEAM/POS/FPTS/RST% are used
-    directly here; RW Pick, VAL, OPP, LINEUP, and the exposure caps are
+    directly here; RW Pick, VAL, OPP, and the exposure caps are
     RotoWire's own lineup-building fields, not projections, and stay
     unused. SAL is captured too -- RotoWire's player-pool export pulls
     salary straight from DK, so it's the same number as a separate DK
     upload would give, just bundled into one file. See
     `salaries.from_rotowire_rows()` for where that gets used to spare a
-    separate salary upload when this file already has it. Rows missing
-    a name are skipped rather than raising.
+    separate salary upload when this file already has it.
+
+    LINEUP is RotoWire's own PROJECTED batting order spot -- "1"-"9" for
+    a hitter they expect to start (and where), "BN" (or blank) for one
+    they don't -- captured as `lineup_spot` for services/atbat_sim.py to
+    fall back on when a team's REAL lineup hasn't confirmed yet. It's
+    RotoWire's guess, not a fact, so it's kept clearly separate from the
+    real `batting_order` mlb_slate.py attaches once a team's actual
+    lineup posts. Rows missing a name are skipped rather than raising.
     """
     rows: list[dict[str, Any]] = []
     reader = csv.DictReader(io.StringIO(text))
@@ -74,6 +81,7 @@ def parse_rotowire_csv(text: str) -> list[dict[str, Any]]:
                 "fpts": _f(row.get("FPTS")),
                 "ownership_pct": _f(row.get("RST%")),
                 "salary": _i(row.get("SAL")),
+                "lineup_spot": _i(row.get("LINEUP")),
             }
         )
     return rows
