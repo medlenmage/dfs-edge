@@ -264,7 +264,7 @@ async def fake_lineups(game_pk, force=False):
     return {"home": [], "away": []}
 
 
-async def fake_lines(sport="mlb", force=False):
+async def fake_lines(sport="mlb", *, day=None, force=False):
     return FAKE_LINES
 
 
@@ -2162,8 +2162,8 @@ async def main() -> int:
           str(switch["edge"]["components"]["pitcher"].get("ops_against")))
 
     print("\nScoring internals")
-    check("all twelve components present",
-          len(righty["edge"]["components"]) == 12,
+    check("all thirteen components present",
+          len(righty["edge"]["components"]) == 13,
           str(sorted(righty["edge"]["components"])))
     check("weights sum to 1.0",
           abs(sum(scoring.WEIGHTS.values()) - 1.0) < 1e-9,
@@ -2316,6 +2316,204 @@ async def main() -> int:
           scoring.home_run_component(
               {"hr_per_pa": 0.20, "pa": 600}, league_hr_per_pa, 1.4, 1.3, 2.5, league_pitcher_hr9
           )["probability_pct"] <= 70.0, "")
+
+    print("\nReal market props blended into projections (individual player HR/hit/K props)")
+
+    # A real market HR prop that disagrees sharply with the model (the
+    # contact hitter, whose own season rate says a low HR chance, but a
+    # real sportsbook price implying 35% tonight -- a launching-pad park
+    # or a live lineup change the season-rate model can't see).
+    hr_market_only = scoring.home_run_component(
+        contact_stat, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9,
+    )
+    hr_with_market = scoring.home_run_component(
+        contact_stat, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9,
+        market_hr_probability_pct=35.0,
+    )
+    check("a real HR prop that disagrees with the model pulls both value and probability_pct "
+          "toward the market's own number",
+          hr_with_market["value"] > hr_market_only["value"]
+          and hr_with_market["probability_pct"] > hr_market_only["probability_pct"],
+          str((hr_market_only, hr_with_market)))
+    check("the blended probability_pct sits between the model-only and pure-market numbers, "
+          "weighted toward the market per MARKET_BLEND_WEIGHT (0.7)",
+          hr_market_only["probability_pct"] < hr_with_market["probability_pct"] < 35.0
+          and abs(hr_with_market["probability_pct"] - (0.3 * hr_market_only["probability_pct"] + 0.7 * 35.0)) < 0.15,
+          str((hr_market_only["probability_pct"], hr_with_market["probability_pct"])))
+    check("a real market prop is used outright (not discarded) even with no season rate to blend against",
+          scoring.home_run_component(
+              None, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9,
+              market_hr_probability_pct=22.0,
+          ) == {"value": 1.0, "probability_pct": 22.0,
+                "detail": "22.0% market-implied HR chance (no season rate to blend against)"},
+          str(scoring.home_run_component(
+              None, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9,
+              market_hr_probability_pct=22.0,
+          )))
+    hr_no_market_kw = scoring.home_run_component(
+        contact_stat, league_hr_per_pa, neutral_park, neutral_weather, 1.10, league_pitcher_hr9,
+        market_hr_probability_pct=None,
+    )
+    check("passing market_hr_probability_pct=None explicitly reproduces the same result as omitting it",
+          hr_no_market_kw == hr_market_only, str((hr_no_market_kw, hr_market_only)))
+
+    check("hit_probability_component is neutral (1.0) with no market prop -- never fabricates a hit chance",
+          scoring.hit_probability_component(None) == {
+              "value": 1.0, "probability_pct": None, "detail": "no market hit prop available"
+          },
+          str(scoring.hit_probability_component(None)))
+    hit_above_avg = scoring.hit_probability_component(85.0)
+    hit_below_avg = scoring.hit_probability_component(40.0)
+    check("a hit probability well above the league-average reference scores above neutral",
+          hit_above_avg["value"] > 1.0, str(hit_above_avg))
+    check("a hit probability well below the league-average reference scores below neutral",
+          hit_below_avg["value"] < 1.0, str(hit_below_avg))
+    check("hit_probability_component's value is exactly market_pct / LEAGUE_AVG_HIT_PROBABILITY_PCT, capped",
+          hit_above_avg["value"] == round(min(1.4, 85.0 / scoring.LEAGUE_AVG_HIT_PROBABILITY_PCT), 3),
+          str(hit_above_avg))
+    check("hit_probability_component caps at 1.4 for an extreme market probability",
+          scoring.hit_probability_component(100.0)["value"] == 1.4, "")
+    check("hit_probability_component floors at 0.6 for a near-zero market probability",
+          scoring.hit_probability_component(1.0)["value"] == 0.6, "")
+
+    k_model_only = scoring.strikeout_potential_component(
+        {"k_per_9": 9.0}, 8.0, None, None,
+    )
+    k_with_high_market = scoring.strikeout_potential_component(
+        {"k_per_9": 9.0}, 8.0, None, None, market_k_line=9.5,
+    )
+    k_with_low_market = scoring.strikeout_potential_component(
+        {"k_per_9": 9.0}, 8.0, None, None, market_k_line=3.5,
+    )
+    check("a real K prop line ABOVE what the model alone implies pulls value up",
+          k_with_high_market["value"] > k_model_only["value"], str((k_model_only, k_with_high_market)))
+    check("a real K prop line well BELOW what the model alone implies pulls value down",
+          k_with_low_market["value"] < k_model_only["value"], str((k_model_only, k_with_low_market)))
+    check("strikeout_potential_component reports the real market_k_line back on the result",
+          k_with_high_market["market_k_line"] == 9.5, str(k_with_high_market))
+    check("no market_k_line given reports None (not a fabricated line) and reproduces the model-only value",
+          k_model_only["market_k_line"] is None
+          and scoring.strikeout_potential_component(
+              {"k_per_9": 9.0}, 8.0, None, None, market_k_line=None,
+          ) == k_model_only,
+          str(k_model_only))
+
+    print("\nMarket props: raw row parsing (mlb_slate.py's per-player lookups)")
+
+    check("MLB_PROP_MARKETS is exactly the 3 markets kept after dropping batter_total_bases "
+          "(the cost-cutting scope call)",
+          odds.MLB_PROP_MARKETS == ["batter_home_runs", "batter_hits", "pitcher_strikeouts"],
+          str(odds.MLB_PROP_MARKETS))
+
+    hr_rows = [
+        {"player": "Aaron Judge", "side": "Over", "line": 0.5, "price": -150, "implied_pct": 60.0, "book": "DK"},
+        {"player": "Aaron Judge", "side": "Under", "line": 0.5, "price": 120, "implied_pct": 45.5, "book": "DK"},
+        # A 2nd, higher line for the same player -- the lowest ("at least
+        # one") line should always win, not whichever row comes last.
+        {"player": "Aaron Judge", "side": "Over", "line": 1.5, "price": 450, "implied_pct": 18.2, "book": "DK"},
+        {"player": "Juan Soto", "side": "Over", "line": 0.5, "price": 200, "implied_pct": 33.3, "book": "DK"},
+    ]
+    hr_pct = mlb_slate._market_at_least_one_pct_by_name(hr_rows)
+    check("_market_at_least_one_pct_by_name picks the LOWEST 'Over' line per player (the real "
+          "'at least one tonight' threshold), not whichever row happens to appear last",
+          hr_pct[salaries.normalize_name("Aaron Judge")] == 60.0,
+          str(hr_pct))
+    check("_market_at_least_one_pct_by_name covers every player in the rows, keyed by normalized name",
+          hr_pct == {
+              salaries.normalize_name("Aaron Judge"): 60.0,
+              salaries.normalize_name("Juan Soto"): 33.3,
+          },
+          str(hr_pct))
+    check("_market_at_least_one_pct_by_name ignores 'Under' rows entirely",
+          all(row.get("side") != "Under" or row.get("implied_pct") not in hr_pct.values() for row in hr_rows),
+          str(hr_pct))
+    check("_market_at_least_one_pct_by_name returns an empty dict for no rows, not a crash",
+          mlb_slate._market_at_least_one_pct_by_name([]) == {}, "")
+
+    k_rows = [
+        {"player": "Gerrit Cole", "side": "Over", "line": 6.5, "price": -110, "implied_pct": 52.4, "book": "DK"},
+        {"player": "Gerrit Cole", "side": "Under", "line": 6.5, "price": -110, "implied_pct": 52.4, "book": "DK"},
+    ]
+    k_lines = mlb_slate._market_line_by_name(k_rows)
+    check("_market_line_by_name reads the real posted strikeout line for a pitcher",
+          k_lines[salaries.normalize_name("Gerrit Cole")] == 6.5, str(k_lines))
+    check("_market_line_by_name returns an empty dict for no rows, not a crash",
+          mlb_slate._market_line_by_name([]) == {}, "")
+
+    print("\nMarket props: wired end-to-end through a real slate rebuild "
+          "(fetch -> parse -> match by name -> blended into edge.components)")
+
+    # Deliberately extreme, unmistakable values -- a real HR prop far
+    # BELOW whatever the model alone would say for Big Righty Bat (a real
+    # power bat), a hit prop far ABOVE league average, and a K line far
+    # above what Righty Rogers' own K/9 alone implies -- so the blended
+    # result is obviously, unambiguously the market's influence, not
+    # noise in the model's own natural range.
+    async def fake_props_for_evt1(event_id, sport="mlb", markets=None, *, day=None, force=False):
+        if event_id != "evt1":
+            return {}
+        return {
+            "batter_home_runs": [
+                {"player": "Big Righty Bat", "side": "Over", "line": 0.5, "price": 1900,
+                 "implied_pct": 5.0, "book": "DK"},
+            ],
+            "batter_hits": [
+                {"player": "Big Righty Bat", "side": "Over", "line": 0.5, "price": -900,
+                 "implied_pct": 90.0, "book": "DK"},
+            ],
+            "pitcher_strikeouts": [
+                {"player": "Righty Rogers", "side": "Over", "line": 12.0, "price": -110,
+                 "implied_pct": 50.0, "book": "DK"},
+                {"player": "Righty Rogers", "side": "Under", "line": 12.0, "price": -110,
+                 "implied_pct": 50.0, "book": "DK"},
+            ],
+        }
+
+    odds.get_player_props = fake_props_for_evt1
+    props_slate = await mlb_slate.build_slate(DAY, force_refresh=True)
+    props_game = props_slate["games"][0]
+    props_bat = next(h for h in props_game["away"]["hitters"] if h["name"] == "Big Righty Bat")
+    props_pitcher = props_game["away"]["probable_pitcher"]
+
+    check("a real, extreme-low HR prop pulls the wired hitter's blended probability_pct well "
+          "below what the earlier model-only fixture run showed for this exact player "
+          "(top_power's own home_run value was > 1.0, i.e. an above-neutral model read)",
+          props_bat["edge"]["components"]["home_run"]["probability_pct"] < 15.0,
+          str(props_bat["edge"]["components"]["home_run"]))
+    check("a real hit prop is threaded through to hit_probability exactly (100% market, no model "
+          "to blend against)",
+          props_bat["edge"]["components"]["hit_probability"]["probability_pct"] == 90.0
+          and props_bat["edge"]["components"]["hit_probability"]["value"] > 1.0,
+          str(props_bat["edge"]["components"]["hit_probability"]))
+    check("a real K prop line is threaded through to the matching pitcher's strikeout_potential "
+          "component, matched by name across the fetch -> parse -> _pitcher_edge() pipeline",
+          props_pitcher["edge"]["components"]["strikeout_potential"]["market_k_line"] == 12.0,
+          str(props_pitcher["edge"]["components"]["strikeout_potential"]))
+    check("the OTHER side's pitcher (no props fetched for him in this fixture) reports no "
+          "market_k_line -- props are matched per-player, not blanket-applied to the whole game",
+          props_game["home"]["probable_pitcher"]["edge"]["components"]["strikeout_potential"]
+          .get("market_k_line") is None,
+          str(props_game["home"]["probable_pitcher"]["edge"]["components"]["strikeout_potential"]))
+
+    # Regression guard for a real waste bug found and fixed while wiring
+    # this in: props were originally fetched for every game regardless
+    # of include_hitters, even though nothing that consumes them
+    # (hitters, pitcher edges) is ever built in that lighter mode
+    # (routers/mlb.py's GET /games) -- silently spending real credits
+    # for data nothing would use.
+    props_call_count = 0
+
+    async def counting_fake_props(event_id, sport="mlb", markets=None, *, day=None, force=False):
+        nonlocal props_call_count
+        props_call_count += 1
+        return {}
+
+    odds.get_player_props = counting_fake_props
+    await mlb_slate.build_slate(DAY, force_refresh=True, include_hitters=False)
+    check("get_player_props is never called when include_hitters=False -- no wasted credit spend "
+          "for data nothing downstream would use",
+          props_call_count == 0, str(props_call_count))
+    odds.get_player_props = fake_props_for_evt1
 
     # Wired end-to-end through the real slate build: Big Righty Bat (101,
     # 30 HR/580 PA) is the fixture's clear top power bat -- Boston

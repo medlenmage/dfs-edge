@@ -59,12 +59,19 @@ class Settings:
         self.odds_bookmakers: list[str] = _list(
             "ODDS_BOOKMAKERS", "draftkings,fanduel"
         )
-        self.odds_fetch_props: bool = _bool("ODDS_FETCH_PROPS", False)
+        # Defaults on now that odds.py/mlb_slate.py cache game lines and
+        # props once per calendar day (not per TTL window) -- see
+        # odds.py's own module docstring for the real credit-cost math
+        # that made this affordable to turn on by default.
+        self.odds_fetch_props: bool = _bool("ODDS_FETCH_PROPS", True)
 
         # --- Cache TTLs (seconds) ---
+        # CACHE_TTL_ODDS was removed -- game lines and player props now
+        # cache by calendar day instead of a rolling TTL window (see
+        # clients/odds.py's own credit-cost docstring), so there's no
+        # longer a TTL setting for odds to override.
         self.ttl_schedule: int = _int("CACHE_TTL_SCHEDULE", 900)
         self.ttl_stats: int = _int("CACHE_TTL_STATS", 21_600)
-        self.ttl_odds: int = _int("CACHE_TTL_ODDS", 600)
         self.ttl_weather: int = _int("CACHE_TTL_WEATHER", 1_800)
         self.ttl_injuries: int = _int("CACHE_TTL_INJURIES", 3_600)
         # A played game's box score doesn't change -- this could be

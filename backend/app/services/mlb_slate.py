@@ -67,6 +67,52 @@ def _match_odds(
 
 
 # --------------------------------------------------------------------------
+# Player props -> per-player market signals, keyed by normalized name so
+# _team_hitters()/_pitcher_edge() can look a specific player up against
+# their own already-fetched roster bios (see clients/odds.get_player_props
+# for the raw {player, side, line, price, implied_pct} row shape).
+# --------------------------------------------------------------------------
+
+def _market_at_least_one_pct_by_name(rows: list[dict[str, Any]]) -> dict[str, float]:
+    """
+    From an Over/Under market (batter_home_runs, batter_hits), the
+    market-implied probability of clearing the LOWEST available line for
+    each player -- almost always "Over 0.5", i.e. "at least one tonight",
+    the DFS-relevant threshold for both markets. A player occasionally
+    priced at multiple lines (0.5 AND 1.5) correctly picks the 0.5 row.
+    """
+    best_line: dict[str, float] = {}
+    pct: dict[str, float] = {}
+    for row in rows:
+        if row.get("side") != "Over":
+            continue
+        line, implied = row.get("line"), row.get("implied_pct")
+        name = row.get("player")
+        if line is None or implied is None or not name:
+            continue
+        key = salaries.normalize_name(name)
+        if key not in best_line or line < best_line[key]:
+            best_line[key] = line
+            pct[key] = implied
+    return pct
+
+
+def _market_line_by_name(rows: list[dict[str, Any]]) -> dict[str, float]:
+    """
+    From an Over/Under market (pitcher_strikeouts), each player's own
+    posted line -- both the Over and Under rows share the same line
+    value, so either one gives the real number.
+    """
+    out: dict[str, float] = {}
+    for row in rows:
+        line, name = row.get("line"), row.get("player")
+        if line is None or not name:
+            continue
+        out[salaries.normalize_name(name)] = line
+    return out
+
+
+# --------------------------------------------------------------------------
 # Main entry point
 # --------------------------------------------------------------------------
 
@@ -100,7 +146,7 @@ async def build_slate(
         "pit_vl": mlb.get_league_splits(season, "vl", "pitching"),
         "pit_vr": mlb.get_league_splits(season, "vr", "pitching"),
         "pit_season": mlb.get_league_season(season, "pitching"),
-        "lines": odds.get_game_lines("mlb", force=force_refresh),
+        "lines": odds.get_game_lines("mlb", day=day, force=force_refresh),
         "savant_hit": savant.get_hitter_batted_ball(season),
         "savant_pitch": savant.get_pitcher_batted_ball(season),
         "bullpen": mlb.get_bullpen_stats(season),
@@ -167,6 +213,7 @@ async def build_slate(
             _build_game(
                 g, season, data, baselines, lines, include_hitters,
                 salary_lookup, projection_lookup, day, detected_slate_pairs,
+                force_refresh=force_refresh,
             )
             for g in games
         ],
@@ -348,6 +395,8 @@ async def _build_game(
     projection_lookup: dict[tuple[str, str], dict[str, Any]],
     day: str,
     detected_slate_pairs: set[frozenset[str]] | None,
+    *,
+    force_refresh: bool = False,
 ) -> dict[str, Any]:
     game_pk = game.get("gamePk")
     teams = game.get("teams") or {}
@@ -445,6 +494,24 @@ async def _build_game(
     if not include_hitters:
         return result
 
+    # --- Player props (optional, ODDS_FETCH_PROPS -- see clients/odds.py's
+    # own credit-cost docs). Needs the matched line's event_id, so this
+    # can't fetch anything for a game with no betting line available.
+    # Deliberately fetched only in this branch, AFTER the include_hitters
+    # early-return above -- nothing below this point that consumes props
+    # (hitters' home_run/hit_probability, pitchers' strikeout_potential)
+    # ever runs when include_hitters=False (a real, exercised lighter
+    # slate-build mode -- see routers/mlb.py's GET /games), so fetching
+    # them there would spend real credits for data nothing uses.
+    props = (
+        await odds.get_player_props(line["event_id"], day=day, force=force_refresh)
+        if line and line.get("event_id")
+        else {}
+    )
+    hr_props = _market_at_least_one_pct_by_name(props.get("batter_home_runs") or [])
+    hits_props = _market_at_least_one_pct_by_name(props.get("batter_hits") or [])
+    k_props = _market_line_by_name(props.get("pitcher_strikeouts") or [])
+
     # --- Hitters for both sides ---
     env = {
         "park": park,
@@ -464,6 +531,7 @@ async def _build_game(
             team_abbrev=home_abbrev, salary_lookup=salary_lookup,
             projection_lookup=projection_lookup,
             own_pitcher_id=home_pp.get("id"),
+            hr_props=hr_props, hits_props=hits_props,
         ),
         _team_hitters(
             away_t.get("id"), season, data, baselines, env,
@@ -474,6 +542,7 @@ async def _build_game(
             team_abbrev=away_t.get("abbreviation") or "", salary_lookup=salary_lookup,
             projection_lookup=projection_lookup,
             own_pitcher_id=away_pp.get("id"),
+            hr_props=hr_props, hits_props=hits_props,
         ),
         mlb.get_team_injuries(home_t.get("id"), season),
         mlb.get_team_injuries(away_t.get("id"), season),
@@ -516,10 +585,12 @@ async def _build_game(
     home_edge = _pitcher_edge(
         home_pitcher, away_hitters, result["away"]["implied_runs"], env, baselines,
         data["savant_pitch"],
+        market_k_line=k_props.get(salaries.normalize_name((home_pitcher or {}).get("name") or "")),
     )
     away_edge = _pitcher_edge(
         away_pitcher, home_hitters, result["home"]["implied_runs"], env, baselines,
         data["savant_pitch"],
+        market_k_line=k_props.get(salaries.normalize_name((away_pitcher or {}).get("name") or "")),
     )
     if home_edge:
         result["home"]["probable_pitcher"]["edge"] = home_edge
@@ -611,6 +682,8 @@ def _pitcher_edge(
     env: dict[str, Any],
     baselines: dict[str, Any],
     savant_pitch: dict[int, dict[str, Any]],
+    *,
+    market_k_line: float | None = None,
 ) -> dict[str, Any] | None:
     """
     A pitcher's matchup score -- the same component/weight machinery as
@@ -618,6 +691,11 @@ def _pitcher_edge(
     weather, opponent's implied total) is inverted around 1.00, and the
     opposing lineup's own matchup strength against this exact pitcher
     (already computed by `_team_hitters`) is reused rather than refetched.
+
+    `market_k_line`, when a real pitcher_strikeouts prop exists for this
+    pitcher tonight, blends the market's own strikeout-total line into
+    `strikeout_potential_component()` -- see that function's own
+    docstring for how the blend is weighted.
     """
     if not pitcher_card:
         return None
@@ -640,6 +718,7 @@ def _pitcher_edge(
             baselines.get("pitcher_k9"),
             facing_hitters,
             baselines.get("hitter_k_pct"),
+            market_k_line=market_k_line,
         ),
         "team_runs_against": runs_against,
         "contact_quality_allowed": scoring.contact_quality_allowed_component(
@@ -763,9 +842,13 @@ async def _team_hitters(
     salary_lookup: dict[tuple[str, str], dict[str, Any]] | None = None,
     projection_lookup: dict[tuple[str, str], dict[str, Any]] | None = None,
     own_pitcher_id: int | None = None,
+    hr_props: dict[str, float] | None = None,
+    hits_props: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     if not team_id:
         return []
+    hr_props = hr_props or {}
+    hits_props = hits_props or {}
 
     opp_bullpen = data["bullpen"].get(opponent_team_id)
     opp_bullpen_workload = data["bullpen_workload"].get(opponent_team_id)
@@ -835,6 +918,9 @@ async def _team_hitters(
             else (env["temp_fx"] or {}).get("hr_multiplier", scoring.NEUTRAL)
             * (env["wind_fx"] or {}).get("hr_multiplier", scoring.NEUTRAL)
         )
+        name_key = salaries.normalize_name(bio.get("name") or "")
+        market_hr_pct = hr_props.get(name_key)
+        market_hit_pct = hits_props.get(name_key)
         components = {
             "platoon": scoring.platoon_component(split_stat, hitter_baseline),
             "pitcher": scoring.pitcher_component(pitcher_split, pitcher_baseline),
@@ -863,7 +949,9 @@ async def _team_hitters(
                 weather_hr_mult,
                 ((opposing_pitcher or {}).get("season") or {}).get("hr_per_9"),
                 baselines["pitcher_hr_per_9"],
+                market_hr_probability_pct=market_hr_pct,
             ),
+            "hit_probability": scoring.hit_probability_component(market_hit_pct),
             "form": scoring.form_component(
                 data["hit_recent"].get(pid), season_stat
             ),

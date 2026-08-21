@@ -33,6 +33,7 @@ const DRIVER_LABELS = {
   park: 'the ballpark',
   weather: 'weather',
   home_run: 'his home-run chance',
+  hit_probability: 'his real hit prop',
   form: 'recent form',
   home_road: 'home/road split',
 }
