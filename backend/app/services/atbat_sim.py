@@ -14,6 +14,17 @@ natural CONSEQUENCE of shared game state, not a separately-bolted-on
 mechanism, and disaster/blowout innings show up on their own instead
 of needing to be hand-modeled.
 
+Each hitter's own blended PA-outcome rates are further nudged by
+scoring.py's edge.composite -- the same matchup-quality signal (park,
+weather, bullpen quality, contact quality, recent form, Vegas implied
+team total) that already drives every projected_points number
+elsewhere in this app (see _apply_edge_composite()). Without this, a
+lineup's simulated results only weakly tracked its own projected
+points (confirmed live: r=0.48 on a real batch, when both describe the
+same thing) -- the engine had no way to know a batter was specifically
+favored or disfavored TODAY beyond his own season rate vs. the
+opposing starter's own season rate.
+
 Deliberately simplified for a first version -- documented here rather
 than silently assumed, so nobody mistakes "simplified" for "wrong":
 
@@ -552,6 +563,56 @@ def _side_ready(side: dict[str, Any]) -> bool:
     return len(_batting_order_for_side(side)) >= MIN_PROJECTED_LINEUP_SIZE
 
 
+def _composites_for_side(side: dict[str, Any]) -> dict[int, float | None]:
+    """Each hitter's own scoring.py matchup-quality composite (1.0 =
+    league-average matchup) -- see _apply_edge_composite()."""
+    return {h["id"]: (h.get("edge") or {}).get("composite") for h in side.get("hitters", [])}
+
+
+# Bounds mirror the same "one extreme signal can't blow the blend out
+# to an implausible shape" clamp philosophy blend_pa_rates() already
+# uses for its own batter/pitcher ratios.
+EDGE_COMPOSITE_MIN = 0.5
+EDGE_COMPOSITE_MAX = 1.8
+
+_REACH_BASE_EVENTS = ("1B", "2B", "3B", "HR", "BB")
+_OUT_EVENTS = ("K", "OUT")
+
+
+def _apply_edge_composite(rates: dict[str, float], composite: float | None) -> dict[str, float]:
+    """
+    Nudges an already-blended PA-outcome distribution using the SAME
+    matchup-quality signal (scoring.py's edge.composite -- platoon,
+    park, weather, bullpen quality, contact quality, recent form,
+    Vegas implied team total) that already drives projected_points
+    everywhere else in this app. Without this, the at-bat engine had no
+    way to know a batter is specifically favored or disfavored TODAY
+    beyond his own season rate vs. the opposing starter's own season
+    rate -- confirmed as a real, measured gap: a live 30-lineup at-bat-
+    engine batch showed simulated lineup results only weakly correlated
+    with their own projected_points (r=0.48, when both nominally
+    describe the same thing and should track closely), so lineups the
+    rest of the app ranks highest could simulate as mediocre or worse.
+
+    A composite above 1.0 (a favorable matchup) scales every reach-base
+    event UP and every out event DOWN by the same factor, renormalized
+    back to 1.0 -- the same "one scalar nudges the whole distribution"
+    approximation variance.py's own target-percentile bias already
+    uses for its bootstrap pool, not a claim that every real signal
+    composite blends affects every event type equally.
+    """
+    if composite is None:
+        return rates
+    composite = max(EDGE_COMPOSITE_MIN, min(EDGE_COMPOSITE_MAX, composite))
+    adjusted = dict(rates)
+    for event in _REACH_BASE_EVENTS:
+        adjusted[event] *= composite
+    for event in _OUT_EVENTS:
+        adjusted[event] /= composite
+    total = sum(adjusted.values())
+    return {event: v / total for event, v in adjusted.items()} if total else rates
+
+
 def _pitcher_id_for_side(side: dict[str, Any]) -> int | None:
     """
     The pitcher id to simulate for one side -- MLB's real probable
@@ -584,6 +645,8 @@ async def _game_pa_rates(
 
     home_order = _batting_order_for_side(home)
     away_order = _batting_order_for_side(away)
+    home_composites = _composites_for_side(home)
+    away_composites = _composites_for_side(away)
 
     home_pitcher_log, away_pitcher_log = await asyncio.gather(
         mlb.get_player_game_log(home_pitcher_id, season, group="pitching"),
@@ -597,15 +660,18 @@ async def _game_pa_rates(
     home_bullpen_rates = bullpen_pa_rates(bullpen_by_team.get(home["team_id"]))
     away_bullpen_rates = bullpen_pa_rates(bullpen_by_team.get(away["team_id"]))
 
-    async def _hitter_rate(hitter_id: int, opposing_pitcher_rates: dict[str, float]) -> tuple[int, dict[str, float]]:
+    async def _hitter_rate(
+        hitter_id: int, opposing_pitcher_rates: dict[str, float], composites: dict[int, float | None]
+    ) -> tuple[int, dict[str, float]]:
         game_log = await mlb.get_player_game_log(hitter_id, season, group="hitting")
         own = pa_outcome_rates(game_log)
         batter_pa = sum(g.get("plate_appearances") or 0 for g in game_log)
-        return hitter_id, blend_pa_rates(own, opposing_pitcher_rates, batter_pa=batter_pa)
+        blended = blend_pa_rates(own, opposing_pitcher_rates, batter_pa=batter_pa)
+        return hitter_id, _apply_edge_composite(blended, composites.get(hitter_id))
 
     home_rate_pairs, away_rate_pairs = await asyncio.gather(
-        asyncio.gather(*(_hitter_rate(pid, away_pitcher_allowed) for pid in home_order)),
-        asyncio.gather(*(_hitter_rate(pid, home_pitcher_allowed) for pid in away_order)),
+        asyncio.gather(*(_hitter_rate(pid, away_pitcher_allowed, home_composites) for pid in home_order)),
+        asyncio.gather(*(_hitter_rate(pid, home_pitcher_allowed, away_composites) for pid in away_order)),
     )
 
     return {
