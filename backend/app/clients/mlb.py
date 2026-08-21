@@ -393,6 +393,18 @@ async def get_player_game_log(
                         "hit_batsmen": _i(stat.get("hitBatsmen")),
                         "complete_games": _i(stat.get("completeGames")),
                         "shutouts": _i(stat.get("shutouts")),
+                        # Added for services/atbat_sim.py's pitcher_allowed_rates()
+                        # -- same "raw counts this module already reads
+                        # elsewhere for other fields" fields the season
+                        # endpoint's _normalise_stat() already reads
+                        # (battersFaced/homeRuns, confirmed present on the
+                        # pitching stat blob there); doubles/triples allowed
+                        # share the same key names the hitting branch already
+                        # reads, just populated on the pitching side instead.
+                        "plate_appearances": _i(stat.get("battersFaced")),
+                        "doubles": _i(stat.get("doubles")),
+                        "triples": _i(stat.get("triples")),
+                        "home_runs": _i(stat.get("homeRuns")),
                     }
                 )
             else:

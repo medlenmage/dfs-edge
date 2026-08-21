@@ -26,6 +26,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [allowDuplicates, setAllowDuplicates] = useState(false)
   const [simulate, setSimulate] = useState(false)
   const [selfPlay, setSelfPlay] = useState(false)
+  const [atbatEngine, setAtbatEngine] = useState(false)
   const [showSlateGames, setShowSlateGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
   const [state, setState] = useState({ status: 'idle' })
@@ -116,7 +117,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         allowDuplicates,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
-        ...(simulate ? { selfPlay } : {}),
+        ...(simulate ? { selfPlay, engine: atbatEngine ? 'atbat' : 'bootstrap' } : {}),
       }
       const result = simulate
         ? await api.buildContestEntriesSimulated(date, contestType, numLineups, opts)
@@ -154,6 +155,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         projectionSource,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
+        engine: atbatEngine ? 'atbat' : 'bootstrap',
       })
       applyReady({ status: 'ready', simulated: true, mode: 'dk-entries', ...result })
     } catch (err) {
@@ -345,6 +347,20 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             Self-play (batch vs. itself)
           </label>
         )}
+        {simulate && (
+          <label
+            className="dim"
+            style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}
+            title="Off (default): sample each player's own historical DK-point outcome pool, with a team-multiplier for correlation. On: run genuine at-bat-level (plate-appearance by plate-appearance) simulated games for the whole slate instead -- correlation is a natural consequence of shared simulated game state. Requires a CONFIRMED lineup on both sides and a probable pitcher for every game on the slate, or the build fails with a clear error."
+          >
+            <input
+              type="checkbox"
+              checked={atbatEngine}
+              onChange={(e) => setAtbatEngine(e.target.checked)}
+            />
+            At-bat-level engine (beta)
+          </label>
+        )}
         <button className="primary" onClick={run} disabled={state.status === 'loading'}>
           {state.status === 'loading'
             ? simulate
@@ -420,6 +436,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                 onChange={(e) => setDkFirstPlacePct(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
                 style={{ width: 70 }}
               />
+            </label>
+            <label
+              className="dim"
+              style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}
+              title="Off (default): sample each player's own historical DK-point outcome pool, with a team-multiplier for correlation. On: run genuine at-bat-level simulated games for the whole slate instead -- requires a CONFIRMED lineup on both sides and a probable pitcher for every game on the slate, or the build fails with a clear error."
+            >
+              <input
+                type="checkbox"
+                checked={atbatEngine}
+                onChange={(e) => setAtbatEngine(e.target.checked)}
+              />
+              At-bat-level engine (beta)
             </label>
             <button
               className="primary"
@@ -543,6 +571,14 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             <span className="badge">${state.prize_pool.toLocaleString()} prize pool</span>
             {state.simulated && (
               <span className="badge">{state.num_trials.toLocaleString()} sim trials</span>
+            )}
+            {state.simulated && state.engine === 'atbat' && (
+              <span
+                className="badge"
+                title="Every trial is a genuine plate-appearance-by-plate-appearance simulated game for the whole slate, not a resampled historical outcome pool."
+              >
+                at-bat engine
+              </span>
             )}
             {state.simulated && state.mode === 'generate' && (
               <span

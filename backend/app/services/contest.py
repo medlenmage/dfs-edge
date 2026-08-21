@@ -56,8 +56,8 @@ from typing import Any
 
 import numpy as np
 
-from app.services import variance
-from app.services.lineup_export import stack_info
+from app.services import atbat_sim, variance
+from app.services.lineup_export import players_in_slot_order, stack_info
 from app.services.optimizer import (
     MAX_HITTERS,
     ONE_OFF_QUALITY_MIN,
@@ -1241,6 +1241,51 @@ def _evaluate_batch_against_field(
     }
 
 
+async def _simulate_lineups_atbat(
+    lineups: list[dict[str, Any]],
+    slate: dict[str, Any],
+    season: int,
+    *,
+    num_trials: int,
+    seed: int | None,
+    included_game_pks: list[int] | None = None,
+) -> np.ndarray:
+    """
+    The `engine="atbat"` counterpart to variance.player_pools_for_entries()
+    + variance.simulate_batch(): builds each lineup's per-trial simulated
+    point total by summing atbat_sim.simulate_slate_trials()'s real,
+    at-bat-level simulated game results for its own 10 players, instead
+    of resampling from each player's independent bootstrap pool.
+    Correlation (teammates, a starter vs. the lineup he actually faced)
+    is already baked into those per-trial arrays by construction -- no
+    separate team-multiplier step needed here, unlike the bootstrap path.
+
+    Returns the same `(len(lineups), num_trials)` shape
+    variance.simulate_batch() does, so every downstream ranking/payout
+    calculation in evaluate_batch_simulated()/evaluate_field_mirrored()
+    is completely unchanged regardless of which engine produced it.
+    """
+    player_trials = await atbat_sim.simulate_slate_trials(
+        slate, season, num_trials=num_trials, seed=seed, included_game_pks=included_game_pks
+    )
+    flattened = [players_in_slot_order(lineup) for lineup in lineups]
+
+    missing = sorted({p["id"] for players in flattened for p in players if p["id"] not in player_trials})
+    if missing:
+        preview = missing[:5]
+        suffix = "..." if len(missing) > 5 else ""
+        raise ContestError(
+            f"At-bat simulation has no simulated outcome for player id(s) {preview}{suffix} -- "
+            "every rostered player must be part of a confirmed lineup on this slate."
+        )
+
+    sim = np.zeros((len(lineups), num_trials))
+    for i, players in enumerate(flattened):
+        for p in players:
+            sim[i] += player_trials[p["id"]]
+    return sim
+
+
 async def evaluate_batch_simulated(
     entries: list[dict[str, Any]],
     field: list[dict[str, Any]],
@@ -1250,6 +1295,9 @@ async def evaluate_batch_simulated(
     num_trials: int = 2000,
     seed: int | None = None,
     first_place_pct: float | None = None,
+    engine: str = "bootstrap",
+    slate: dict[str, Any] | None = None,
+    included_game_pks: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     Like `_evaluate_batch_against_field`, but ranks against
@@ -1277,11 +1325,22 @@ async def evaluate_batch_simulated(
     rather than needing to be inferred. `first_place_pct`, passed
     through to _custom_payout_curve(), does the same for the one paid
     rank a bulk entries export can't tell you anything about.
+
+    `engine="bootstrap"` (default) samples each player's own historical
+    outcome pool (variance.py). `engine="atbat"` instead runs genuine
+    at-bat-level game simulations for the whole slate (atbat_sim.py) and
+    sums each lineup's own players' simulated results -- requires
+    `slate` (the full mlb_slate.build_slate() output, not just player
+    ids) since that engine needs real lineup/pitcher/game structure, and
+    every game on the slate must have a confirmed lineup on both sides
+    and a resolvable probable pitcher (see atbat_sim.SlateNotSimulatableError).
     """
     if not entries:
         raise ContestError("Need at least one entry to simulate.")
     if not field:
         raise ContestError("Need at least one field lineup to simulate against.")
+    if engine == "atbat" and slate is None:
+        raise ContestError("engine='atbat' requires the full slate.")
 
     field_size = contest["field_size"]
     entry_fee = contest["entry_fee"]
@@ -1310,8 +1369,14 @@ async def evaluate_batch_simulated(
     ).astype(np.int64)
     smoothing_boundaries = np.unique(ranks_for_beaten)
     smoothed_payouts = _block_average_payouts(full_payouts, smoothing_boundaries, field_size)
-    player_pools = await variance.player_pools_for_entries(entries + field, season)
-    sim = variance.simulate_batch(entries + field, player_pools, num_trials=num_trials, seed=seed)
+    if engine == "atbat":
+        sim = await _simulate_lineups_atbat(
+            entries + field, slate, season, num_trials=num_trials, seed=seed,
+            included_game_pks=included_game_pks,
+        )
+    else:
+        player_pools = await variance.player_pools_for_entries(entries + field, season)
+        sim = variance.simulate_batch(entries + field, player_pools, num_trials=num_trials, seed=seed)
     entry_sim, field_sim = sim[:num_entries], sim[num_entries:]
 
     # Per trial, how many field lineups each entry beat -- searchsorted
@@ -1674,6 +1739,7 @@ async def build_contest_entries_simulated(
     allow_duplicates: bool = False,
     seed: int | None = None,
     self_play: bool = False,
+    engine: str = "bootstrap",
 ) -> dict[str, Any]:
     """
     Like build_contest_entries, but ranks the batch against a real Monte
@@ -1706,6 +1772,11 @@ async def build_contest_entries_simulated(
         field played like variations of your own strategy -- useful
         for portfolio construction and exposure decisions, not a
         substitute for the realistic-public-field default.
+
+    `engine="bootstrap"` (default) or `"atbat"` -- see
+    evaluate_batch_simulated()'s own docstring for what each means;
+    `"atbat"` requires every game on `slate` to have a confirmed lineup
+    on both sides and a resolvable probable pitcher.
     """
     if self_play:
         contest, entries = _build_contest_and_entries(
@@ -1723,6 +1794,7 @@ async def build_contest_entries_simulated(
         )
         evaluation = await evaluate_field_mirrored(
             entries, contest, season=season, num_trials=num_trials, seed=seed,
+            engine=engine, slate=slate, included_game_pks=included_game_pks,
         )
     else:
         contest, entries, field = _build_entries_and_field(
@@ -1746,6 +1818,9 @@ async def build_contest_entries_simulated(
             season=season,
             num_trials=num_trials,
             seed=(seed + 2) if seed is not None else None,
+            engine=engine,
+            slate=slate,
+            included_game_pks=included_game_pks,
         )
 
     # Highest simulated ROI first -- the whole point of running the
@@ -1800,6 +1875,7 @@ async def build_contest_entries_simulated(
         "entries": entries,
         "results": evaluation["results"],
         "self_play": self_play,
+        "engine": engine,
         "note": (
             (
                 f"Cash probability and expected payout come from {evaluation['num_trials']:,} "
@@ -1817,6 +1893,14 @@ async def build_contest_entries_simulated(
                 "realistic public field -- a genuine probability, not a single projected-points "
                 "estimate against the field."
             )
+            + (
+                " Simulated at the AT-BAT level -- every trial is a genuine plate-appearance-by-"
+                "plate-appearance simulated game for the whole slate, so correlation (including "
+                "starter-vs-lineup matchups) is a natural consequence of shared game state rather "
+                "than a separately-modeled multiplier."
+                if engine == "atbat"
+                else ""
+            )
         ),
     }
 
@@ -1829,6 +1913,9 @@ async def evaluate_field_mirrored(
     num_trials: int = 10_000,
     seed: int | None = None,
     first_place_pct: float | None = None,
+    engine: str = "bootstrap",
+    slate: dict[str, Any] | None = None,
+    included_game_pks: list[int] | None = None,
 ) -> dict[str, Any]:
     """
     Simulate `field_lineups` -- an ownership-weighted SAMPLE standing in
@@ -1856,6 +1943,8 @@ async def evaluate_field_mirrored(
     """
     if not field_lineups:
         raise ContestError("Need at least one lineup to simulate.")
+    if engine == "atbat" and slate is None:
+        raise ContestError("engine='atbat' requires the full slate.")
 
     field_size = contest["field_size"]
     entry_fee = contest["entry_fee"]
@@ -1883,8 +1972,14 @@ async def evaluate_field_mirrored(
         real_ranks_by_k = np.array([1])
     smoothed_payouts = _block_average_payouts(full_payouts, real_ranks_by_k, field_size)
 
-    player_pools = await variance.player_pools_for_entries(field_lineups, season)
-    sim = variance.simulate_batch(field_lineups, player_pools, num_trials=num_trials, seed=seed)
+    if engine == "atbat":
+        sim = await _simulate_lineups_atbat(
+            field_lineups, slate, season, num_trials=num_trials, seed=seed,
+            included_game_pks=included_game_pks,
+        )
+    else:
+        player_pools = await variance.player_pools_for_entries(field_lineups, season)
+        sim = variance.simulate_batch(field_lineups, player_pools, num_trials=num_trials, seed=seed)
 
     order = np.argsort(-sim, axis=0)  # best-to-worst lineup index per trial
     final_rank = np.empty_like(order)
@@ -1963,6 +2058,7 @@ async def build_dk_entries_simulated(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     seed: int | None = None,
+    engine: str = "bootstrap",
 ) -> dict[str, Any]:
     """
     Mirror a real DraftKings contest and simulate its whole field: an
@@ -2009,6 +2105,9 @@ async def build_dk_entries_simulated(
         num_trials=num_trials,
         seed=(seed + 2) if seed is not None else None,
         first_place_pct=first_place_pct,
+        engine=engine,
+        slate=slate,
+        included_game_pks=included_game_pks,
     )
 
     order = sorted(range(len(field_lineups)), key=lambda i: -evaluation["results"][i]["roi_pct"])
@@ -2051,6 +2150,7 @@ async def build_dk_entries_simulated(
         "exposure": field_exposure(entries, top_n=20),
         "entries": entries,
         "results": evaluation["results"],
+        "engine": engine,
         "note": (
             f"A {len(entries):,}-lineup ownership-weighted sample standing in for this real "
             f"contest's full {field_size:,}-entry field, simulated over {evaluation['num_trials']:,} "
