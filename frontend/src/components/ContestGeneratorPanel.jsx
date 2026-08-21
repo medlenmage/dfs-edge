@@ -52,6 +52,12 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [dkPrizePool, setDkPrizePool] = useState(1000)
   const [dkFirstPlacePct, setDkFirstPlacePct] = useState(20)
 
+  // Entry Manager -- fills an already-uploaded real DK bulk-entries
+  // template with lineups from an already-built batch. Reuses the same
+  // dkContests/dkContestId state the "My DK entries" mode's upload
+  // already populates (one upload, usable from either mode).
+  const [emOnlyBlank, setEmOnlyBlank] = useState(true)
+
   function switchMode(m) {
     setMode(m)
     setState({ status: 'idle' })
@@ -729,6 +735,71 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
               </div>
             )}
           </div>
+
+          {state.batch_id && (
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="sub-line" style={{ marginBottom: 8 }}>
+                Entry Manager — fill a real DraftKings bulk-entries template (the same "bulk
+                entries" export/upload file DK gives you) with this batch's own lineups, strongest
+                first, and download a file ready to literally reupload to DraftKings. Requires a
+                real DraftKings salary CSV to have been loaded for this slate (not just RotoWire
+                projections) -- DK's own reupload format needs each player's real DK id.
+              </div>
+              <div className="controls" style={{ flexWrap: 'wrap' }}>
+                <input
+                  type="file"
+                  accept=".csv"
+                  id="dk-entries-file-manager"
+                  style={{ display: 'none' }}
+                  onChange={(e) => e.target.files[0] && uploadDkFile(e.target.files[0])}
+                />
+                <button
+                  onClick={() => document.getElementById('dk-entries-file-manager').click()}
+                  disabled={dkUploading}
+                >
+                  {dkUploading
+                    ? 'Uploading…'
+                    : dkContests
+                      ? 'Re-upload DK entries CSV'
+                      : 'Upload DK entries CSV'}
+                </button>
+                {dkContests && dkContests.length > 0 && (
+                  <>
+                    <label className="dim" style={{ fontSize: 13 }}>
+                      Contest{' '}
+                      <select value={dkContestId} onChange={(e) => setDkContestId(e.target.value)}>
+                        {dkContests.map((c) => (
+                          <option key={c.contest_id} value={c.contest_id}>
+                            {c.contest_name} ({c.num_entries - c.num_filled} of {c.num_entries} blank)
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label
+                      className="dim"
+                      style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}
+                      title="On (default): only fill entry rows with no picks yet, never overwriting one you already filled. Off: overwrite every entry row for this contest, blank or not."
+                    >
+                      <input
+                        type="checkbox"
+                        checked={emOnlyBlank}
+                        onChange={(e) => setEmOnlyBlank(e.target.checked)}
+                      />
+                      Only fill blank entries
+                    </label>
+                    <a
+                      href={api.fillDkEntriesUrl(date, dkContestId, state.batch_id, emOnlyBlank)}
+                      title="Fill this contest's entries with lineups from this batch, strongest first, and download the completed CSV"
+                    >
+                      <button className="primary" disabled={!dkContestId}>
+                        Fill & download
+                      </button>
+                    </a>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
 
           {state.simulated && (
             <div className="card" style={{ marginBottom: 14 }}>

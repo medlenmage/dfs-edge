@@ -227,6 +227,20 @@ export const api = {
   // as a link's href, no JS-side blob handling needed.
   contestEntriesCsvUrl: (batchId) => `${BASE}/api/mlb/contest-entries/${batchId}/csv`,
 
+  // Entry Manager -- fills a real, already-uploaded DK bulk-entries
+  // template with lineups from an already-built batch and returns the
+  // completed CSV. A plain URL (like contestEntriesCsvUrl above), not a
+  // fetch() call, so the browser handles the download itself.
+  fillDkEntriesUrl: (date, contestId, batchId, onlyBlank = true) => {
+    const params = new URLSearchParams({
+      date,
+      contest_id: contestId,
+      batch_id: batchId,
+      only_blank: onlyBlank,
+    })
+    return `${BASE}/api/mlb/dk-entries/fill?${params.toString()}`
+  },
+
   // Re-rank/re-filter an already-simulated batch's real results -- no
   // new Monte Carlo run. playerExposureCaps/roiBoosts are plain
   // objects keyed by player id (as a string, JSON object keys always

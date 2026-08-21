@@ -579,6 +579,13 @@ def _salary_info(
         # single MLB-primary-position on the player dict itself, and the
         # one the lineup optimizer needs for roster-slot eligibility.
         "position": row["position"],
+        # DK's own numeric player id -- previously dropped here (MLB
+        # Stats API's own id is this app's authoritative identity
+        # everywhere else), but needed verbatim to fill a real DK
+        # contest-entry template CSV back in (services/dk_entry_manager.py).
+        # Empty string when no DK salary file is loaded (e.g. a
+        # RotoWire-only slate) -- see salaries.from_rotowire_rows().
+        "dk_id": row.get("dk_id", ""),
     }
 
 
