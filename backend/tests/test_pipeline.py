@@ -4429,6 +4429,59 @@ async def main() -> int:
           ),
           str(sim_batch["summary"]))
 
+    print("\nIndividual player ROI in the sim (field_exposure's new results param)")
+
+    check("sim_batch's exposure entries carry avg_roi_pct now that results are passed through",
+          all("avg_roi_pct" in e for e in sim_batch["exposure"]), str(sim_batch["exposure"][:2]))
+
+    # Direct, isolated unit test of field_exposure()'s new results-folding
+    # math -- 3 lineups, 2 sharing player 501, with known roi_pct values.
+    fe_field = [
+        {"players": [{"id": 501, "name": "P501", "team": "T"}, {"id": 502, "name": "P502", "team": "T"}]},
+        {"players": [{"id": 501, "name": "P501", "team": "T"}, {"id": 503, "name": "P503", "team": "T"}]},
+        {"players": [{"id": 504, "name": "P504", "team": "T"}]},
+    ]
+    fe_results = [{"roi_pct": 40.0}, {"roi_pct": -20.0}, {"roi_pct": 10.0}]
+    fe_exposure = contest.field_exposure(fe_field, results=fe_results)
+    fe_by_id = {e["id"]: e for e in fe_exposure}
+    check("field_exposure's avg_roi_pct is the exact mean of roi_pct across every lineup containing "
+          "that player (player 501 is in 2 lineups: (40 + -20) / 2 = 10.0)",
+          fe_by_id[501]["avg_roi_pct"] == 10.0, str(fe_by_id[501]))
+    check("a player appearing in only one lineup shows that lineup's own roi_pct exactly",
+          fe_by_id[502]["avg_roi_pct"] == 40.0
+          and fe_by_id[503]["avg_roi_pct"] == -20.0
+          and fe_by_id[504]["avg_roi_pct"] == 10.0,
+          str(fe_exposure))
+    check("field_exposure without a results argument (existing callers, e.g. build_contest_field's "
+          "opponent field) never adds avg_roi_pct -- unchanged behavior",
+          "avg_roi_pct" not in contest.field_exposure(fe_field)[0], str(contest.field_exposure(fe_field)[0]))
+
+    print("\nPercent-to-first override wired into the simulated payout curve (build_contest_entries_simulated)")
+
+    check("with no first_place_pct override, the response echoes the contest preset's own value "
+          "(15.0 for gpp_small)",
+          sim_batch["first_place_pct"] == 15.0, sim_batch["first_place_pct"])
+
+    sim_low_first = await contest.build_contest_entries_simulated(
+        mul_slate, "gpp_small", 10, season=2099, num_trials=300, sample_size=40, seed=31, first_place_pct=5.0,
+    )
+    sim_high_first = await contest.build_contest_entries_simulated(
+        mul_slate, "gpp_small", 10, season=2099, num_trials=300, sample_size=40, seed=31, first_place_pct=35.0,
+    )
+    check("first_place_pct override is echoed back exactly in the response",
+          sim_low_first["first_place_pct"] == 5.0 and sim_high_first["first_place_pct"] == 35.0,
+          str((sim_low_first["first_place_pct"], sim_high_first["first_place_pct"])))
+    check("changing first_place_pct genuinely changes the simulated payout curve -- same seed/entries/"
+          "trials otherwise, but per-entry expected_payout differs between a 5% and a 35% percent-to-first",
+          sorted(r["expected_payout"] for r in sim_low_first["results"]) !=
+          sorted(r["expected_payout"] for r in sim_high_first["results"]),
+          str((sorted(r["expected_payout"] for r in sim_low_first["results"]),
+               sorted(r["expected_payout"] for r in sim_high_first["results"]))))
+    check("both runs still sum to (approximately) the same real prize_pool -- percent-to-first "
+          "redistributes the SAME pool, it doesn't change its size",
+          sim_low_first["prize_pool"] == sim_high_first["prize_pool"] == sim_batch["prize_pool"],
+          str((sim_low_first["prize_pool"], sim_high_first["prize_pool"], sim_batch["prize_pool"])))
+
     print("\nField-calibration output split: field_baseline (contest.py _field_baseline)")
 
     # A zero-skill entry's expected ROI/cash rate is a closed-form fact
