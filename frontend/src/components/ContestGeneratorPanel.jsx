@@ -18,6 +18,12 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [contestTypes, setContestTypes] = useState(null)
   const [contestType, setContestType] = useState('gpp_large')
   const [numLineups, setNumLineups] = useState(500)
+  // Overrides the selected contest preset's own real field_size (e.g.
+  // "Large-field GPP" defaults to 10,000) -- '' means "use the
+  // preset's own value." Lets a user build against a real contest of
+  // whatever exact size they're actually entering, not just one of
+  // the 4 preset sizes.
+  const [fieldSizeOverride, setFieldSizeOverride] = useState('')
   const [maxExposure, setMaxExposure] = useState('')
   // Defaults to $47,000 -- a lineup with a lot of unspent salary is
   // almost always leaving real projected points on the table.
@@ -113,7 +119,8 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   }
 
   const preset = contestTypes?.[contestType]
-  const overRequested = preset && numLineups > preset.field_size
+  const effectiveFieldSize = fieldSizeOverride.trim() ? Number(fieldSizeOverride) : preset?.field_size
+  const overRequested = effectiveFieldSize != null && numLineups > effectiveFieldSize
 
   // Filters' own option lists -- derived from the untouched original
   // batch (not whatever's currently reshaped/kept) so a filter option
@@ -164,6 +171,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
     try {
       const opts = {
         projectionSource,
+        fieldSize: fieldSizeOverride.trim() ? Number(fieldSizeOverride) : null,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
         minSalary: minSalary.trim() ? Number(minSalary) : 0,
         maxSalary: maxSalary.trim() ? Number(maxSalary) : 50000,
@@ -350,6 +358,22 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             value={numLineups}
             onChange={(e) => setNumLineups(Math.max(1, Math.min(10000, Number(e.target.value) || 1)))}
             style={{ width: 80 }}
+          />
+        </label>
+        <label
+          className="dim"
+          style={{ fontSize: 13 }}
+          title="Overrides the selected contest's own real field size (e.g. Large-field GPP defaults to 10,000) -- build against a real contest of whatever exact size you're actually entering, not just one of the 4 preset sizes. Leave blank to use the preset's own value."
+        >
+          Field size{' '}
+          <input
+            type="number"
+            min="1"
+            max="200000"
+            placeholder={preset ? String(preset.field_size) : '—'}
+            value={fieldSizeOverride}
+            onChange={(e) => setFieldSizeOverride(e.target.value)}
+            style={{ width: 90 }}
           />
         </label>
         <label className="dim" style={{ fontSize: 13 }}>
@@ -578,9 +602,9 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
 
       {mode === 'generate' && preset && overRequested && (
         <div className="notice" style={{ marginBottom: 14 }}>
-          {preset.label}'s field only holds {preset.field_size.toLocaleString()} entries — your own
+          This contest's field only holds {effectiveFieldSize.toLocaleString()} entries — your own
           entries are part of that field, not additional to it. Lower "Entries to build" to at most{' '}
-          {preset.field_size.toLocaleString()}, or pick a bigger contest.
+          {effectiveFieldSize.toLocaleString()}, raise "Field size" above, or pick a bigger contest.
         </div>
       )}
 
@@ -660,13 +684,18 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
 
       {state.status === 'ready' && (
         <>
-          {!state.reshaped && state.num_entries_built < state.num_entries_requested && (
-            <div className="notice" style={{ marginBottom: 12 }}>
-              Only built {state.num_entries_built.toLocaleString()} of{' '}
-              {state.num_entries_requested.toLocaleString()} requested — the pool ran out of room
-              for more distinct, legal entries under the current exposure cap.
-            </div>
-          )}
+          {!state.reshaped &&
+            state.distinct_entries_built != null &&
+            state.distinct_entries_built < state.num_entries_built && (
+              <div className="notice" style={{ marginBottom: 12 }}>
+                Only {state.distinct_entries_built.toLocaleString()} of the{' '}
+                {state.num_entries_built.toLocaleString()} entries built are genuinely distinct — the
+                pool (or the exposure cap) ran out of room for more, common on a smaller slate, so
+                the rest are real duplicate copies of entries already built. Every entry still counts
+                toward your requested total; check each row's{' '}
+                <span className="badge">×N</span> badge below to see which ones repeat.
+              </div>
+            )}
 
           <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
             <span className="badge ok">{state.num_entries_built.toLocaleString()} entries built</span>
