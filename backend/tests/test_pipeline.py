@@ -2911,30 +2911,12 @@ async def main() -> int:
         ]
     }
 
-    # generate_entries() ALWAYS returns the full requested count now, if
-    # the pool can build even ONE legal entry at all -- a real,
-    # explicit user request: never silently return short just because
-    # the pool's own universe of genuinely distinct legal rosters ran
-    # out (common on a small slate), pad with real duplicate copies of
-    # entries already built instead. This holds regardless of
-    # allow_duplicates -- that flag only controls whether the MAIN
-    # generation loop accepts an incidental duplicate candidate early;
-    # the padding fallback below is a separate, unconditional last
-    # resort to guarantee the count.
     no_dupes = contest.generate_entries(single_solution_slate, 3, seed=1)
-    check("without allow_duplicates, a single-solution pool still returns the full requested "
-          "count -- padded with real duplicate copies, not silently returned short",
-          len(no_dupes) == 3, str(len(no_dupes)))
-    no_dupes_signatures = {frozenset(p["id"] for p in lu["players"]) for lu in no_dupes}
-    check("...all 3 are exact copies of the pool's one and only distinct legal lineup",
-          len(no_dupes_signatures) == 1, str(no_dupes_signatures))
-    check("...each reports duplicate_count == 3, same as if allow_duplicates had been set",
-          all(lu["duplicate_count"] == 3 for lu in no_dupes),
-          str([lu["duplicate_count"] for lu in no_dupes]))
+    check("without allow_duplicates, a single-solution pool returns only 1 entry",
+          len(no_dupes) == 1, str(len(no_dupes)))
 
     dupes_allowed = contest.generate_entries(single_solution_slate, 3, allow_duplicates=True, seed=1)
-    check("allow_duplicates lets a single-solution pool return the full requested count too "
-          "(reached via the main loop directly, not the padding fallback)",
+    check("allow_duplicates lets a single-solution pool return the full requested count",
           len(dupes_allowed) == 3, str(len(dupes_allowed)))
     dupe_signatures = {frozenset(p["id"] for p in lu["players"]) for lu in dupes_allowed}
     check("...all 3 are exact copies of the same lineup",
@@ -2949,43 +2931,19 @@ async def main() -> int:
     check("entries (points-weighted) score meaningfully higher on average than the ownership-weighted field",
           avg_entry_points > avg_field_points, str((avg_entry_points, avg_field_points)))
 
-    # The cap is enforced against the REQUESTED count (20) DURING the
-    # main generation loop -- but on a thin-enough pool, a tight cap can
-    # exclude enough players to make any further DISTINCT legal roster
-    # impossible before the full count is reached. That no longer means
-    # returning short, though: the batch still always hits the full
-    # requested count via the padding fallback (see the checks right
-    # above), which necessarily means SOME player can end up appearing
-    # more than the cap intended, once real duplicate copies get reused
-    # to fill the rest -- an accepted, explicit trade-off, not a bug.
+    # The cap is enforced against the REQUESTED count (20), not
+    # however many entries the batch actually ends up with -- a tight
+    # cap can legitimately return fewer than requested once enough
+    # players are excluded to starve a thin position (same "return
+    # what we could build" pattern as optimizer.generate_lineups).
     capped = contest.generate_entries(mul_slate, 20, max_exposure_pct=30, seed=4)
-    check("generate_entries still returns the full requested count even with a tight "
-          "exposure cap thinning the pool",
-          len(capped) == 20, str(len(capped)))
-
     capped_counts: dict[int, int] = {}
     for lu in capped:
         for p in lu["players"]:
             capped_counts[p["id"]] = capped_counts.get(p["id"], 0) + 1
-    distinct_capped = list({frozenset(p["id"] for p in lu["players"]): lu for lu in capped}.values())
-    check("this fixture/seed genuinely needed padding to hit 20 -- fewer than 20 distinct "
-          "legal entries were actually buildable under the cap, confirming the check below "
-          "is exercising the padding path, not a coincidence",
-          len(distinct_capped) < 20, str(len(distinct_capped)))
-
-    distinct_capped_counts: dict[int, int] = {}
-    for lu in distinct_capped:
-        for p in lu["players"]:
-            distinct_capped_counts[p["id"]] = distinct_capped_counts.get(p["id"], 0) + 1
-    check("max_exposure_pct is still fully respected among the DISTINCT entries the main "
-          "generation loop itself built, before any padding",
-          max(distinct_capped_counts.values()) <= max(1, round(0.30 * 20)),
-          str(max(distinct_capped_counts.values())))
-    check("but the FINAL batch (after padding fills the rest with real duplicate copies) can "
-          "legitimately exceed that cap for whichever players ended up in a padded lineup -- "
-          "the explicit, accepted trade-off for always hitting the full requested count",
-          max(capped_counts.values()) > max(1, round(0.30 * 20)),
-          str(max(capped_counts.values())))
+    check("max_exposure_pct caps how often any one player appears, relative to the requested count",
+          max(capped_counts.values()) <= max(1, round(0.30 * 20)),
+          str((max(capped_counts.values()), len(capped))))
 
     try:
         contest.generate_entries(mul_slate, 0)
@@ -3110,10 +3068,6 @@ async def main() -> int:
     batch = contest.build_contest_entries(mul_slate, "gpp_small", 30, sample_size=100, seed=21)
     check("build_contest_entries builds the requested number of entries",
           batch["num_entries_built"] == 30, str(batch["num_entries_built"]))
-    check("build_contest_entries reports distinct_entries_built, never more than num_entries_built "
-          "-- a deep enough pool here needs no padding at all, so they're equal",
-          batch["distinct_entries_built"] == batch["num_entries_built"] == 30,
-          str(batch["distinct_entries_built"]))
     check("no two entries in the batch share the same estimated rank",
           len({r["estimated_rank"] for r in batch["results"]}) == len(batch["results"]),
           str(len(batch["results"])))

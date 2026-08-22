@@ -684,18 +684,13 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
 
       {state.status === 'ready' && (
         <>
-          {!state.reshaped &&
-            state.distinct_entries_built != null &&
-            state.distinct_entries_built < state.num_entries_built && (
-              <div className="notice" style={{ marginBottom: 12 }}>
-                Only {state.distinct_entries_built.toLocaleString()} of the{' '}
-                {state.num_entries_built.toLocaleString()} entries built are genuinely distinct — the
-                pool (or the exposure cap) ran out of room for more, common on a smaller slate, so
-                the rest are real duplicate copies of entries already built. Every entry still counts
-                toward your requested total; check each row's{' '}
-                <span className="badge">×N</span> badge below to see which ones repeat.
-              </div>
-            )}
+          {!state.reshaped && state.num_entries_built < state.num_entries_requested && (
+            <div className="notice" style={{ marginBottom: 12 }}>
+              Only built {state.num_entries_built.toLocaleString()} of{' '}
+              {state.num_entries_requested.toLocaleString()} requested — the pool ran out of room
+              for more distinct, legal entries under the current exposure cap.
+            </div>
+          )}
 
           <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
             <span className="badge ok">{state.num_entries_built.toLocaleString()} entries built</span>
