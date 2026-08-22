@@ -68,6 +68,14 @@ export const api = {
       body: JSON.stringify({ refresh }),
     }),
 
+  // Same as refreshRotowireProjections, but RotoWire's own "Early"
+  // Classic slate (early-games-only) instead of their main "All" slate.
+  refreshRotowireEarlyProjections: ({ refresh = false } = {}) =>
+    request('/api/mlb/projections/refresh-rotowire-early', {
+      method: 'POST',
+      body: JSON.stringify({ refresh }),
+    }),
+
   dkSlates: (date, { refresh = false } = {}) =>
     request(`/api/mlb/dk-slates?date=${date}${refresh ? '&refresh=true' : ''}`),
 

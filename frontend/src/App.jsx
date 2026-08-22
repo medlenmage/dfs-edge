@@ -44,6 +44,7 @@ export default function App() {
   )
   const [projectionMsg, setProjectionMsg] = useState(null)
   const [rotowireLoading, setRotowireLoading] = useState(false)
+  const [rotowireEarlyLoading, setRotowireEarlyLoading] = useState(false)
   const projectionInputRef = useRef(null)
   // Which FPTS/ownership numbers feed the optimizer and contest
   // generator -- independent of whether the tables have fetched the
@@ -124,12 +125,14 @@ export default function App() {
   // real date (RotoWire's, not whatever date is currently selected
   // here), so if it differs, switch the date picker to match and
   // reload -- otherwise a successful refresh would silently not show
-  // up anywhere.
-  async function refreshFromRotowire() {
-    setRotowireLoading(true)
-    setProjectionMsg('Pulling live projections from RotoWire…')
+  // up anywhere. Shared by both the main "All" slate and the "Early"
+  // slate variants below -- identical flow, just a different API call
+  // and loading flag.
+  async function refreshFromRotowireVariant(apiFn, setLoading, label) {
+    setLoading(true)
+    setProjectionMsg(`Pulling live ${label} projections from RotoWire…`)
     try {
-      const result = await api.refreshRotowireProjections({ refresh: true })
+      const result = await apiFn({ refresh: true })
       const derived = result.salaries_derived
         ? ` (salaries pulled from the same data for ${result.salaries_derived} of them)`
         : ''
@@ -138,7 +141,7 @@ export default function App() {
             .slice(0, 5)
             .join(', ')}${result.unmatched.length > 5 ? ', …' : ''})`
         : ''
-      setProjectionMsg(`Loaded ${result.players_loaded} live RotoWire projections for ${result.date}${derived}${unmatched}`)
+      setProjectionMsg(`Loaded ${result.players_loaded} live ${label} RotoWire projections for ${result.date}${derived}${unmatched}`)
       if (result.date !== date) {
         setDate(result.date)
       } else {
@@ -147,9 +150,14 @@ export default function App() {
     } catch (err) {
       setProjectionMsg(`RotoWire refresh failed: ${err.message}`)
     } finally {
-      setRotowireLoading(false)
+      setLoading(false)
     }
   }
+
+  const refreshFromRotowire = () =>
+    refreshFromRotowireVariant(api.refreshRotowireProjections, setRotowireLoading, 'main-slate')
+  const refreshFromRotowireEarly = () =>
+    refreshFromRotowireVariant(api.refreshRotowireEarlyProjections, setRotowireEarlyLoading, 'early-slate')
 
   function cycleTheme() {
     const next = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'
@@ -208,6 +216,13 @@ export default function App() {
                 title="Pull RotoWire's own live optimizer player pool directly -- salary, position, opponent, projected/confirmed batting order, FPTS, and rostership% -- with no manual CSV download/upload. Always bypasses the cache for genuinely live data (newly confirmed lineups, late scratches). Stored under that slate's own real date, switching the date picker to match if it differs."
               >
                 {rotowireLoading ? 'Loading…' : 'Refresh from RotoWire'}
+              </button>
+              <button
+                onClick={refreshFromRotowireEarly}
+                disabled={rotowireEarlyLoading}
+                title="Same as Refresh from RotoWire, but RotoWire's own 'Early' Classic slate (early-games-only, the slate real DK 'Early Only' GPPs are built around) instead of their main 'All' slate. Loading this replaces whichever slate's projections/salaries were loaded for the date before -- this app only ever holds one slate's data per date at a time. Fails clearly if RotoWire has no Early slate live today (most days without any early-window games)."
+              >
+                {rotowireEarlyLoading ? 'Loading…' : 'Refresh from RotoWire (Early)'}
               </button>
               <button
                 onClick={loadInhouse}

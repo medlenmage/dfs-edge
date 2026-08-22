@@ -26,6 +26,11 @@ used to:
      Its own `startDateOnly` is the real date these projections belong
      to -- trusted over whatever date this app's own UI happens to have
      selected, since RotoWire's slate is the actual source of the data.
+     get_early_slate() is the same idea for RotoWire's own "Early"
+     Classic slate instead (confirmed live: slate-list.php's own
+     `slateName` field distinguishes "All"/"Early"/"Night" same-day
+     Classic slates -- there's no dedicated early-slate endpoint,
+     just a different filter over the same slate list).
   2. get_slate_players(slate_id) -- every player in that slate's pool:
      salary, position eligibility, opponent, batting-order slot
      (projected or confirmed -- RotoWire tracks both, exposed here as
@@ -88,6 +93,42 @@ def _pick_classic_slate(payload: dict[str, Any]) -> dict[str, Any]:
     candidates.sort(key=lambda s: s.get("startDateOnly") or "")
     if not candidates:
         raise ApiError("RotoWire has no default Classic DraftKings slate live right now.", source="RotoWire")
+    return candidates[0]
+
+
+async def get_early_slate(*, force: bool = False) -> dict[str, Any]:
+    """
+    RotoWire's own "Early" Classic DraftKings slate -- the smaller,
+    early-game-only slate real DK "Early Only" GPPs are built around,
+    distinct from the main "All" slate get_current_slate() returns.
+    Raises ApiError if RotoWire has no such slate live right now (most
+    days without any early-window games at all, or a real outage).
+    """
+
+    async def _load() -> Any:
+        return await get_json(
+            f"{BASE}/slate-list.php", params={"siteID": DK_SITE_ID}, source="RotoWire"
+        )
+
+    # Same cache key/TTL as get_current_slate() -- it's genuinely the
+    # same underlying slate-list response, just filtered differently,
+    # so there's no reason to fetch it twice.
+    payload = await cached(f"rotowire:slate-list:{DK_SITE_ID}", _SLATE_LIST_TTL, _load, force=force)
+    return _pick_early_classic_slate(payload)
+
+
+def _pick_early_classic_slate(payload: dict[str, Any]) -> dict[str, Any]:
+    """The pure transformation half of get_early_slate() -- split out
+    so it's directly testable against a fixture payload, with no
+    network call."""
+    slates = payload.get("slates") or []
+    candidates = [
+        s for s in slates
+        if s.get("contestType") == "Classic" and s.get("slateName") == "Early"
+    ]
+    candidates.sort(key=lambda s: s.get("startDateOnly") or "")
+    if not candidates:
+        raise ApiError("RotoWire has no 'Early' Classic DraftKings slate live right now.", source="RotoWire")
     return candidates[0]
 
 

@@ -830,14 +830,21 @@ async def main() -> int:
     # Fixture shaped exactly like RotoWire's real slate-list.php response
     # (confirmed live against https://www.rotowire.com/daily/mlb/api/
     # slate-list.php and .../players.php while building this feature):
-    # the main "All" Classic slate (the one this app wants), a Turbo
-    # Classic slate on the same day (not the default -- must be
-    # excluded), and a Showdown slate (wrong contest type -- excluded).
+    # the main "All" Classic slate (the one this app wants by default),
+    # an "Early" Classic slate on the same day (real, confirmed live
+    # field -- the early-games-only slate), a Turbo Classic slate on the
+    # same day (not the default and not "Early" -- must be excluded from
+    # both pickers), and a Showdown slate (wrong contest type --
+    # excluded).
     rw_slate_list_fixture = {
         "slates": [
             {
                 "slateID": 26987, "contestType": "Classic", "slateName": "All",
                 "startDateOnly": "2026-08-21", "defaultSlate": True,
+            },
+            {
+                "slateID": 26988, "contestType": "Classic", "slateName": "Early",
+                "startDateOnly": "2026-08-21", "defaultSlate": False,
             },
             {
                 "slateID": 26989, "contestType": "Classic", "slateName": "Turbo",
@@ -850,7 +857,8 @@ async def main() -> int:
         ]
     }
     rw_slate = rotowire._pick_classic_slate(rw_slate_list_fixture)
-    check("_pick_classic_slate picks the main default Classic slate, not the Turbo or Showdown ones",
+    check("_pick_classic_slate picks the main default Classic slate, not the Early, Turbo, or "
+          "Showdown ones",
           rw_slate["slateID"] == 26987, str(rw_slate))
     check("_pick_classic_slate's slate carries the real slate date this app should trust as the "
           "day these projections belong to",
@@ -861,6 +869,25 @@ async def main() -> int:
         check("_pick_classic_slate raises a clear ApiError with no live Classic slate at all", False, "")
     except rotowire.ApiError:
         check("_pick_classic_slate raises a clear ApiError with no live Classic slate at all", True, "")
+
+    rw_early_slate = rotowire._pick_early_classic_slate(rw_slate_list_fixture)
+    check("_pick_early_classic_slate picks the 'Early' Classic slate specifically, not the "
+          "default 'All', Turbo, or Showdown ones",
+          rw_early_slate["slateID"] == 26988, str(rw_early_slate))
+    check("_pick_early_classic_slate's slate also carries the real slate date",
+          rw_early_slate["startDateOnly"] == "2026-08-21", str(rw_early_slate))
+
+    try:
+        # A real, common day -- an "All" slate but no separate "Early"
+        # one at all (most days without an early-window game).
+        rotowire._pick_early_classic_slate(
+            {"slates": [s for s in rw_slate_list_fixture["slates"] if s["slateName"] != "Early"]}
+        )
+        check("_pick_early_classic_slate raises a clear ApiError when no 'Early' slate is live "
+              "today, even though other Classic slates exist", False, "")
+    except rotowire.ApiError:
+        check("_pick_early_classic_slate raises a clear ApiError when no 'Early' slate is live "
+              "today, even though other Classic slates exist", True, "")
 
     rw_players_fixture = [
         {
