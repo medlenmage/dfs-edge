@@ -259,9 +259,15 @@ async def player_ceilings(players: list[dict[str, Any]], season: int) -> dict[in
 # weight backtesting" item).
 
 # How much each signal moves a player's ownership propensity relative
-# to the others -- value is the dominant real-world driver, team total
-# and salary tier are real but secondary.
+# to the others -- value and raw projected points are the dominant
+# real-world drivers (weighted equally; see WHY RAW FPTS EXISTS below
+# for how 1.0 was picked -- swept 0.0 to 5.0 against a real 2026-08-21
+# contest's actual ownership, Spearman correlation peaked at 1.0-1.5
+# (~0.58) and fell off past ~2.0, so 1.0 lands right at the plateau
+# without overfitting a single real slate's own noise to the exact
+# tip), team total and salary tier are real but secondary.
 _VALUE_WEIGHT = 1.0
+_RAW_FPTS_WEIGHT = 1.0
 _TEAM_TOTAL_WEIGHT = 0.4
 _SALARY_TIER_WEIGHT = 0.3
 
@@ -270,14 +276,18 @@ _SALARY_TIER_WEIGHT = 0.3
 # play dominates); higher = flatter, more evenly spread. Temperature
 # only affects concentration, never which players rank highest (that's
 # entirely raw_scores, fixed above) -- so this was tuned separately,
-# empirically, against the same 4 real slates: with the pre-fix 2.5,
-# a real 365-player pool topped out at 4.2% ownership for anyone (real
-# slates routinely see 20-33%+ on genuine chalk); 0.3 brings the
-# modelled top play to ~28% on that same real pool, close to the real
-# range without collapsing to one dominant play the way anything below
-# ~0.2 started to (52%+ on a single player, which real large-field
-# ownership essentially never does).
-_SOFTMAX_TEMPERATURE = 0.3
+# empirically. Originally set to 0.3 against 4 real slates predating
+# raw_fpts (see WHY RAW FPTS EXISTS above); re-swept after adding
+# raw_fpts (which widens the realistic range of raw_scores, since a
+# player can now hit BOTH value's and raw_fpts' ceiling at once) against
+# the same real 2026-08-21 contest used to tune raw_fpts's own weight:
+# 0.3 let a real top play hit 68.7% modelled ownership (this slate's
+# real max was 36.8% -- no real large-field GPP concentrates anywhere
+# near that hard), and Spearman correlation ALSO kept improving as
+# temperature rose, peaking at 0.6 (0.594, vs 0.3's 0.583) before
+# falling off past ~0.8 -- a rare case where the more realistic choice
+# and the better-correlated choice were the same value.
+_SOFTMAX_TEMPERATURE = 0.6
 
 
 def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
@@ -293,7 +303,7 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     available, RotoWire's otherwise), and implied_runs (that player's
     team's Vegas implied run total, or None if no odds are loaded).
 
-    Combines three signals into one raw "ownership propensity" score,
+    Combines four signals into one raw "ownership propensity" score,
     then softmax-normalizes WITHIN each DK roster-slot group so every
     group's total lands at slot_count x 100% (e.g. OF sums to 300% --
     3 real roster spots; C sums to 100% -- 1 spot). Grouping by
@@ -304,8 +314,11 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
       - value: fpts / salary -- the standard points-per-dollar signal
         every real DFS player looks at first. Min-max normalised to a
         0-1 scale within the position group before weighting (see WHY
-        below) -- the raw ratio alone is far too small a number to
-        compete with the other two signals.
+        VALUE IS NORMALISED below) -- the raw ratio alone is far too
+        small a number to compete with the other signals.
+      - raw fpts: the player's own projected points, ALSO min-max
+        normalised within the group, independent of price -- see WHY
+        RAW FPTS EXISTS below for the real gap this closes.
       - team total: that player's team's Vegas implied runs relative
         to league average -- popular high-total teams get stacked (and
         owned) more.
@@ -338,6 +351,32 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     not just the spread -- softmax temperature only changes how
     concentrated the final distribution is, never which players end up
     on top, so temperature alone could never have fixed this.
+
+    WHY RAW FPTS EXISTS (a second real bug, found the same way)
+    -------------------------------------------------------------
+    Backtested against a real contest-standings export (2026-08-21,
+    joined against that same day's still-cached live projections --
+    the freshest possible same-day comparison): a min-priced shortstop
+    (Brock Rodden, $2300, 5.93 projected points) modelled at 26.9%
+    ownership -- the single highest in a 20-player SS pool -- while
+    Bobby Witt Jr. ($6200, 11.21 projected points, essentially double
+    Rodden's own projection) modelled at only 4.7%, backwards from any
+    real GPP field. Root cause: `value` alone has NO signal for
+    absolute point volume, only points-PER-DOLLAR -- and real MLB DFS
+    pricing means a cheap complementary player routinely has a
+    slightly BETTER raw points-per-dollar ratio than a $6000+ stud
+    (points don't scale linearly with salary at the top of a range),
+    so min-max normalising value alone can hand the single highest
+    score in a group to a min-priced role player over a real stud,
+    every time. Real ownership doesn't work that way -- name-brand/
+    high-floor studs draw serious chalk ownership independent of pure
+    salary efficiency (this same real slate: Mookie Betts, Xander
+    Bogaerts, and Corey Seager all drew real double-digit-or-close
+    ownership on unremarkable value ratios, purely on raw projection/
+    reputation). `raw_fpts`, min-max normalised the same way `value`
+    is, gives studs a real signal that isn't purely price-relative,
+    without discarding `value`'s own genuine role for the min-priced
+    end of a position group.
     """
     ownership: dict[int, float] = {}
 
@@ -364,10 +403,15 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
         min_value, max_value = min(raw_values), max(raw_values)
         value_span = max(max_value - min_value, 1e-9)
 
+        raw_fpts = [p.get("fpts") or 0.0 for p in players]
+        min_fpts, max_fpts = min(raw_fpts), max(raw_fpts)
+        fpts_span = max(max_fpts - min_fpts, 1e-9)
+
         raw_scores = []
-        for p, raw_value in zip(players, raw_values):
+        for p, raw_value, fpts in zip(players, raw_values, raw_fpts):
             salary = p.get("salary") or 0
             value = (raw_value - min_value) / value_span
+            fpts_norm = (fpts - min_fpts) / fpts_span
 
             implied_runs = p.get("implied_runs") or scoring.LEAGUE_IMPLIED_RUNS
             team_total = implied_runs / scoring.LEAGUE_IMPLIED_RUNS
@@ -376,6 +420,7 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
 
             raw_scores.append(
                 _VALUE_WEIGHT * value
+                + _RAW_FPTS_WEIGHT * fpts_norm
                 + _TEAM_TOTAL_WEIGHT * team_total
                 + _SALARY_TIER_WEIGHT * salary_tier
             )

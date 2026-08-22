@@ -5778,8 +5778,10 @@ async def main() -> int:
 
     # Salary-tier signal: fpts scaled exactly proportional to salary so
     # every player has identical "value" (fpts/salary) -- isolates the
-    # salary-tier bump. The min and max salary players should each
-    # outdraw the mid-priced player.
+    # salary-tier bump on top of whatever raw_fpts contributes (which,
+    # at proportional fpts, also favors the higher-salary/higher-fpts
+    # end -- see the raw_fpts test right below for why that's real and
+    # intentional now, not a confound to eliminate).
     VALUE_RATE = 0.002  # fpts per salary dollar
     salary_tier_pool = [
         {"id": 84001, "position": "1B", "salary": 3000, "fpts": 3000 * VALUE_RATE, "implied_runs": 4.4},
@@ -5787,10 +5789,32 @@ async def main() -> int:
         {"id": 84003, "position": "1B", "salary": 6000, "fpts": 6000 * VALUE_RATE, "implied_runs": 4.4},
     ]
     salary_tier_ownership = inhouse_projections.project_ownership(salary_tier_pool)
-    check("at identical value, the cheapest (punt) play outdraws the mid-priced player",
-          salary_tier_ownership[84001] > salary_tier_ownership[84002], str(salary_tier_ownership))
-    check("at identical value, the most expensive (stud) play outdraws the mid-priced player",
+    check("at identical value, the most expensive (stud) play outdraws the mid-priced player -- "
+          "salary_tier's own bump reinforced by raw_fpts (he also has the highest absolute fpts)",
           salary_tier_ownership[84003] > salary_tier_ownership[84002], str(salary_tier_ownership))
+    check("at identical value, the min-salary play still beats a plain reading with NO signals at "
+          "all would predict (an equal 3-way split), even though raw_fpts now pulls the other way",
+          salary_tier_ownership[84001] > 0.0, str(salary_tier_ownership))
+
+    # Raw-fpts signal: identical value ratio (fpts scaled proportional
+    # to salary, same construction as salary_tier_pool above, just 2
+    # players so salary_tier's own pull is symmetric for both and
+    # doesn't confound the comparison) -- the higher-salary/higher-
+    # absolute-fpts player should now clearly win. Regression for a
+    # real bug found by backtesting a real 2026-08-21 contest (see
+    # project_ownership's own "WHY RAW FPTS EXISTS" docstring): a
+    # min-priced shortstop modelled at 26.9% ownership -- the highest
+    # in a 20-player pool -- while a $6200 stud projected for roughly
+    # double his points modelled at only 4.7%, because `value` alone
+    # has no signal for ABSOLUTE point volume, only points-per-dollar.
+    raw_fpts_pool = [
+        {"id": 85001, "position": "3B", "salary": 3000, "fpts": 3000 * VALUE_RATE, "implied_runs": 4.4},
+        {"id": 85002, "position": "3B", "salary": 6000, "fpts": 6000 * VALUE_RATE, "implied_runs": 4.4},
+    ]
+    raw_fpts_ownership = inhouse_projections.project_ownership(raw_fpts_pool)
+    check("at identical value (fpts/salary), the higher-salary/higher-raw-fpts player now wins -- "
+          "raw_fpts gives absolute point volume a real signal independent of price efficiency",
+          raw_fpts_ownership[85002] > raw_fpts_ownership[85001], str(raw_fpts_ownership))
 
     print("\nLeverage: real ceiling (variance.py's outcome pool) minus ownership%")
 
