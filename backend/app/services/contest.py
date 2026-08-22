@@ -888,13 +888,9 @@ def generate_entries(
     `duplicate_count` reporting how many identical copies ended up in
     the batch (always 1 under the default distinctness guarantee).
 
-    Always returns exactly `num_lineups` entries if the pool can build
-    at least ONE legal entry at all -- if the pool or the exposure cap
-    can't sustain enough distinct entries to reach the full count, the
-    remainder is padded with real duplicate copies of entries already
-    built (see the padding note near the end of this function) rather
-    than silently returning short. Only a genuinely empty pool (not
-    even one legal entry buildable) raises.
+    If the pool or the exposure cap can't support the full count
+    requested, returns as many legal entries as it could build rather
+    than failing the whole request -- only an empty result raises.
     """
     if num_lineups < 1:
         raise ContestError("num_lineups must be at least 1.")
@@ -958,23 +954,6 @@ def generate_entries(
             "Couldn't build any legal entries from this pool -- the salary cap, "
             "slot requirements, or exposure cap may be too tight for the players available."
         )
-
-    # If the pool (or the exposure cap thinning it out as the batch
-    # fills up) couldn't sustain enough distinct legal entries to reach
-    # the full requested count, pad the rest by cycling through the
-    # entries already built -- a real, common situation on a small
-    # slate (few games means a naturally small universe of distinct,
-    # salary-legal rosters), and the user's own explicit call: always
-    # hit the requested count, even if it means real duplicates, rather
-    # than silently returning short. Every padding copy reuses an
-    # already-validated-legal lineup outright, so there's no new
-    # legality work (or exposure-cap enforcement -- once the pool is
-    # this thin, the cap has already done what it can) needed here.
-    distinct_count = len(entries)
-    if distinct_count < num_lineups:
-        for i in range(num_lineups - distinct_count):
-            base = entries[i % distinct_count]
-            entries.append({**base, "players": list(base["players"])})
 
     _attach_duplicate_counts(entries)
     return entries
@@ -1888,12 +1867,6 @@ def build_contest_entries(
         "contest": contest,
         "num_entries_requested": num_lineups,
         "num_entries_built": len(entries),
-        # How many of num_entries_built are genuinely DISTINCT rosters --
-        # less than num_entries_built whenever the pool (or the exposure
-        # cap) couldn't sustain enough distinct legal entries and
-        # generate_entries() padded the rest with real duplicate copies
-        # to still hit the full requested count.
-        "distinct_entries_built": len({frozenset(p["id"] for p in e["players"]) for e in entries}),
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
         "paid_count": evaluation["paid_count"],
@@ -2086,8 +2059,6 @@ async def build_contest_entries_simulated(
         "contest": contest,
         "num_entries_requested": num_lineups,
         "num_entries_built": len(entries),
-        # See build_contest_entries()'s own comment on this same field.
-        "distinct_entries_built": len({frozenset(p["id"] for p in e["players"]) for e in entries}),
         "field_sharpness": field_sharpness,
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
