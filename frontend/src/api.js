@@ -76,6 +76,15 @@ export const api = {
       body: JSON.stringify({ refresh }),
     }),
 
+  // Same as refreshRotowireProjections, but RotoWire's own "Afternoon"
+  // Classic slate (afternoon-window games only) instead of their main
+  // "All" slate.
+  refreshRotowireAfternoonProjections: ({ refresh = false } = {}) =>
+    request('/api/mlb/projections/refresh-rotowire-afternoon', {
+      method: 'POST',
+      body: JSON.stringify({ refresh }),
+    }),
+
   dkSlates: (date, { refresh = false } = {}) =>
     request(`/api/mlb/dk-slates?date=${date}${refresh ? '&refresh=true' : ''}`),
 

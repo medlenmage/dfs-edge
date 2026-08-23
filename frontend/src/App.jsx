@@ -45,6 +45,7 @@ export default function App() {
   const [projectionMsg, setProjectionMsg] = useState(null)
   const [rotowireLoading, setRotowireLoading] = useState(false)
   const [rotowireEarlyLoading, setRotowireEarlyLoading] = useState(false)
+  const [rotowireAfternoonLoading, setRotowireAfternoonLoading] = useState(false)
   const projectionInputRef = useRef(null)
   // Which FPTS/ownership numbers feed the optimizer and contest
   // generator -- independent of whether the tables have fetched the
@@ -158,6 +159,8 @@ export default function App() {
     refreshFromRotowireVariant(api.refreshRotowireProjections, setRotowireLoading, 'main-slate')
   const refreshFromRotowireEarly = () =>
     refreshFromRotowireVariant(api.refreshRotowireEarlyProjections, setRotowireEarlyLoading, 'early-slate')
+  const refreshFromRotowireAfternoon = () =>
+    refreshFromRotowireVariant(api.refreshRotowireAfternoonProjections, setRotowireAfternoonLoading, 'afternoon-slate')
 
   function cycleTheme() {
     const next = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'
@@ -223,6 +226,13 @@ export default function App() {
                 title="Same as Refresh from RotoWire, but RotoWire's own 'Early' Classic slate (early-games-only, the slate real DK 'Early Only' GPPs are built around) instead of their main 'All' slate. Loading this replaces whichever slate's projections/salaries were loaded for the date before -- this app only ever holds one slate's data per date at a time. Fails clearly if RotoWire has no Early slate live today (most days without any early-window games)."
               >
                 {rotowireEarlyLoading ? 'Loading…' : 'Refresh from RotoWire (Early)'}
+              </button>
+              <button
+                onClick={refreshFromRotowireAfternoon}
+                disabled={rotowireAfternoonLoading}
+                title="Same as Refresh from RotoWire, but RotoWire's own 'Afternoon' Classic slate (the afternoon-window slate real DK 'Afternoon Only' GPPs are built around) instead of their main 'All' slate. Loading this replaces whichever slate's projections/salaries were loaded for the date before -- this app only ever holds one slate's data per date at a time. Fails clearly if RotoWire has no Afternoon slate live today (most days without a dedicated afternoon-window slate)."
+              >
+                {rotowireAfternoonLoading ? 'Loading…' : 'Refresh from RotoWire (Afternoon)'}
               </button>
               <button
                 onClick={loadInhouse}

@@ -360,19 +360,20 @@ async def _refresh_rotowire_projections(
     get_slate: Callable[..., Awaitable[dict[str, Any]]], *, force: bool
 ) -> dict[str, Any]:
     """
-    Shared body for both RotoWire refresh endpoints below -- identical
-    in every way except which of clients/rotowire.py's two slate
-    pickers (get_current_slate / get_early_slate) supplies the slate.
+    Shared body for all three RotoWire refresh endpoints below --
+    identical in every way except which of clients/rotowire.py's slate
+    pickers (get_current_slate / get_early_slate / get_afternoon_slate)
+    supplies the slate.
 
     Always stores under THAT slate's own real date (RotoWire's, not
     whatever date this app's UI currently has selected) -- the
     response's `date` field tells the caller which one, since it can
     differ from what's currently showing. Storing is day-keyed, same as
     a manual CSV upload -- loading a different slate for the same day
-    (the main "All" slate vs. the "Early" slate) replaces whichever one
-    was loaded before, the same way uploading a new CSV would. This app
-    has no notion of "two slates loaded for the same day at once" --
-    pick whichever one you're actually building for.
+    (the main "All" slate vs. the "Early"/"Afternoon" slate) replaces
+    whichever one was loaded before, the same way uploading a new CSV
+    would. This app has no notion of "two slates loaded for the same
+    day at once" -- pick whichever one you're actually building for.
     """
     try:
         slate = await get_slate(force=force)
@@ -421,7 +422,8 @@ async def refresh_rotowire_projections(
     Pull RotoWire's own live optimizer player pool directly from their
     site (clients/rotowire.py) instead of a manual CSV download/upload
     -- their main "All" Classic slate. See POST /projections/refresh-
-    rotowire-early for the early-games-only slate instead.
+    rotowire-early or -afternoon for the early- or afternoon-games-only
+    slates instead.
     """
     return await _refresh_rotowire_projections(rotowire.get_current_slate, force=refresh)
 
@@ -441,6 +443,24 @@ async def refresh_rotowire_early_projections(
     now -- most days without any early-window games at all.
     """
     return await _refresh_rotowire_projections(rotowire.get_early_slate, force=refresh)
+
+
+@router.post("/projections/refresh-rotowire-afternoon")
+async def refresh_rotowire_afternoon_projections(
+    refresh: bool = Body(
+        False, embed=True,
+        description="Bypass the cache and re-pull live from RotoWire -- use close to lock for newly confirmed lineups",
+    ),
+) -> dict[str, Any]:
+    """
+    Same as POST /projections/refresh-rotowire, but for RotoWire's own
+    "Afternoon" Classic slate (the afternoon-window slate real DK
+    "Afternoon Only" GPPs are built around) instead of their main "All"
+    slate. Fails with a clear 502 if RotoWire has no Afternoon slate
+    live right now -- most days without a dedicated afternoon-window
+    slate at all.
+    """
+    return await _refresh_rotowire_projections(rotowire.get_afternoon_slate, force=refresh)
 
 
 @router.get("/projections")
