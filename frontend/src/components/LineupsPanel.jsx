@@ -297,14 +297,16 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
         </label>
         <label className="dim" style={{ fontSize: 13 }}>
           Max exposure{' '}
-          <select value={maxExposure} onChange={(e) => setMaxExposure(e.target.value)}>
-            <option value="">none</option>
-            {[20, 30, 40, 50, 75].map((n) => (
-              <option key={n} value={n}>
-                {n}%
-              </option>
-            ))}
-          </select>
+          <input
+            type="number"
+            min="1"
+            max="100"
+            placeholder="none"
+            value={maxExposure}
+            onChange={(e) => setMaxExposure(e.target.value)}
+            style={{ width: 55 }}
+          />
+          %
         </label>
         <button className="primary" onClick={run} disabled={state.status === 'loading'}>
           {state.status === 'loading'
