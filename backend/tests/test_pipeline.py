@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import draftkings, mlb, odds, rotowire, savant, weather  # noqa: E402
+from app.clients import dk_sportsbook, draftkings, mlb, odds, rotowire, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     atbat_sim,
@@ -2491,6 +2491,163 @@ async def main() -> int:
           k_lines[salaries.normalize_name("Gerrit Cole")] == 6.5, str(k_lines))
     check("_market_line_by_name returns an empty dict for no rows, not a crash",
           mlb_slate._market_line_by_name([]) == {}, "")
+
+    print("\nDraftKings Sportsbook odds source (clients/dk_sportsbook.py's own parsing -- "
+          "an ALTERNATIVE free/no-key source to The Odds API, ODDS_SOURCE=draftkings in "
+          "config.py. get_event_odds()'s schema was confirmed against an independent, "
+          "working open-source DK scraper (not copied -- that repo has no LICENSE -- only "
+          "the field-level API shape it revealed was read); get_event_group()'s discovery "
+          "shape is this app's own best-effort guess, never verified live. These tests lock "
+          "in this module's OWN parsing behavior against that best-effort fixture.)")
+
+    dk_eventgroup_fixture = {
+        "eventGroup": {
+            "eventGroupId": 84240,
+            "events": [
+                {"eventId": "29372173", "name": "BOS Red Sox @ NYY Yankees", "startDate": "2026-08-23T23:05:00Z"},
+                {"eventId": "29372199", "name": "SEA Mariners @ LAD Dodgers", "startDate": "2026-08-24T02:10:00Z"},
+                {"eventId": "bad", "name": "", "startDate": None},  # no parseable team names -- must be skipped
+            ],
+        }
+    }
+    dk_events = dk_sportsbook._list_events(dk_eventgroup_fixture)
+    check("_list_events reads home/away from DK's own 'AWAY @ HOME' event name convention "
+          "(same convention already confirmed for DK's DFS lobby API in clients/draftkings.py)",
+          dk_events[0] == {
+              "event_id": "29372173", "home_team": "NYY Yankees", "away_team": "BOS Red Sox",
+              "commence_time": "2026-08-23T23:05:00Z",
+          },
+          str(dk_events))
+    check("_list_events skips an event with no parseable team name rather than emitting a "
+          "half-populated row",
+          len(dk_events) == 2 and all(e["event_id"] != "bad" for e in dk_events),
+          str(dk_events))
+    check("_list_events returns an empty list for an empty payload, not a crash",
+          dk_sportsbook._list_events({}) == [], "")
+
+    dk_event_fixture = {
+        "event": {"name": "BOS Red Sox @ NYY Yankees"},
+        "eventCategories": [
+            {
+                "componentizedOffers": [
+                    {
+                        "subcategoryName": "Game Lines",
+                        "offers": [
+                            [
+                                {
+                                    "isSuspended": False, "isOpen": True, "label": "Moneyline",
+                                    "outcomes": [
+                                        {"hidden": False, "label": "NYY Yankees", "oddsDecimal": 1.667},
+                                        {"hidden": False, "label": "BOS Red Sox", "oddsDecimal": 2.30},
+                                    ],
+                                },
+                                {
+                                    "isSuspended": False, "isOpen": True, "label": "Run Line",
+                                    "outcomes": [
+                                        {"hidden": False, "label": "NYY Yankees", "line": -1.5, "oddsDecimal": 2.20},
+                                        {"hidden": False, "label": "BOS Red Sox", "line": 1.5, "oddsDecimal": 1.71},
+                                    ],
+                                },
+                                {
+                                    "isSuspended": False, "isOpen": True, "label": "Total",
+                                    "outcomes": [
+                                        {"hidden": False, "label": "Over", "line": 8.5, "oddsDecimal": 1.91},
+                                        {"hidden": False, "label": "Under", "line": 8.5, "oddsDecimal": 1.91},
+                                    ],
+                                },
+                                {
+                                    # A suspended market -- must be filtered out entirely, even
+                                    # if it has real-looking outcomes.
+                                    "isSuspended": True, "isOpen": True, "label": "Moneyline",
+                                    "outcomes": [{"hidden": False, "label": "NYY Yankees", "oddsDecimal": 99.0}],
+                                },
+                            ]
+                        ],
+                    },
+                    {
+                        "subcategoryName": "Home Runs",
+                        "offers": [
+                            [
+                                {
+                                    "isSuspended": False, "isOpen": True, "label": "Aaron Judge Home Runs",
+                                    "outcomes": [
+                                        {"hidden": False, "label": "Over", "line": 0.5, "oddsDecimal": 2.80},
+                                        {"hidden": False, "label": "Under", "line": 0.5, "oddsDecimal": 1.45},
+                                        # A hidden outcome -- must be filtered out.
+                                        {"hidden": True, "label": "Over", "line": 1.5, "oddsDecimal": 6.50},
+                                    ],
+                                }
+                            ]
+                        ],
+                    },
+                    {
+                        "subcategoryName": "Strikeouts",
+                        "offers": [
+                            [
+                                {
+                                    "isSuspended": False, "isOpen": True, "label": "Gerrit Cole Strikeouts",
+                                    "outcomes": [
+                                        {"hidden": False, "label": "Over", "line": 6.5, "oddsDecimal": 1.91},
+                                        {"hidden": False, "label": "Under", "line": 6.5, "oddsDecimal": 1.91},
+                                    ],
+                                }
+                            ]
+                        ],
+                    },
+                ]
+            }
+        ],
+    }
+
+    check("_decimal_to_american converts a favorite's decimal odds to a negative American price",
+          dk_sportsbook._decimal_to_american(1.667) == -150, str(dk_sportsbook._decimal_to_american(1.667)))
+    check("_decimal_to_american converts an underdog's decimal odds to a positive American price",
+          dk_sportsbook._decimal_to_american(2.30) == 130, str(dk_sportsbook._decimal_to_american(2.30)))
+
+    dk_event = {"event_id": "29372173", "home_team": "NYY Yankees", "away_team": "BOS Red Sox",
+                "commence_time": "2026-08-23T23:05:00Z"}
+    dk_line = dk_sportsbook._build_game_line(dk_event, dk_event_fixture)
+    check("_build_game_line matches moneyline outcomes to the correct side by team-name label, "
+          "not outcome order, and ignores the suspended duplicate Moneyline market entirely",
+          dk_line["home_moneyline"] == -150 and dk_line["away_moneyline"] == 130,
+          str(dk_line))
+    check("_build_game_line reads the run line's spread (not its price) as home/away_spread",
+          dk_line["home_spread"] == -1.5 and dk_line["away_spread"] == 1.5,
+          str(dk_line))
+    check("_build_game_line reads the total from the Over row's line",
+          dk_line["total"] == 8.5, str(dk_line))
+    check("_build_game_line computes home/away implied runs from the total and spread, same "
+          "formula as clients/odds.py's _implied_team_runs",
+          dk_line["home_implied_runs"] == 5.0 and dk_line["away_implied_runs"] == 3.5,
+          str(dk_line))
+    check("_build_game_line tags the row with book='DraftKings'",
+          dk_line["book"] == "DraftKings", str(dk_line))
+
+    dk_props = dk_sportsbook._parse_player_props(dk_event_fixture)
+    check("_parse_player_props maps DK's own 'Home Runs' subcategory name to this app's "
+          "batter_home_runs market key (same key clients/odds.py uses)",
+          "batter_home_runs" in dk_props, str(dk_props))
+    check("_parse_player_props recovers the player's name by stripping the subcategory suffix "
+          "off the market's own label ('Aaron Judge Home Runs' - 'Home Runs' -> 'Aaron Judge')",
+          all(r["player"] == "Aaron Judge" for r in dk_props["batter_home_runs"]),
+          str(dk_props["batter_home_runs"]))
+    check("_parse_player_props filters out the hidden outcome (the 1.5 line) entirely",
+          len(dk_props["batter_home_runs"]) == 2, str(dk_props["batter_home_runs"]))
+    judge_over = next(r for r in dk_props["batter_home_runs"] if r["side"] == "Over")
+    check("_parse_player_props converts decimal odds to American and derives implied_pct from "
+          "it, same conversion clients/odds.py's own american_to_probability uses",
+          judge_over["price"] == 180 and judge_over["implied_pct"] == odds.american_to_probability(180),
+          str(judge_over))
+    check("_parse_player_props reads the line and tags book='DraftKings'",
+          judge_over["line"] == 0.5 and judge_over["book"] == "DraftKings", str(judge_over))
+    check("_parse_player_props also maps 'Strikeouts' to pitcher_strikeouts, recovering the "
+          "pitcher's name the same way",
+          dk_props["pitcher_strikeouts"][0]["player"] == "Gerrit Cole", str(dk_props["pitcher_strikeouts"]))
+    check("_parse_player_props ignores Game Lines markets entirely (Moneyline/Run Line/Total "
+          "subcategory names aren't in the prop market map)",
+          "batter_hits" not in dk_props and len(dk_props) == 2, str(dk_props))
+    check("_parse_player_props returns an empty dict for an empty payload, not a crash",
+          dk_sportsbook._parse_player_props({}) == {}, "")
 
     print("\nMarket props: wired end-to-end through a real slate rebuild "
           "(fetch -> parse -> match by name -> blended into edge.components)")

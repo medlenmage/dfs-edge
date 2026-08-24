@@ -65,6 +65,15 @@ class Settings:
         # that made this affordable to turn on by default.
         self.odds_fetch_props: bool = _bool("ODDS_FETCH_PROPS", True)
 
+        # --- Betting-lines source ---
+        # "odds_api" (default -- The Odds API, needs ODDS_API_KEY) or
+        # "draftkings" (free, no key -- scrapes DraftKings Sportsbook's
+        # own public odds API directly instead. See clients/
+        # dk_sportsbook.py's own module docstring for its real,
+        # currently-unverified-against-a-live-payload status before
+        # relying on it for anything.
+        self.odds_source: str = os.getenv("ODDS_SOURCE", "odds_api").strip().lower() or "odds_api"
+
         # --- Cache TTLs (seconds) ---
         # CACHE_TTL_ODDS was removed -- game lines and player props now
         # cache by calendar day instead of a rolling TTL window (see
@@ -117,7 +126,10 @@ class Settings:
 
     @property
     def has_odds(self) -> bool:
-        return bool(self.odds_api_key)
+        # The DraftKings source needs no key -- it's "available" the
+        # moment it's selected, unlike The Odds API which needs a real
+        # key regardless of which source is picked.
+        return self.odds_source == "draftkings" or bool(self.odds_api_key)
 
     @property
     def has_history_db(self) -> bool:
