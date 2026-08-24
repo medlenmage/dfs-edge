@@ -85,6 +85,8 @@ as ordinary weighted one-off picks, same as before this feature.
 
 from __future__ import annotations
 
+import csv
+import io
 import random
 from collections.abc import Callable
 from typing import Any
@@ -483,11 +485,20 @@ def _sample_one_lineup(
     primary_opponent = primary_team_pick.get("opponent") if primary_team_pick else None
     has_bringback = primary_opponent is not None and any(p["team"] == primary_opponent for p in picks)
 
+    # secondary_teams' own sizes were already confirmed fully satisfied
+    # by the "couldn't fully satisfy the chosen stack shape" check
+    # above -- the team names chosen for it are exactly the real
+    # secondary teams that ended up in this roster, no need to re-derive
+    # them from the picks.
+    secondary_team_names = [t for t, _ in secondary_teams] if secondary_teams else []
+
     return {
         "salary_used": salary_so_far,
         "projected_points": round(sum(p["projected_fpts"] for p in picks), 2),
         "total_ownership_pct": round(sum(p["ownership_pct"] for p in picks), 1),
         "primary_stack": primary["type"] if primary else None,
+        "primary_team": primary_team,
+        "secondary_teams": secondary_team_names,
         "has_bringback": has_bringback,
         "players": [
             {
@@ -1144,3 +1155,74 @@ async def build_contest_entries_simulated(
             "single projected-points estimate against the field."
         ),
     }
+
+
+# ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE", "FLEX", "DST"] --
+# numbered only for slots DK's roster needs more than one of. Mirrors
+# lineup_export.py's SLOT_LABELS convention for MLB, built from NFL's
+# own SLOT_REQUIREMENTS instead.
+_NFL_SLOT_LABELS: list[str] = [
+    f"{slot}{i + 1}" if count > 1 else slot
+    for slot, count in SLOT_REQUIREMENTS.items()
+    for i in range(count)
+]
+
+_SIMULATED_RESULT_FIELDS = [
+    "cash_probability_pct", "first_place_pct", "top_1pct_pct", "top_10pct_pct",
+    "expected_payout", "payout_p10", "payout_p90", "roi_pct",
+    "simulated_points_mean", "simulated_points_p10", "simulated_points_p90",
+    "simulated_points_floor", "simulated_points_ceiling",
+]
+_DETERMINISTIC_RESULT_FIELDS = ["estimated_rank", "in_the_money", "estimated_payout"]
+
+
+def lineups_to_csv(entries: list[dict[str, Any]], *, results: list[dict[str, Any]] | None = None) -> str:
+    """
+    Serialize a batch of entries to CSV text, one row each -- the NFL
+    sibling of lineup_export.lineups_to_csv() (MLB), adapted for the
+    9-slot roster and this module's own primary/secondary stack fields
+    (kept as real generation-time facts -- which team, which archetype
+    -- rather than re-derived from roster composition the way MLB's
+    stack_info() does, since NFL's stack model isn't "any team with 2+
+    players," it's the specific primary/secondary plan actually built
+    toward).
+
+    `results`, if given, must be the same length as `entries` and
+    index-aligned; auto-detects the deterministic vs. simulated shape
+    the same way the MLB version does.
+    """
+    buf = io.StringIO()
+    fieldnames = [
+        "lineup_index", "salary_used", "projected_points", "total_ownership_pct", "duplicate_count",
+        "primary_stack", "primary_team", "secondary_teams", "has_bringback",
+    ]
+    fieldnames += [f"{label}_name" for label in _NFL_SLOT_LABELS]
+    simulated = bool(results) and "cash_probability_pct" in results[0]
+    if results is not None:
+        fieldnames += _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS
+
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for i, entry in enumerate(entries):
+        players = entry.get("players") or []
+        row: dict[str, Any] = {
+            "lineup_index": i,
+            "salary_used": entry.get("salary_used"),
+            "projected_points": entry.get("projected_points"),
+            "total_ownership_pct": entry.get("total_ownership_pct"),
+            "duplicate_count": entry.get("duplicate_count", 1),
+            "primary_stack": entry.get("primary_stack") or "",
+            "primary_team": entry.get("primary_team") or "",
+            "secondary_teams": "+".join(entry.get("secondary_teams") or []),
+            "has_bringback": entry.get("has_bringback", False),
+        }
+        for label, p in zip(_NFL_SLOT_LABELS, players):
+            row[f"{label}_name"] = p.get("name")
+        if results is not None:
+            r = results[i]
+            for field in _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS:
+                row[field] = r.get(field)
+        writer.writerow(row)
+
+    return buf.getvalue()

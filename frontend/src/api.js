@@ -482,4 +482,6 @@ export const api = {
         first_place_pct: firstPlacePct,
       }),
     }),
+
+  nflContestEntriesCsvUrl: (batchId) => `${BASE}/api/nfl/contest-entries/${batchId}/csv`,
 }

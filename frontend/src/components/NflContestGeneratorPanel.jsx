@@ -6,9 +6,9 @@ import { api } from '../api'
  * ContestGeneratorPanel.jsx (MLB). Scoped to what nfl_contest.py
  * actually supports: contest type, entries to build, allow duplicates,
  * self-play, field sharpness, min/max salary, max exposure, field size,
- * percent-to-first. No post-hoc reshape, no CSV export yet -- see
- * nfl_contest.py's own module docstring for the full list of what
- * wasn't ported from the MLB version and why.
+ * percent-to-first, and a full-batch CSV download. No post-hoc reshape
+ * yet -- see nfl_contest.py's own module docstring for the full list of
+ * what wasn't ported from the MLB version and why.
  *
  * Every entry is built toward a real, weighted NFL stack archetype
  * (also nfl_contest.py's own module docstring) -- not a control here,
@@ -21,6 +21,18 @@ const STACK_LABELS = {
   qb_2: 'QB+2',
   qb_3: 'QB+3',
   rb_dst: 'RB+DST',
+}
+
+// e.g. "DAL(primary), WSH + GB(secondary)" -- primary_team/secondary_teams
+// are real facts from generation time (nfl_contest.py), not re-derived
+// from roster composition.
+function stackTeamsLabel(entry) {
+  const primary = entry.primary_team
+  const secondary = entry.secondary_teams || []
+  if (!primary) return '—'
+  const parts = [`${primary}(primary)`]
+  if (secondary.length) parts.push(`${secondary.join(' + ')}(secondary)`)
+  return parts.join(', ')
 }
 
 export function NflContestGeneratorPanel({ season, week }) {
@@ -108,18 +120,20 @@ export function NflContestGeneratorPanel({ season, week }) {
             <option value="high">High</option>
           </select>
         </label>
-        <label className="dim" style={{ fontSize: 13 }}>
+        <label
+          className="dim"
+          style={{ fontSize: 13 }}
+          title="Override the contest's own percent-to-first (share of the prize pool 1st place wins) for this simulated run. A lower value flattens the payout curve -- more spread across the paid ranks, less concentrated at 1st -- which changes every entry's simulated ROI. Defaults to the contest preset's own value."
+        >
           % to first{' '}
-          <input
-            type="number"
-            min="1"
-            max="100"
-            placeholder={preset?.first_place_pct != null ? String(preset.first_place_pct) : 'flat'}
-            value={firstPlacePct}
-            onChange={(e) => setFirstPlacePct(e.target.value)}
-            style={{ width: 60 }}
-          />
-          %
+          <select value={firstPlacePct} onChange={(e) => setFirstPlacePct(e.target.value)}>
+            <option value="">preset default</option>
+            {[5, 10, 15, 20, 25, 30, 35].map((n) => (
+              <option key={n} value={n}>
+                {n}%
+              </option>
+            ))}
+          </select>
         </label>
         <label className="dim" style={{ fontSize: 13 }}>
           Max exposure{' '}
@@ -218,19 +232,27 @@ export function NflContestGeneratorPanel({ season, week }) {
             <span className="badge" title="What a zero-skill random entry should expect from this exact contest">
               baseline: {state.field_baseline.avg_cash_probability_pct}% cash / {state.field_baseline.avg_roi_pct}% ROI
             </span>
+            <a
+              href={api.nflContestEntriesCsvUrl(state.batch_id)}
+              title={`Download all ${state.num_entries_built.toLocaleString()} entries as a CSV -- for handing off to an external tool`}
+            >
+              <button>Download full batch (CSV)</button>
+            </a>
           </div>
 
           <div className="notice" style={{ marginBottom: 14 }}>{state.note}</div>
 
           <div className="card table-wrap" style={{ marginBottom: 16 }}>
             <div className="sub-line" style={{ marginBottom: 8 }}>
-              Entries (top {state.results.length})
+              Entries (top {state.results.length} of {state.num_entries_built.toLocaleString()} -- download
+              the CSV above for the full batch)
             </div>
             <table>
               <thead>
                 <tr>
                   <th>#</th>
                   <th>Stack</th>
+                  <th>Teams</th>
                   <th>Bring-back</th>
                   <th className="num">Salary</th>
                   <th className="num">Proj FPTS</th>
@@ -242,11 +264,12 @@ export function NflContestGeneratorPanel({ season, week }) {
               </thead>
               <tbody>
                 {state.results.map((r, i) => {
-                  const entry = state.entries[i]
+                  const entry = state.sample_entries[i]
                   return (
                     <tr key={i}>
                       <td>{i + 1}</td>
                       <td className="dim">{STACK_LABELS[entry.primary_stack] || entry.primary_stack || '—'}</td>
+                      <td className="dim">{stackTeamsLabel(entry)}</td>
                       <td className={entry.has_bringback ? 'ok' : 'dim'}>{entry.has_bringback ? 'Yes' : 'No'}</td>
                       <td className="num">${entry.salary_used.toLocaleString()}</td>
                       <td className="num">{entry.projected_points.toFixed(1)}</td>
