@@ -102,6 +102,17 @@ export function NflStackTable({ season, week }) {
                       {t.components.environment.implied_total != null
                         ? `${t.components.environment.implied_total.toFixed(1)} pts`
                         : '—'}
+                      {t.components.game_total.spread != null && (
+                        <div style={{ marginTop: 2 }}>
+                          <span className={`badge ${t.components.game_total.favored ? 'ok' : ''}`}>
+                            {t.components.game_total.favored === true
+                              ? `Fav −${t.components.game_total.spread}`
+                              : t.components.game_total.favored === false
+                              ? `Dog +${t.components.game_total.spread}`
+                              : `±${t.components.game_total.spread} (favorite unknown)`}
+                          </span>
+                        </div>
+                      )}
                       <div className="sub-line">{t.components.game_total.detail}</div>
                     </td>
                     <td className="num">
