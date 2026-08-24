@@ -423,6 +423,8 @@ export const api = {
       minSalary = null,
       minUniquePlayers = 1,
       qbStackMin = 0,
+      simulate = false,
+      numTrials = 2000,
     } = {},
   ) =>
     request('/api/nfl/lineups', {
@@ -438,6 +440,8 @@ export const api = {
         min_salary: minSalary,
         min_unique_players: minUniquePlayers,
         qb_stack_min: qbStackMin,
+        simulate,
+        num_trials: numTrials,
       }),
     }),
 }

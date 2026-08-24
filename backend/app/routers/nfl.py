@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
 from app.clients import nfl, rotowire_nfl
-from app.services import nfl_optimizer, nfl_slate, player_match, projections, salaries
+from app.services import nfl_optimizer, nfl_slate, nfl_variance, player_match, projections, salaries
 
 router = APIRouter(prefix="/api/nfl", tags=["nfl"])
 
@@ -165,11 +165,26 @@ async def generate_lineups(
     qb_stack_min: int = Body(
         0, embed=True, description="Force at least this many of the QB's own WR/TE into the same lineup"
     ),
+    simulate: bool = Body(
+        False, embed=True,
+        description="Run a Monte Carlo simulation on the generated lineups and attach floor/median/ceiling",
+    ),
+    num_trials: int = Body(2000, embed=True, description="Simulated trials per lineup, if simulate=true"),
 ) -> dict[str, Any]:
     """
     Up to `num_lineups` distinct, highest-projected DraftKings Classic
     NFL lineups (QB, RB, RB, WR, WR, WR, TE, FLEX, DST), built from
     whatever salary + projections CSVs are loaded for the week.
+
+    `simulate=true` runs each generated lineup through
+    nfl_variance.simulate_batch() -- real per-player outcome pools
+    bootstrapped from nfl.PRIOR_SEASON's actual game logs (2025 as of
+    writing, not the week being drafted -- that season hasn't been
+    played yet), correlated by team/opponent (see nfl_variance.py's own
+    module docstring for exactly what that does and doesn't model) --
+    and attaches a `simulated` floor/median/ceiling/mean to each
+    lineup, a real data-driven range instead of only the single
+    `projected_points` point estimate.
     """
     resolved_season, resolved_week = await _resolve_season_week(season, week)
     slate = await nfl_slate.build_slate(resolved_season, resolved_week)
@@ -187,4 +202,21 @@ async def generate_lineups(
         )
     except nfl_optimizer.OptimizerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if simulate and result["lineups"]:
+        try:
+            pools = await nfl_variance.player_pools_for_entries(result["lineups"], nfl.PRIOR_SEASON)
+            sims = nfl_variance.simulate_batch(result["lineups"], pools, num_trials=num_trials)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Couldn't simulate: {exc}") from exc
+        for lineup, trial_row in zip(result["lineups"], sims):
+            ordered = sorted(trial_row.tolist())
+            n = len(ordered)
+            lineup["simulated"] = {
+                "data_season": nfl.PRIOR_SEASON,
+                "floor": round(ordered[round(0.10 * (n - 1))], 2),
+                "median": round(ordered[round(0.50 * (n - 1))], 2),
+                "ceiling": round(ordered[round(0.90 * (n - 1))], 2),
+                "mean": round(sum(ordered) / n, 2),
+            }
     return {"season": resolved_season, "week": resolved_week, **result}
