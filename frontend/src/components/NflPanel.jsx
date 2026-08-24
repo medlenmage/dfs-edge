@@ -93,6 +93,7 @@ export function NflPanel() {
   const [tab, setTab] = useState('matchups')
   const [salaryMsg, setSalaryMsg] = useState(null)
   const [projectionMsg, setProjectionMsg] = useState(null)
+  const [rotowireLoading, setRotowireLoading] = useState(false)
   const salaryInputRef = useRef(null)
   const projectionInputRef = useRef(null)
 
@@ -133,6 +134,29 @@ export function NflPanel() {
   }
   const handleSalaryUpload = makeUploadHandler(api.nflUploadSalaries, setSalaryMsg, 'salaries')
   const handleProjectionUpload = makeUploadHandler(api.nflUploadProjections, setProjectionMsg, 'projections')
+
+  // Pulls RotoWire's own live optimizer player pool directly -- no
+  // manual CSV download/upload. Doesn't touch salaries (see api.js's
+  // own comment on why NFL's version can't derive them the way MLB's does).
+  async function refreshFromRotowire() {
+    if (!slate) return
+    setRotowireLoading(true)
+    setProjectionMsg('Pulling live projections from RotoWire…')
+    try {
+      const result = await api.nflRefreshRotowireProjections(slate.season, slate.week, { refresh: true })
+      const unmatched = result.unmatched?.length
+        ? ` -- ${result.unmatched.length} didn't match the loaded salary file by name (${result.unmatched
+            .slice(0, 5)
+            .join(', ')}${result.unmatched.length > 5 ? ', …' : ''})`
+        : ''
+      setProjectionMsg(`Loaded ${result.players_loaded} live RotoWire projections${unmatched}`)
+      load(slate.season, slate.week)
+    } catch (err) {
+      setProjectionMsg(`RotoWire refresh failed: ${err.message}`)
+    } finally {
+      setRotowireLoading(false)
+    }
+  }
 
   return (
     <div>
@@ -186,6 +210,13 @@ export function NflPanel() {
           title="Upload a RotoWire NFL projections CSV for this week"
         >
           Upload projections
+        </button>
+        <button
+          onClick={refreshFromRotowire}
+          disabled={rotowireLoading}
+          title="Pull RotoWire's own live optimizer player pool directly -- salary, position, opponent, FPTS, and rostership% -- with no manual CSV download/upload. Always bypasses the cache for genuinely live data. Doesn't touch DK salaries -- RotoWire's NFL export has no DK numeric player id, so a real DK salary CSV is still needed separately."
+        >
+          {rotowireLoading ? 'Loading…' : 'Refresh from RotoWire'}
         </button>
       </div>
 

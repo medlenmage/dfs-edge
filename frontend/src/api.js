@@ -401,6 +401,16 @@ export const api = {
   nflUploadProjections: (season, week, file) =>
     uploadFile(`/api/nfl/projections?season=${season}&week=${week}`, file),
 
+  // Pulls RotoWire's own live NFL optimizer player pool directly -- no
+  // manual CSV download/upload. Unlike the MLB version, this never
+  // derives salaries from the same pull (RotoWire's NFL export has no
+  // DK numeric player id) -- upload/refresh a real DK salary CSV separately.
+  nflRefreshRotowireProjections: (season, week, { refresh = false } = {}) =>
+    request(`/api/nfl/projections/refresh-rotowire?season=${season}&week=${week}`, {
+      method: 'POST',
+      body: JSON.stringify({ refresh }),
+    }),
+
   nflGenerateLineups: (
     season,
     week,
