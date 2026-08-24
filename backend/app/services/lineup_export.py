@@ -130,7 +130,8 @@ def lineups_to_csv(
         "lineup_index", "salary_used", "stack_type", "stack", "projected_points",
         "total_ownership_pct", "duplicate_count",
     ]
-    fieldnames += [f"{label}_name" for label in SLOT_LABELS]
+    for label in SLOT_LABELS:
+        fieldnames += [f"{label}_name", f"{label}_salary", f"{label}_fpts"]
     simulated = bool(results) and "cash_probability_pct" in results[0]
     if results is not None:
         fieldnames += _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS
@@ -158,6 +159,8 @@ def lineups_to_csv(
         }
         for label, p in zip(SLOT_LABELS, players):
             row[f"{label}_name"] = p.get("name")
+            row[f"{label}_salary"] = p.get("salary")
+            row[f"{label}_fpts"] = p.get("projected_fpts")
         if results is not None:
             r = results[i]
             for field in _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS:
