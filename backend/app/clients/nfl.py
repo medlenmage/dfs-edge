@@ -116,6 +116,14 @@ async def get_schedule(
                 "home_moneyline": _f(row.get("home_moneyline")),
                 "spread_line": _f(row.get("spread_line")),
                 "total_line": _f(row.get("total_line")),
+                # Real final scores, once played -- None until the game
+                # is final. Used by get_team_game_log() to derive DST
+                # points-allowed (nflverse's own team-stats release has
+                # no points-scored/allowed column of its own, only the
+                # counting stats -- the real total lives here, in the
+                # schedule's own result).
+                "away_score": _i(row.get("away_score")),
+                "home_score": _i(row.get("home_score")),
                 "div_game": row.get("div_game") == "1",
                 "roof": row.get("roof") or None,
                 "surface": row.get("surface") or None,
@@ -328,3 +336,78 @@ async def get_prior_season_context(season: int = PRIOR_SEASON) -> dict[str, Any]
 
     settings = get_settings()
     return await cached(f"nfl:prior_season_context:{season}", settings.ttl_stats * 4, _load)
+
+
+# --------------------------------------------------------------------------
+# Team (DST) game logs -- nflverse's "stats_team" release. DK's DST
+# scoring needs team-level defensive/special-teams counting stats
+# (sacks, INTs, fumble recoveries, defensive/ST TDs, blocked kicks) and
+# points allowed -- none of which live in the per-PLAYER file above.
+# Confirmed live: "stats_team" has no points-scored/allowed column of
+# its own, so points_allowed is joined in from get_schedule()'s real
+# final scores (the opponent's own score that game).
+# --------------------------------------------------------------------------
+
+TEAM_STATS_URL_TEMPLATE = (
+    "https://github.com/nflverse/nflverse-data/releases/download/stats_team/stats_team_week_{season}.csv"
+)
+
+
+def _parse_team_stat_row(row: dict[str, str]) -> dict[str, Any]:
+    return {
+        "team": row.get("team"),
+        "season": _i(row.get("season")),
+        "week": _i(row.get("week")),
+        "season_type": row.get("season_type"),
+        "game_id": row.get("game_id"),
+        "opponent_team": row.get("opponent_team"),
+        "def_sacks": _f(row.get("def_sacks")) or 0.0,
+        "def_interceptions": _f(row.get("def_interceptions")) or 0.0,
+        "fumble_recovery_opp": _f(row.get("fumble_recovery_opp")) or 0.0,
+        "def_tds": _f(row.get("def_tds")) or 0.0,
+        "special_teams_tds": _f(row.get("special_teams_tds")) or 0.0,
+        "def_safeties": _f(row.get("def_safeties")) or 0.0,
+        "def_punt_blocks": _f(row.get("def_punt_blocks")) or 0.0,
+        "def_pat_blocks": _f(row.get("def_pat_blocks")) or 0.0,
+        "def_fg_blocks": _f(row.get("def_fg_blocks")) or 0.0,
+    }
+
+
+async def _load_team_stats_csv(season: int, *, force: bool = False) -> str:
+    settings = get_settings()
+
+    async def _load() -> str:
+        url = TEAM_STATS_URL_TEMPLATE.format(season=season)
+        return await get_text(url, source="nflverse team stats")
+
+    return await cached(f"nfl:team_stats:{season}:raw", settings.ttl_stats * 4, _load, force=force)
+
+
+async def get_team_game_log(team: str, season: int, *, force: bool = False) -> list[dict[str, Any]]:
+    """
+    One row per regular-season game a team's defense/special-teams unit
+    played during `season` -- real counting stats plus `points_allowed`
+    (joined from get_schedule()'s real final scores), sorted by week.
+    The DST equivalent of get_player_game_log(); feeds
+    nfl_dk_points.dst_game_points().
+    """
+    text = await _load_team_stats_csv(season, force=force)
+    games = await get_schedule(season)
+    games_by_id = {g["game_id"]: g for g in games if g.get("game_id")}
+
+    rows = []
+    for raw_row in csv.DictReader(io.StringIO(text)):
+        if raw_row.get("team") != team or raw_row.get("season_type") != "REG":
+            continue
+        row = _parse_team_stat_row(raw_row)
+        game = games_by_id.get(row["game_id"])
+        if game and game.get("home_score") is not None and game.get("away_score") is not None:
+            row["points_allowed"] = (
+                game["away_score"] if game["home_team"] == team else game["home_score"]
+            )
+        else:
+            row["points_allowed"] = None
+        rows.append(row)
+
+    rows.sort(key=lambda r: r["week"] or 0)
+    return rows

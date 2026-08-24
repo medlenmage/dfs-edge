@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
 from app.clients import nfl, rotowire_nfl  # noqa: E402
-from app.services import nfl_dk_points, nfl_optimizer, nfl_scoring, player_match, salaries  # noqa: E402
+from app.services import nfl_dk_points, nfl_optimizer, nfl_scoring, nfl_variance, player_match, salaries  # noqa: E402
 
 _FAKE_CACHE: dict[str, object] = {}
 
@@ -180,6 +180,40 @@ def main() -> int:
     fumble_row = {"rushing_yards": 10.0, "sack_fumbles_lost": 1.0, "rushing_2pt_conversions": 1.0}
     check("lost fumbles and 2pt conversions are scored correctly",
           nfl_dk_points.game_points(fumble_row) == 1.0 - 1 + 2, str(nfl_dk_points.game_points(fumble_row)))
+
+    print("\nDST fantasy points from raw team box-score stats (nfl_dk_points.dst_game_points)")
+    dominant_dst = {
+        "def_sacks": 4.0, "def_interceptions": 2.0, "fumble_recovery_opp": 1.0,
+        "def_tds": 1.0, "special_teams_tds": 0.0, "def_safeties": 0.0,
+        "def_punt_blocks": 0.0, "def_pat_blocks": 0.0, "def_fg_blocks": 0.0,
+        "points_allowed": 6,
+    }
+    # 4 sacks(4) + 2 INT(4) + 1 fumble recovery(2) + 1 TD(6) + 1-6 pts allowed tier(7) = 23
+    check("a dominant DST game (sacks, INTs, a fumble recovery, a TD, and a shutout-adjacent "
+          "points-allowed tier) scores correctly",
+          nfl_dk_points.dst_game_points(dominant_dst) == 23.0, str(nfl_dk_points.dst_game_points(dominant_dst)))
+
+    shutout_dst = {"points_allowed": 0}
+    check("a real shutout (0 points allowed) scores the top +10 points-allowed tier",
+          nfl_dk_points.dst_game_points(shutout_dst) == 10.0, str(nfl_dk_points.dst_game_points(shutout_dst)))
+
+    blowout_loss_dst = {"points_allowed": 41}
+    check("allowing 35+ points scores the -4 points-allowed tier",
+          nfl_dk_points.dst_game_points(blowout_loss_dst) == -4.0, str(nfl_dk_points.dst_game_points(blowout_loss_dst)))
+
+    mid_dst = {"points_allowed": 24}
+    check("allowing 21-27 points scores 0 (the real DK 'neutral' points-allowed tier)",
+          nfl_dk_points.dst_game_points(mid_dst) == 0.0, str(nfl_dk_points.dst_game_points(mid_dst)))
+
+    no_score_row = {"def_sacks": 2.0}
+    check("points_allowed=None (a game not yet joined to a real final score) contributes no "
+          "points-allowed tier at all, rather than defaulting to a fabricated tier",
+          nfl_dk_points.dst_game_points(no_score_row) == 2.0, str(nfl_dk_points.dst_game_points(no_score_row)))
+
+    special_teams_td_dst = {"special_teams_tds": 1.0, "points_allowed": 14}
+    check("a special-teams (return) TD scores the same +6 as a defensive TD",
+          nfl_dk_points.dst_game_points(special_teams_td_dst) == 6.0 + 1.0,
+          str(nfl_dk_points.dst_game_points(special_teams_td_dst)))
 
     print("\nPrior-season defense-vs-position + pace aggregation (fake CSV, no network)")
     # Column names match the LIVE "stats_player_week_{season}" release
@@ -472,6 +506,196 @@ def main() -> int:
           all(r["lineup_spot"] is None for r in rw_nfl_rows), str(rw_nfl_rows))
     check("_parse_players returns an empty list for an empty payload, not a crash",
           rotowire_nfl._parse_players([]) == [] and rotowire_nfl._parse_players(None) == [], "")
+
+    # --------------------------------------------------------------------
+    # services/nfl_variance.py -- per-player/DST outcome pools + Monte
+    # Carlo simulation, built from real 2025 game logs. The NFL sibling
+    # of MLB's variance.py -- see that module's own tests for the same
+    # underlying pattern (bootstrap pools, thin-sample position-pool
+    # blending) this mirrors.
+    # --------------------------------------------------------------------
+    print("\nPer-player/DST outcome distribution pools (nfl_variance.py)")
+
+    import statistics as statistics_module
+
+    VARIANCE_SEASON = 2098
+
+    def _qb_game(passing_yards, passing_tds, ints=0.0):
+        return {
+            "attempts": 30.0, "carries": 0.0, "targets": 0.0,
+            "passing_yards": passing_yards, "passing_tds": passing_tds, "passing_interceptions": ints,
+            "rushing_yards": 0.0, "rushing_tds": 0.0,
+            "receptions": 0.0, "receiving_yards": 0.0, "receiving_tds": 0.0,
+            "sack_fumbles_lost": 0.0, "rushing_fumbles_lost": 0.0, "receiving_fumbles_lost": 0.0,
+            "passing_2pt_conversions": 0.0, "rushing_2pt_conversions": 0.0, "receiving_2pt_conversions": 0.0,
+            "special_teams_tds": 0.0,
+        }
+
+    def _wr_game(receiving_yards, receptions=5.0):
+        return {
+            "attempts": 0.0, "carries": 0.0, "targets": receptions + 2,
+            "passing_yards": 0.0, "passing_tds": 0.0, "passing_interceptions": 0.0,
+            "rushing_yards": 0.0, "rushing_tds": 0.0,
+            "receptions": receptions, "receiving_yards": receiving_yards, "receiving_tds": 0.0,
+            "sack_fumbles_lost": 0.0, "rushing_fumbles_lost": 0.0, "receiving_fumbles_lost": 0.0,
+            "passing_2pt_conversions": 0.0, "rushing_2pt_conversions": 0.0, "receiving_2pt_conversions": 0.0,
+            "special_teams_tds": 0.0,
+        }
+
+    # 16 games each (comfortably above MIN_GAMES_FULL_TRUST["QB"]=12),
+    # same season-average DK points, deliberately different game-to-game
+    # spread -- isolates variance-capturing from everything else.
+    consistent_qb_games = [_qb_game(250.0, 2.0)] * 16  # DK pts = 18.0 every game
+    boom_bust_qb_games = [_qb_game(100.0, 0.0, 2.0), _qb_game(400.0, 4.0)] * 8  # DK pts in {2.0, 35.0}
+    thin_wr_games = [_wr_game(60.0)] * 2  # only 2 games, well below MIN_GAMES_FULL_TRUST["WR"]=10
+
+    boom_bust_wr_games = [_wr_game(10.0, receptions=1.0), _wr_game(150.0, receptions=9.0)] * 8
+
+    nfl_variance_logs = {
+        "80001": consistent_qb_games,
+        "80002": boom_bust_qb_games,
+        "80003": thin_wr_games,
+        "80005": consistent_qb_games,
+        "80006": boom_bust_wr_games,
+    }
+
+    async def fake_nfl_player_game_log(player_id, season, *, force=False):
+        return nfl_variance_logs.get(player_id, [])
+
+    nfl.get_player_game_log = fake_nfl_player_game_log
+
+    consistent_qb_pool = asyncio.run(nfl_variance.player_outcome_pool("80001", "QB", VARIANCE_SEASON, seed=1))
+    boom_bust_qb_pool = asyncio.run(nfl_variance.player_outcome_pool("80002", "QB", VARIANCE_SEASON, seed=1))
+
+    check("player_outcome_pool returns POOL_SIZE values",
+          len(consistent_qb_pool) == nfl_variance.POOL_SIZE, str(len(consistent_qb_pool)))
+    check("both QB pools have roughly the same mean (same underlying season average)",
+          abs(statistics_module.mean(consistent_qb_pool) - statistics_module.mean(boom_bust_qb_pool)) < 1.5,
+          str((statistics_module.mean(consistent_qb_pool), statistics_module.mean(boom_bust_qb_pool))))
+    check("the boom/bust QB's pool has genuinely higher variance than the consistent QB's",
+          statistics_module.pstdev(boom_bust_qb_pool) > 3 * statistics_module.pstdev(consistent_qb_pool),
+          str((statistics_module.pstdev(consistent_qb_pool), statistics_module.pstdev(boom_bust_qb_pool))))
+    check("a QB with games well above MIN_GAMES_FULL_TRUST draws entirely from his own history",
+          set(consistent_qb_pool) == {18.0}, str(set(consistent_qb_pool)))
+
+    # By now the shared "WR" position pool hasn't been warmed up by
+    # anything (no WR queried yet) -- a thin-sample WR should still get
+    # a real, non-empty pool by falling back to his own (sparse) games.
+    thin_wr_pool = asyncio.run(nfl_variance.player_outcome_pool("80003", "WR", VARIANCE_SEASON, seed=2))
+    check("a thin-sample WR with no warmed-up shared pool yet still gets a real pool from his own "
+          "sparse games rather than an empty result",
+          len(thin_wr_pool) == nfl_variance.POOL_SIZE and set(thin_wr_pool) == {11.0}, str(set(thin_wr_pool)))
+
+    # Warm up the shared QB position pool with the two QBs already
+    # queried above, THEN check that a brand-new thin-sample QB blends
+    # in values beyond his own tiny sample.
+    warm_thin_qb_games = [_qb_game(250.0, 2.0)] * 2  # 2 games, same as consistent (18.0 each)
+    nfl_variance_logs["80004"] = warm_thin_qb_games
+    thin_qb_pool = asyncio.run(nfl_variance.player_outcome_pool("80004", "QB", VARIANCE_SEASON, seed=3))
+    check("a thin-sample QB's pool blends in values from the warmed-up shared position pool "
+          "(includes the boom/bust QB's real 2.0/35.0 outcomes, not just his own 18.0)",
+          not (set(thin_qb_pool) <= {18.0}), str(sorted(set(thin_qb_pool))[:10]))
+
+    no_games_pool = asyncio.run(nfl_variance.player_outcome_pool("no-such-qb", "QB", VARIANCE_SEASON, seed=4))
+    check("a player with zero games this season falls back to the shared position pool rather "
+          "than an empty result",
+          len(no_games_pool) > 0, str(len(no_games_pool)))
+
+    first_call = asyncio.run(nfl_variance.player_outcome_pool("80005", "QB", VARIANCE_SEASON, seed=42))
+    second_call = asyncio.run(nfl_variance.player_outcome_pool("80005", "QB", VARIANCE_SEASON, seed=7))
+    check("player_outcome_pool is cached -- calling again returns the same pool, ignoring a new seed",
+          first_call == second_call, str((len(first_call), len(second_call))))
+
+    ceiling = nfl_variance.ceiling_from_pool(consistent_qb_pool, 0.9)
+    check("ceiling_from_pool reads a real percentile from the pool",
+          ceiling == 18.0, str(ceiling))
+    check("ceiling_from_pool returns 0.0 for an empty pool rather than crashing",
+          nfl_variance.ceiling_from_pool([]) == 0.0, "")
+
+    print("\nDST outcome distribution pools (nfl_variance.py)")
+
+    def _dst_game(pts):
+        return {
+            "def_sacks": 0.0, "def_interceptions": 0.0, "fumble_recovery_opp": 0.0,
+            "def_tds": 0.0, "special_teams_tds": 0.0, "def_safeties": 0.0,
+            "def_punt_blocks": 0.0, "def_pat_blocks": 0.0, "def_fg_blocks": 0.0,
+            "points_allowed": {10.0: 0, 4.0: 10, 1.0: 20}.get(pts, 24),
+        }
+
+    nfl_team_logs = {
+        "AAA": [_dst_game(10.0)] * 16,  # comfortably above MIN_GAMES_FULL_TRUST["DST"]=14
+        "CCC": [_dst_game(10.0)] * 2,  # thin sample
+    }
+
+    async def fake_nfl_team_game_log(team, season, *, force=False):
+        return nfl_team_logs.get(team, [])
+
+    nfl.get_team_game_log = fake_nfl_team_game_log
+
+    dst_pool_full = asyncio.run(nfl_variance.dst_outcome_pool("AAA", VARIANCE_SEASON, seed=1))
+    check("dst_outcome_pool returns POOL_SIZE values",
+          len(dst_pool_full) == nfl_variance.POOL_SIZE, str(len(dst_pool_full)))
+    check("a DST with games well above its own MIN_GAMES_FULL_TRUST draws entirely from its own "
+          "real history",
+          set(dst_pool_full) == {10.0}, str(set(dst_pool_full)))
+
+    dst_pool_thin = asyncio.run(nfl_variance.dst_outcome_pool("CCC", VARIANCE_SEASON, seed=2))
+    check("a thin-sample DST's pool blends in values from the warmed-up shared league DST pool",
+          len(dst_pool_thin) == nfl_variance.POOL_SIZE, str(len(dst_pool_thin)))
+
+    dst_no_games = asyncio.run(nfl_variance.dst_outcome_pool("no-such-team", VARIANCE_SEASON, seed=3))
+    check("a team with zero games logged falls back to the shared league DST pool",
+          len(dst_no_games) > 0, str(len(dst_no_games)))
+
+    print("\nMonte Carlo simulation engine (nfl_variance.simulate_batch)")
+
+    def _lineup(qb_id, wr_id, qb_team, wr_team, wr_opponent):
+        return {
+            "slots": {
+                "QB": [{"id": qb_id, "team": qb_team, "opponent": wr_opponent, "position": "QB"}],
+                "WR": [{"id": wr_id, "team": wr_team, "opponent": wr_opponent, "position": "WR"}],
+            }
+        }
+
+    # Both pools need REAL variance of their own for this to test anything
+    # meaningful -- a QB tied to a constant (zero-variance) pool would
+    # show identical combined variance whether "stacked" or not, since a
+    # shared team multiplier can only correlate outcomes that actually
+    # move. boom_bust_qb_pool/boom_bust_wr_pool both have real spread.
+    boom_bust_wr_pool = asyncio.run(nfl_variance.player_outcome_pool("80006", "WR", VARIANCE_SEASON, seed=1))
+    sim_pools = {
+        "stack_qb": boom_bust_qb_pool, "stack_wr": boom_bust_wr_pool,
+        "solo_qb": boom_bust_qb_pool, "solo_wr": boom_bust_wr_pool,
+    }
+    stacked_lineup = _lineup("stack_qb", "stack_wr", "STK", "STK", "OPP")
+    unstacked_lineup = _lineup("solo_qb", "solo_wr", "STK", "OTH", "OPP")
+
+    stacked_sim = nfl_variance.simulate_batch([stacked_lineup], sim_pools, num_trials=4000, seed=11)
+    unstacked_sim = nfl_variance.simulate_batch([unstacked_lineup], sim_pools, num_trials=4000, seed=11)
+    check("simulate_batch returns a (len(entries), num_trials) array",
+          stacked_sim.shape == (1, 4000), str(stacked_sim.shape))
+    check("a real QB+his-own-WR stack shows genuinely higher combined variance than the same two "
+          "pools with no shared team (the whole reason NFL stacking correlation exists to model)",
+          statistics_module.pstdev(stacked_sim[0].tolist()) > 1.15 * statistics_module.pstdev(unstacked_sim[0].tolist()),
+          str((statistics_module.pstdev(stacked_sim[0].tolist()), statistics_module.pstdev(unstacked_sim[0].tolist()))))
+
+    dst_lineup = {"slots": {"DST": [{"id": "aaa_dst", "team": "AAA", "opponent": "OPP", "position": "DST"}]}}
+    dst_sim = nfl_variance.simulate_batch([dst_lineup], {"aaa_dst": dst_pool_full}, num_trials=500, seed=5)
+    check("simulate_batch runs a DST-only lineup without needing a team multiplier for its own "
+          "team (a DST reacts to its OPPONENT's day, not its own)",
+          dst_sim.shape == (1, 500), str(dst_sim.shape))
+
+    try:
+        nfl_variance.simulate_batch([stacked_lineup], {}, num_trials=10, seed=1)
+        check("simulate_batch raises ValueError when a player's pool is missing", False, "")
+    except ValueError:
+        check("simulate_batch raises ValueError when a player's pool is missing", True, "")
+
+    pools_for_entries = asyncio.run(nfl_variance.player_pools_for_entries([stacked_lineup, dst_lineup], VARIANCE_SEASON))
+    check("player_pools_for_entries fetches a pool for every unique player across a batch of "
+          "lineups, dispatching offensive players to player_outcome_pool and DST to "
+          "dst_outcome_pool",
+          set(pools_for_entries) == {"stack_qb", "stack_wr", "aaa_dst"}, str(sorted(pools_for_entries)))
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")

@@ -67,13 +67,15 @@ def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
     for game in slate.get("games") or []:
         for side in ("home", "away"):
             team = game[side]
+            opponent = game["away" if side == "home" else "home"]["abbrev"]
             for p in team.get("players") or []:
                 if not p.get("dk_id") or p.get("salary") is None:
                     continue
                 proj = p.get("projection")
                 if not proj or proj.get("fpts") is None:
                     continue
-                slots = _eligible_slots(p.get("position") or "")
+                position = (p.get("position") or "").strip().upper()
+                slots = _eligible_slots(position)
                 if not slots:
                     continue
                 pool.append(
@@ -81,6 +83,8 @@ def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
                         "id": p["dk_id"],
                         "name": p["name"],
                         "team": team["abbrev"],
+                        "opponent": opponent,
+                        "position": position,
                         "salary": p["salary"],
                         "projected_fpts": proj["fpts"],
                         "ownership_pct": proj.get("ownership_pct") or 0,
@@ -180,6 +184,8 @@ def _solve_one(
                         "id": p["id"],
                         "name": p["name"],
                         "team": p["team"],
+                        "opponent": p["opponent"],
+                        "position": p["position"],
                         "salary": p["salary"],
                         "projected_fpts": p["projected_fpts"],
                         "ownership_pct": p["ownership_pct"],

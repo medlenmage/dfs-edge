@@ -17,6 +17,7 @@ export function NflLineupsPanel({ season, week, slate }) {
   const [minSalary, setMinSalary] = useState('')
   const [minUniquePlayers, setMinUniquePlayers] = useState('')
   const [qbStackMin, setQbStackMin] = useState('0')
+  const [simulate, setSimulate] = useState(false)
   const [selected, setSelected] = useState(0)
   const [locked, setLocked] = useState(new Set())
   const [excluded, setExcluded] = useState(new Set())
@@ -75,6 +76,7 @@ export function NflLineupsPanel({ season, week, slate }) {
         minSalary: minSalary.trim() ? Number(minSalary) : null,
         minUniquePlayers: minUniquePlayers.trim() ? Number(minUniquePlayers) : 1,
         qbStackMin: Number(qbStackMin),
+        simulate,
       })
       setSelected(0)
       setState({ status: 'ready', ...result })
@@ -142,6 +144,14 @@ export function NflLineupsPanel({ season, week, slate }) {
             onChange={(e) => setMinUniquePlayers(e.target.value)}
             style={{ width: 55 }}
           />
+        </label>
+        <label
+          className="dim"
+          style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}
+          title="Run a Monte Carlo simulation on each generated lineup, using real 2025 game logs -- attaches a real floor/median/ceiling range alongside the single projected-points estimate. Adds real compute time."
+        >
+          <input type="checkbox" checked={simulate} onChange={(e) => setSimulate(e.target.checked)} />
+          Simulate
         </label>
         <button className="primary" onClick={run} disabled={state.status === 'loading'}>
           {state.status === 'loading'
@@ -317,6 +327,15 @@ function NflLineupTable({ lineup }) {
         <span className="badge">{lineup.projected_points.toFixed(1)} projected points</span>
         {lineup.total_ownership_pct != null && (
           <span className="badge">{lineup.total_ownership_pct.toFixed(1)}% cumulative ownership</span>
+        )}
+        {lineup.simulated && (
+          <span
+            className="badge"
+            title={`Monte Carlo simulation from real ${lineup.simulated.data_season} game logs -- 10th/50th/90th percentile of simulated DK points`}
+          >
+            sim: {lineup.simulated.floor.toFixed(1)} floor / {lineup.simulated.median.toFixed(1)} median /{' '}
+            {lineup.simulated.ceiling.toFixed(1)} ceiling
+          </span>
         )}
       </div>
       <table>
