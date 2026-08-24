@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import nfl  # noqa: E402
+from app.clients import nfl, rotowire_nfl  # noqa: E402
 from app.services import nfl_dk_points, nfl_optimizer, nfl_scoring, player_match, salaries  # noqa: E402
 
 _FAKE_CACHE: dict[str, object] = {}
@@ -373,6 +373,105 @@ def main() -> int:
         check("optimizer raises OptimizerError on an empty pool", False)
     except nfl_optimizer.OptimizerError:
         check("optimizer raises OptimizerError on an empty pool", True)
+
+    # --------------------------------------------------------------------
+    # clients/rotowire_nfl.py -- live RotoWire NFL import (no manual CSV
+    # needed), the NFL sibling of clients/rotowire.py's MLB version.
+    # --------------------------------------------------------------------
+    print("\nRotoWire live NFL projections import (clients/rotowire_nfl.py)")
+
+    # Fixture shaped exactly like RotoWire's real slate-list.php response
+    # (confirmed live against https://www.rotowire.com/daily/nfl/api/
+    # slate-list.php and .../players.php while building this feature):
+    # a real, observed preseason/offseason state where NO Classic slate
+    # is flagged defaultSlate yet, alongside a Showdown slate (wrong
+    # contest type, must be excluded) and a "Preseason" Classic slate
+    # (real but not the main slate -- must be excluded in favor of "All").
+    rw_nfl_slate_list_no_default = {
+        "slates": [
+            {"slateID": 9735, "contestType": "Classic", "slateName": "Preseason",
+             "startDateOnly": "2026-08-27", "defaultSlate": False},
+            {"slateID": 9690, "contestType": "Classic", "slateName": "All",
+             "startDateOnly": "2026-09-13", "defaultSlate": False},
+            {"slateID": 9738, "contestType": "Showdown", "slateName": "LAR @ LAC",
+             "startDateOnly": "2026-08-27", "defaultSlate": False},
+        ]
+    }
+    rw_nfl_slate = rotowire_nfl._pick_classic_slate(rw_nfl_slate_list_no_default)
+    check("_pick_classic_slate falls back to the slate named 'All' when nothing is flagged "
+          "defaultSlate yet (the real, observed preseason state) -- not the earlier-dated "
+          "'Preseason' slate or the Showdown slate",
+          rw_nfl_slate["slateID"] == 9690, str(rw_nfl_slate))
+
+    # Once the season is under way, a real defaultSlate flag takes clear
+    # priority over the "All" fallback, even if another Classic slate is
+    # also confusingly named "All".
+    rw_nfl_slate_list_with_default = {
+        "slates": [
+            {"slateID": 9600, "contestType": "Classic", "slateName": "All",
+             "startDateOnly": "2026-09-06", "defaultSlate": False},
+            {"slateID": 9690, "contestType": "Classic", "slateName": "All",
+             "startDateOnly": "2026-09-13", "defaultSlate": True},
+        ]
+    }
+    rw_nfl_slate_2 = rotowire_nfl._pick_classic_slate(rw_nfl_slate_list_with_default)
+    check("_pick_classic_slate prefers a real defaultSlate flag over the 'All'-name fallback",
+          rw_nfl_slate_2["slateID"] == 9690, str(rw_nfl_slate_2))
+
+    try:
+        rotowire_nfl._pick_classic_slate(
+            {"slates": [s for s in rw_nfl_slate_list_no_default["slates"] if s["slateName"] != "All"]}
+        )
+        check("_pick_classic_slate raises a clear ApiError with no default AND no 'All'-named "
+              "Classic slate either", False, "")
+    except rotowire_nfl.ApiError:
+        check("_pick_classic_slate raises a clear ApiError with no default AND no 'All'-named "
+              "Classic slate either", True, "")
+
+    # Fixture shaped exactly like RotoWire's real players.php response for
+    # NFL (confirmed live -- genuinely different from MLB's: no `lineup`
+    # field, `pos` already includes DK's own "FLEX" tag, and a team-
+    # defense row's firstName/lastName is the city/nickname pair).
+    rw_nfl_players_fixture = [
+        {
+            "firstName": "Jahmyr", "lastName": "Gibbs", "team": {"abbr": "det"},
+            "pos": ["RB", "FLEX"], "pts": "22.39", "rostership": 49.2, "salary": 8000,
+        },
+        {
+            "firstName": "Jacksonville", "lastName": "Jaguars", "team": {"abbr": "jax"},
+            "pos": ["DST"], "pts": "8.54", "rostership": 6.7, "salary": 3400,
+        },
+        # No salary posted yet -- must be skipped, not crash or default to 0.
+        {
+            "firstName": "No", "lastName": "Salary", "team": {"abbr": "sea"},
+            "pos": ["WR"], "pts": "10.0", "rostership": 5.0, "salary": None,
+        },
+        # No name at all -- must be skipped.
+        {
+            "firstName": "", "lastName": "", "team": {"abbr": "sea"},
+            "pos": ["WR"], "pts": "5.0", "rostership": 1.0, "salary": 3000,
+        },
+    ]
+    rw_nfl_rows = rotowire_nfl._parse_players(rw_nfl_players_fixture)
+    check("_parse_players skips rows with no salary and no name posted yet, keeping only the "
+          "2 real ones",
+          len(rw_nfl_rows) == 2, str(rw_nfl_rows))
+    check("_parse_players joins firstName/lastName into a full name and uppercases the team abbrev",
+          rw_nfl_rows[0] == {
+              "name": "Jahmyr Gibbs", "normalized_name": player_match.normalize_name("Jahmyr Gibbs"),
+              "team": "DET", "position": "RB/FLEX", "fpts": 22.39, "ownership_pct": 49.2,
+              "salary": 8000, "lineup_spot": None,
+          },
+          str(rw_nfl_rows[0]))
+    check("_parse_players carries a team-defense row's city/nickname through as its 'name', "
+          "same as a real DK salary export would",
+          rw_nfl_rows[1]["name"] == "Jacksonville Jaguars" and rw_nfl_rows[1]["position"] == "DST",
+          str(rw_nfl_rows[1]))
+    check("_parse_players always reports lineup_spot=None -- NFL has no batting-order equivalent, "
+          "unlike MLB's real RotoWire import",
+          all(r["lineup_spot"] is None for r in rw_nfl_rows), str(rw_nfl_rows))
+    check("_parse_players returns an empty list for an empty payload, not a crash",
+          rotowire_nfl._parse_players([]) == [] and rotowire_nfl._parse_players(None) == [], "")
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")

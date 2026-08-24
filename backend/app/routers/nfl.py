@@ -7,8 +7,8 @@ from typing import Any
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
-from app.clients import nfl
-from app.services import nfl_optimizer, nfl_slate, projections, salaries
+from app.clients import nfl, rotowire_nfl
+from app.services import nfl_optimizer, nfl_slate, player_match, projections, salaries
 
 router = APIRouter(prefix="/api/nfl", tags=["nfl"])
 
@@ -83,6 +83,55 @@ async def upload_projections(
         )
     projections.store(nfl_slate.week_key(resolved_season, resolved_week), rows)
     return {"season": resolved_season, "week": resolved_week, "players_loaded": len(rows)}
+
+
+@router.post("/projections/refresh-rotowire")
+async def refresh_rotowire_projections(
+    season: int | None = Query(None),
+    week: int | None = Query(None),
+    refresh: bool = Body(
+        False, embed=True,
+        description="Bypass the cache and re-pull live from RotoWire -- use close to lock for newly confirmed lineups",
+    ),
+) -> dict[str, Any]:
+    """
+    Pull RotoWire's own live NFL optimizer player pool directly from
+    their site (clients/rotowire_nfl.py) instead of a manual CSV
+    download/upload -- their main Classic DK slate. Unlike MLB's
+    equivalent endpoint, this does NOT also derive DK salaries from the
+    same pull: RotoWire's NFL export has no DK numeric player id, and
+    NFL's optimizer output genuinely needs one (see
+    salaries.from_rotowire_rows()'s own docstring for why that helper
+    is MLB-only). Upload or refresh a real DK salary CSV separately.
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    try:
+        slate = await rotowire_nfl.get_current_slate(force=refresh)
+        rows = await rotowire_nfl.get_slate_players(slate["slateID"], force=refresh)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Couldn't reach RotoWire: {exc}") from exc
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No players found in RotoWire's live slate -- it may not be posted yet.",
+        )
+
+    week_key = nfl_slate.week_key(resolved_season, resolved_week)
+    projections.store(week_key, rows)
+    result: dict[str, Any] = {"season": resolved_season, "week": resolved_week, "players_loaded": len(rows)}
+
+    existing_salaries = salaries.load(week_key)
+    if existing_salaries:
+        # A DK salary CSV is already loaded for this week -- run the
+        # same name-matching used for the live slate now, so a
+        # RotoWire/DraftKings spelling mismatch shows up immediately
+        # instead of silently leaving that player's projection blank.
+        lookup = salaries.build_lookup(existing_salaries)
+        bad = player_match.unmatched(rows, lookup, fuzzy=True)
+        result["matched_to_slate"] = len(rows) - len(bad)
+        if bad:
+            result["unmatched"] = bad
+    return result
 
 
 @router.get("/projections")
