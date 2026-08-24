@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
 from app.clients import nfl  # noqa: E402
-from app.services import nfl_optimizer, nfl_scoring, player_match, salaries  # noqa: E402
+from app.services import nfl_dk_points, nfl_optimizer, nfl_scoring, player_match, salaries  # noqa: E402
 
 _FAKE_CACHE: dict[str, object] = {}
 
@@ -156,41 +156,53 @@ def main() -> int:
           extreme_pace["value"] == nfl_scoring.PACE_MAX_ADJUSTMENT, str(extreme_pace))
 
     # --------------------------------------------------------------------
-    # clients/nfl.py -- DK fantasy points from raw box-score counting
-    # stats (the prior-season defense/pace aggregation's building block)
+    # services/nfl_dk_points.py -- DK fantasy points from raw box-score
+    # counting stats (the prior-season defense/pace aggregation's, and
+    # a future variance model's, building block). Moved out of
+    # clients/nfl.py's own private _dk_fantasy_points() into a
+    # standalone module mirroring mlb_dk_points.py -- inputs are
+    # already-numeric here, matching clients/nfl._parse_stat_row()'s
+    # output and mlb_dk_points.py's own established convention.
     # --------------------------------------------------------------------
-    print("\nDK fantasy points from raw prior-season box-score stats")
-    qb_row = {"passing_yards": "320", "passing_tds": "2", "interceptions": "1"}
+    print("\nDK fantasy points from raw box-score stats (nfl_dk_points.py)")
+    qb_row = {"passing_yards": 320.0, "passing_tds": 2.0, "passing_interceptions": 1.0}
     check("a 320-yard, 2 TD, 1 INT passing game scores the 300-yard bonus correctly",
-          nfl._dk_fantasy_points(qb_row) == 22.8, str(nfl._dk_fantasy_points(qb_row)))
+          nfl_dk_points.game_points(qb_row) == 22.8, str(nfl_dk_points.game_points(qb_row)))
 
-    rb_row = {"rushing_yards": "105", "rushing_tds": "1"}
+    rb_row = {"rushing_yards": 105.0, "rushing_tds": 1.0}
     check("a 105-yard, 1 TD rushing game scores the 100-yard bonus correctly",
-          nfl._dk_fantasy_points(rb_row) == 19.5, str(nfl._dk_fantasy_points(rb_row)))
+          nfl_dk_points.game_points(rb_row) == 19.5, str(nfl_dk_points.game_points(rb_row)))
 
-    rb_no_bonus = {"rushing_yards": "80", "rushing_tds": "0"}
+    rb_no_bonus = {"rushing_yards": 80.0, "rushing_tds": 0.0}
     check("rushing under 100 yards doesn't get the bonus",
-          nfl._dk_fantasy_points(rb_no_bonus) == 8.0, str(nfl._dk_fantasy_points(rb_no_bonus)))
+          nfl_dk_points.game_points(rb_no_bonus) == 8.0, str(nfl_dk_points.game_points(rb_no_bonus)))
 
-    fumble_row = {"rushing_yards": "10", "sack_fumbles_lost": "1", "rushing_2pt_conversions": "1"}
+    fumble_row = {"rushing_yards": 10.0, "sack_fumbles_lost": 1.0, "rushing_2pt_conversions": 1.0}
     check("lost fumbles and 2pt conversions are scored correctly",
-          nfl._dk_fantasy_points(fumble_row) == 1.0 - 1 + 2, str(nfl._dk_fantasy_points(fumble_row)))
+          nfl_dk_points.game_points(fumble_row) == 1.0 - 1 + 2, str(nfl_dk_points.game_points(fumble_row)))
 
     print("\nPrior-season defense-vs-position + pace aggregation (fake CSV, no network)")
+    # Column names match the LIVE "stats_player_week_{season}" release
+    # (clients/nfl.py migrated to it this pass -- the old "player_stats"
+    # release it used to read was deprecated by nflverse and never got
+    # a 2025 file at all, a real, live gap not a hypothetical one).
+    # Two real renames from the old release: recent_team -> team,
+    # interceptions -> passing_interceptions.
     fake_csv = (
-        "recent_team,season,week,season_type,opponent_team,position_group,attempts,carries,"
-        "passing_yards,passing_tds,interceptions,rushing_yards,rushing_tds,receptions,"
+        "player_id,player_display_name,team,season,week,season_type,opponent_team,"
+        "position,position_group,attempts,carries,"
+        "passing_yards,passing_tds,passing_interceptions,rushing_yards,rushing_tds,receptions,"
         "receiving_yards,receiving_tds,sack_fumbles_lost,rushing_fumbles_lost,"
         "receiving_fumbles_lost,passing_2pt_conversions,rushing_2pt_conversions,"
         "receiving_2pt_conversions,special_teams_tds\n"
-        "AAA,2099,1,REG,BBB,RB,0,20,0,0,0,100,1,0,0,0,0,0,0,0,0,0,0\n"
-        "AAA,2099,2,REG,BBB,RB,0,15,0,0,0,50,0,0,0,0,0,0,0,0,0,0,0\n"
-        "AAA,2099,1,PRE,BBB,RB,0,999,0,0,0,999,1,0,0,0,0,0,0,0,0,0,0\n"
-        "BBB,2099,1,REG,AAA,WR,30,0,0,0,0,0,0,5,80,1,0,0,0,0,0,0,0\n"
-        "BBB,2099,2,REG,AAA,WR,25,0,0,0,0,0,0,3,40,0,0,0,0,0,0,0,0\n"
+        "9001,RB One,AAA,2099,1,REG,BBB,RB,RB,0,20,0,0,0,100,1,0,0,0,0,0,0,0,0,0\n"
+        "9001,RB One,AAA,2099,2,REG,BBB,RB,RB,0,15,0,0,0,50,0,0,0,0,0,0,0,0,0,0\n"
+        "9001,RB One,AAA,2099,1,PRE,BBB,RB,RB,0,999,0,0,0,999,1,0,0,0,0,0,0,0,0,0\n"
+        "9002,WR One,BBB,2099,1,REG,AAA,WR,WR,30,0,0,0,0,0,0,5,80,1,0,0,0,0,0,0,0\n"
+        "9002,WR One,BBB,2099,2,REG,AAA,WR,WR,25,0,0,0,0,0,0,3,40,0,0,0,0,0,0,0,0\n"
     )
 
-    async def _fake_loader(season):
+    async def _fake_loader(season, *, force=False):
         return fake_csv
 
     cache.get = _fake_cache_get
@@ -211,6 +223,36 @@ def main() -> int:
           context["pace"] == {"AAA": 17.5, "BBB": 27.5}, str(context["pace"]))
     check("league_avg_pace averages across every team with pace data",
           context["league_avg_pace"] == 22.5, str(context["league_avg_pace"]))
+
+    # --------------------------------------------------------------------
+    # clients/nfl.py -- get_player_game_log() (real per-player, per-game
+    # rows -- the piece MLB has via clients/mlb.get_player_game_log()
+    # that NFL didn't have at all until this pass). Reuses the same fake
+    # CSV/loader as the prior-season-context block above.
+    # --------------------------------------------------------------------
+    print("\nget_player_game_log(): real per-player, per-game rows")
+    rb_log = asyncio.run(nfl.get_player_game_log("9001", 2099))
+    check("get_player_game_log returns one row per REGULAR-SEASON game, excluding preseason",
+          len(rb_log) == 2, str(rb_log))
+    check("get_player_game_log's rows are sorted by week",
+          [g["week"] for g in rb_log] == [1, 2], str([g["week"] for g in rb_log]))
+    check("get_player_game_log's rows have already-numeric stats, ready for "
+          "nfl_dk_points.game_points() with no further parsing",
+          rb_log[0]["rushing_yards"] == 100.0 and isinstance(rb_log[0]["rushing_yards"], float),
+          str(rb_log[0]))
+    check("get_player_game_log reads the real team field (the live release's 'team' column, "
+          "not the deprecated release's 'recent_team')",
+          rb_log[0]["team"] == "AAA" and rb_log[0]["opponent_team"] == "BBB",
+          str(rb_log[0]))
+    check("get_player_game_log's rows feed nfl_dk_points.game_points() directly and reproduce "
+          "the same DK points get_prior_season_context() computed internally for this exact game "
+          "(100 rushing yards + 1 TD + the 100-yard bonus == 19.0, matching the 12.0 average "
+          "already confirmed above from this same game plus week 2's 5.0)",
+          nfl_dk_points.game_points(rb_log[0]) == 19.0, str(nfl_dk_points.game_points(rb_log[0])))
+    check("get_player_game_log filters to only the requested player_id, not every player in the file",
+          all(g["player_id"] == "9001" for g in rb_log), str(rb_log))
+    check("get_player_game_log returns an empty list for a player with no games logged this season",
+          asyncio.run(nfl.get_player_game_log("no-such-player", 2099)) == [], "")
 
     # --------------------------------------------------------------------
     # salaries.py -- dk_id capture (needed since NFL has no separate

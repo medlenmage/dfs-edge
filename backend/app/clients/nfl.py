@@ -28,18 +28,29 @@ from typing import Any
 from app.cache import cached
 from app.clients.http import get_text
 from app.config import get_settings
+from app.services import nfl_dk_points
 
 GAMES_URL = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
+# The "player_stats" release this used to point at was deprecated by
+# nflverse in favor of "stats_player" (confirmed live) and was never
+# updated with a 2025 file at all -- a real, live gap, not a
+# hypothetical one. "stats_player_week_{season}" is the per-game
+# (not season-aggregate) weekly file, one row per player per game,
+# covering both 2024 and 2025 as of writing. Its column names drifted
+# from the deprecated release in two places _parse_stat_row() below
+# accounts for: "recent_team" -> "team", "interceptions" ->
+# "passing_interceptions".
 PLAYER_STATS_URL_TEMPLATE = (
-    "https://github.com/nflverse/nflverse-data/releases/download/player_stats/player_stats_{season}.csv"
+    "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{season}.csv"
 )
 
-# The most recent season nflverse's player_stats release actually has
-# full data for. This should track "current season - 1" once a season
-# is under way, but nflverse hadn't published 2025 stats yet as of when
-# this was built -- a 404 on a bumped year just means "not yet," bump
-# it back down until they catch up.
-PRIOR_SEASON = 2024
+# The most recent FULLY COMPLETED season -- used as the default "prior
+# season" context (defense-vs-position, pace) until the current
+# season has played enough games of its own to trust in-season
+# sampling. Bump this once a year, after the prior season's playoffs
+# wrap (not on the calendar new year -- the season named for the
+# earlier year runs into February).
+PRIOR_SEASON = 2025
 
 # The only position_group values DK's Classic roster scores individually
 # (DST is scored as a team, not from these per-player rows).
@@ -167,44 +178,49 @@ def implied_team_totals(game: dict[str, Any]) -> dict[str, float | None]:
     return {"home": round(half_total - half_spread, 1), "away": round(half_total + half_spread, 1)}
 
 
-def _dk_fantasy_points(row: dict[str, Any]) -> float:
+def _parse_stat_row(row: dict[str, str]) -> dict[str, Any]:
     """
-    DraftKings Classic NFL scoring computed from raw nflverse per-game
-    counting stats. Deliberately not the row's own `fantasy_points_ppr`
-    column -- that's generic PPR scoring, not DK's: it skips DK's
-    300/100-yard bonuses and uses different interception/fumble
-    penalties.
+    One raw nflverse player_stats CSV row -> a clean dict with every
+    counting stat converted to a real number -- shared by
+    get_player_game_log() and get_prior_season_context() so both work
+    from identically-typed data, and nfl_dk_points.game_points() never
+    has to re-parse strings (matching mlb_dk_points.py's own
+    already-numeric-input convention).
     """
-    pts = 0.0
-    py = _f(row.get("passing_yards")) or 0.0
-    pts += py * 0.04 + (_f(row.get("passing_tds")) or 0.0) * 4 - (_f(row.get("interceptions")) or 0.0)
-    if py >= 300:
-        pts += 3
-    ry = _f(row.get("rushing_yards")) or 0.0
-    pts += ry * 0.1 + (_f(row.get("rushing_tds")) or 0.0) * 6
-    if ry >= 100:
-        pts += 3
-    rey = _f(row.get("receiving_yards")) or 0.0
-    pts += (_f(row.get("receptions")) or 0.0) + rey * 0.1 + (_f(row.get("receiving_tds")) or 0.0) * 6
-    if rey >= 100:
-        pts += 3
-    fumbles_lost = (
-        (_f(row.get("sack_fumbles_lost")) or 0.0)
-        + (_f(row.get("rushing_fumbles_lost")) or 0.0)
-        + (_f(row.get("receiving_fumbles_lost")) or 0.0)
-    )
-    pts -= fumbles_lost
-    two_pt = (
-        (_f(row.get("passing_2pt_conversions")) or 0.0)
-        + (_f(row.get("rushing_2pt_conversions")) or 0.0)
-        + (_f(row.get("receiving_2pt_conversions")) or 0.0)
-    )
-    pts += two_pt * 2
-    pts += (_f(row.get("special_teams_tds")) or 0.0) * 6
-    return pts
+    return {
+        "player_id": row.get("player_id"),
+        "player_name": row.get("player_display_name") or row.get("player_name"),
+        "season": _i(row.get("season")),
+        "week": _i(row.get("week")),
+        "season_type": row.get("season_type"),
+        "game_id": row.get("game_id"),
+        "team": row.get("team"),
+        "opponent_team": row.get("opponent_team"),
+        "position": row.get("position"),
+        "position_group": row.get("position_group"),
+        "attempts": _f(row.get("attempts")) or 0.0,
+        "completions": _f(row.get("completions")) or 0.0,
+        "passing_yards": _f(row.get("passing_yards")) or 0.0,
+        "passing_tds": _f(row.get("passing_tds")) or 0.0,
+        "passing_interceptions": _f(row.get("passing_interceptions")) or 0.0,
+        "carries": _f(row.get("carries")) or 0.0,
+        "rushing_yards": _f(row.get("rushing_yards")) or 0.0,
+        "rushing_tds": _f(row.get("rushing_tds")) or 0.0,
+        "receptions": _f(row.get("receptions")) or 0.0,
+        "targets": _f(row.get("targets")) or 0.0,
+        "receiving_yards": _f(row.get("receiving_yards")) or 0.0,
+        "receiving_tds": _f(row.get("receiving_tds")) or 0.0,
+        "sack_fumbles_lost": _f(row.get("sack_fumbles_lost")) or 0.0,
+        "rushing_fumbles_lost": _f(row.get("rushing_fumbles_lost")) or 0.0,
+        "receiving_fumbles_lost": _f(row.get("receiving_fumbles_lost")) or 0.0,
+        "passing_2pt_conversions": _f(row.get("passing_2pt_conversions")) or 0.0,
+        "rushing_2pt_conversions": _f(row.get("rushing_2pt_conversions")) or 0.0,
+        "receiving_2pt_conversions": _f(row.get("receiving_2pt_conversions")) or 0.0,
+        "special_teams_tds": _f(row.get("special_teams_tds")) or 0.0,
+    }
 
 
-async def _load_player_stats_csv(season: int) -> str:
+async def _load_player_stats_csv(season: int, *, force: bool = False) -> str:
     settings = get_settings()
 
     async def _load() -> str:
@@ -212,8 +228,38 @@ async def _load_player_stats_csv(season: int) -> str:
         return await get_text(url, source="nflverse player stats")
 
     # A completed season's box scores never change -- cache far longer
-    # than the in-season TTLs above.
-    return await cached(f"nfl:player_stats:{season}:raw", settings.ttl_stats * 4, _load)
+    # than the in-season TTLs above. A season still in progress gets
+    # re-pulled at the same cadence regardless (nflverse republishes
+    # this file weekly during the season); `force` bypasses it either
+    # way for an explicit refresh.
+    return await cached(f"nfl:player_stats:{season}:raw", settings.ttl_stats * 4, _load, force=force)
+
+
+async def get_player_game_log(
+    player_id: str, season: int, *, force: bool = False
+) -> list[dict[str, Any]]:
+    """
+    One row per regular-season game a player appeared in during
+    `season` -- raw counting stats (already numeric, see
+    _parse_stat_row()), sorted by week. The building block a future
+    NFL variance/outcome-pool model would use the same way MLB's
+    variance.py already uses clients/mlb.get_player_game_log() +
+    mlb_dk_points.py: feed each row to nfl_dk_points.game_points() to
+    get a real per-game DK-point outcome.
+
+    Postseason games are excluded -- matching get_prior_season_context()'s
+    own REG-only convention, since not every team makes the playoffs, so
+    mixing them in would make some players' logs deeper than others for
+    a reason unrelated to their actual week-to-week volatility.
+    """
+    text = await _load_player_stats_csv(season, force=force)
+    rows = [
+        _parse_stat_row(row)
+        for row in csv.DictReader(io.StringIO(text))
+        if row.get("player_id") == player_id and row.get("season_type") == "REG"
+    ]
+    rows.sort(key=lambda r: r["week"] or 0)
+    return rows
 
 
 async def get_prior_season_context(season: int = PRIOR_SEASON) -> dict[str, Any]:
@@ -239,24 +285,25 @@ async def get_prior_season_context(season: int = PRIOR_SEASON) -> dict[str, Any]
         # plays[team][week] = offensive plays run that game
         plays: dict[str, dict[int, float]] = {}
 
-        for row in csv.DictReader(io.StringIO(text)):
-            if row.get("season_type") != "REG":
+        for raw_row in csv.DictReader(io.StringIO(text)):
+            if raw_row.get("season_type") != "REG":
                 continue
-            week = _i(row.get("week"))
+            row = _parse_stat_row(raw_row)
+            week = row["week"]
             if week is None:
                 continue
 
-            team = row.get("recent_team") or ""
+            team = row["team"] or ""
             if team:
                 team_plays = plays.setdefault(team, {})
-                snaps = (_f(row.get("attempts")) or 0.0) + (_f(row.get("carries")) or 0.0)
+                snaps = row["attempts"] + row["carries"]
                 team_plays[week] = team_plays.get(week, 0.0) + snaps
 
-            pos_group = row.get("position_group") or ""
-            opp = row.get("opponent_team") or ""
+            pos_group = row["position_group"] or ""
+            opp = row["opponent_team"] or ""
             if opp and pos_group in _DK_RELEVANT_POSITIONS:
                 pos_allowed = allowed.setdefault(opp, {}).setdefault(pos_group, {})
-                pos_allowed[week] = pos_allowed.get(week, 0.0) + _dk_fantasy_points(row)
+                pos_allowed[week] = pos_allowed.get(week, 0.0) + nfl_dk_points.game_points(row)
 
         defense_vs_position = {
             team: {pos: round(sum(weeks.values()) / len(weeks), 2) for pos, weeks in by_pos.items()}
