@@ -35,7 +35,6 @@ async def health() -> dict[str, Any]:
         },
         "config": {
             "model": settings.anthropic_model if settings.has_claude else None,
-            "odds_source": settings.odds_source,
             "bookmakers": settings.odds_bookmakers if settings.has_odds else [],
             "cache_ttl_seconds": {
                 "schedule": settings.ttl_schedule,
