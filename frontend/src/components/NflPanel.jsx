@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { NflContestGeneratorPanel } from './NflContestGeneratorPanel'
 import { NflLineupsPanel } from './NflLineupsPanel'
 
 function currentNflSeason() {
@@ -252,10 +253,14 @@ export function NflPanel() {
             <button className={`tab ${tab === 'lineups' ? 'active' : ''}`} onClick={() => setTab('lineups')}>
               Lineups
             </button>
+            <button className={`tab ${tab === 'contest' ? 'active' : ''}`} onClick={() => setTab('contest')}>
+              Contest Generator
+            </button>
           </div>
 
           {tab === 'matchups' && <NflMatchups slate={slate} />}
           {tab === 'lineups' && <NflLineupsPanel season={slate.season} week={slate.week} slate={slate} />}
+          {tab === 'contest' && <NflContestGeneratorPanel season={slate.season} week={slate.week} />}
         </>
       )}
     </div>
