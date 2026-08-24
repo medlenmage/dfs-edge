@@ -266,11 +266,12 @@ export default function App() {
         </div>
       )}
 
-      {health && !features.betting_lines && (
+      {health && !features.player_props && (
         <div className="notice" style={{ marginBottom: 16 }}>
-          Betting lines are off — add <code>ODDS_API_KEY</code> to <code>.env</code>{' '}
-          to turn on game totals and implied team runs. Everything else works
-          without it, but implied runs are one of the strongest signals here.
+          Player props are off — game totals and implied team runs come free
+          from FantasyLabs regardless, but home run/hit/strikeout market
+          probabilities need <code>ODDS_API_KEY</code> (and{' '}
+          <code>ODDS_FETCH_PROPS=true</code>) in <code>.env</code>.
         </div>
       )}
 
@@ -419,8 +420,8 @@ export default function App() {
         className="dim"
         style={{ fontSize: 12, marginTop: 40, paddingTop: 16, borderTop: '1px solid var(--gridline)' }}
       >
-        Data: MLB Stats API · Open-Meteo
-        {features.betting_lines ? ' · The Odds API' : ''}
+        Data: MLB Stats API · Open-Meteo · FantasyLabs
+        {features.player_props ? ' · The Odds API (props)' : ''}
         {slate?.generated_at && ` · built ${new Date(slate.generated_at).toLocaleTimeString()}`}
         {health?.odds_api_credits?.remaining &&
           ` · ${health.odds_api_credits.remaining} odds credits left`}

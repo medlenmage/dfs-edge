@@ -1,8 +1,18 @@
 import { ScoreMeter } from './ScoreMeter'
 import { localTime } from '../format'
 
+// e.g. "3.9 → 4.1" when the line has moved, or just "4.1" when it hasn't
+// (or there's no open value to compare against).
+function openLive(open, current) {
+  if (current == null) return null
+  if (open == null || open === current) return `${current}`
+  return `${open} → ${current}`
+}
+
 function TeamRow({ team, opponent, isHome }) {
   const p = opponent.probable_pitcher
+  const vegasRuns = openLive(team.vegas_implied_runs_open, team.vegas_implied_runs_current)
+  const vegasMl = openLive(team.vegas_moneyline_open, team.vegas_moneyline_current)
   return (
     <div className="team-row">
       <div>
@@ -16,6 +26,11 @@ function TeamRow({ team, opponent, isHome }) {
           {p?.throws ? ` (${p.throws}HP)` : ''}
           {p?.season?.era != null ? ` · ${p.season.era} ERA` : ''}
         </div>
+        {(vegasRuns || vegasMl) && (
+          <div className="sub-line dim" title="FantasyLabs Vegas dashboard, open → live">
+            Vegas{vegasRuns ? ` ${vegasRuns}R` : ''}{vegasMl ? ` · ML ${vegasMl}` : ''}
+          </div>
+        )}
         {team.injuries?.length > 0 && (
           <div className="sub-line">
             <span className="badge risk">{team.injuries.length} on IL</span>{' '}
@@ -41,7 +56,8 @@ function TeamRow({ team, opponent, isHome }) {
 export function GameCard({ game }) {
   const v = game.venue
   const w = game.weather || {}
-  const b = game.betting || {}
+  const vegas = game.vegas || {}
+  const vegasTotal = openLive(vegas.total_open, vegas.total_current)
 
   return (
     <div className="card">
@@ -55,7 +71,11 @@ export function GameCard({ game }) {
       <div className="sub-line" style={{ marginBottom: 8 }}>{v.name}</div>
 
       <div className="env-row">
-        {b.total != null && <span className="badge">O/U {b.total}</span>}
+        {vegasTotal && (
+          <span className="badge" title="FantasyLabs Vegas dashboard, open → live">
+            O/U {vegasTotal}
+          </span>
+        )}
         <span className="badge">{v.park_factors.hr.toFixed(2)}× HR park</span>
         {v.elevation_ft >= 3000 && (
           <span className="badge warn">{v.elevation_ft.toLocaleString()} ft</span>

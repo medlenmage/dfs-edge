@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import draftkings, mlb, odds, rotowire, savant, weather  # noqa: E402
+from app.clients import draftkings, fantasylabs, mlb, odds, rotowire, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     atbat_sim,
@@ -190,6 +190,21 @@ FAKE_LINES = [
     }
 ]
 
+FAKE_VEGAS = [
+    {
+        "event_id": 205310620,
+        "home_team": "Boston Red Sox", "away_team": "New York Yankees",
+        "game_time_utc": f"{DAY}T23:10:00",
+        "home_spread_open": 1.5, "home_spread_current": 1.0,
+        "away_spread_open": -1.5, "away_spread_current": -1.0,
+        "home_moneyline_open": 110, "home_moneyline_current": 117,
+        "away_moneyline_open": -132, "away_moneyline_current": -135,
+        "total_open": 9.0, "total_current": 9.5,
+        "home_implied_runs_open": 3.9, "home_implied_runs_current": 4.1,
+        "away_implied_runs_open": 5.1, "away_implied_runs_current": 5.4,
+    }
+]
+
 FAKE_WEATHER = {
     "temp_f": 88.0, "humidity_pct": 55, "precip_chance_pct": 5,
     "wind_mph": 12.0, "wind_dir_deg": 200.0, "pressure_hpa": 1010,
@@ -268,6 +283,10 @@ async def fake_lines(sport="mlb", *, day=None, force=False):
     return FAKE_LINES
 
 
+async def fake_fantasylabs_vegas(day, *, force=False):
+    return FAKE_VEGAS
+
+
 async def fake_weather(lat, lon, when):
     return FAKE_WEATHER
 
@@ -332,6 +351,7 @@ def patch() -> None:
     mlb.get_lineups = fake_lineups
     mlb.get_team_injuries = fake_injuries
     odds.get_game_lines = fake_lines
+    fantasylabs.get_vegas_odds = fake_fantasylabs_vegas
     weather.get_game_weather = fake_weather
     savant.get_hitter_batted_ball = fake_savant_hit
     savant.get_pitcher_batted_ball = fake_savant_pitch
@@ -374,10 +394,27 @@ async def main() -> int:
     check("Fenway park factors loaded",
           game["venue"]["park_factors"]["runs"] == 1.10,
           str(game["venue"]["park_factors"]))
-    check("betting line matched by team name",
-          game["betting"].get("total") == 9.5)
-    check("implied runs split correctly",
-          game["away"]["implied_runs"] == 5.5 and game["home"]["implied_runs"] == 4.0)
+    check("betting (now FantasyLabs-sourced) line matched by team name",
+          game["betting"].get("total") == 9.5, str(game["betting"]))
+    check("betting.book correctly labels the new source",
+          game["betting"].get("book") == "FantasyLabs (consensus)", str(game["betting"]))
+    check("implied runs split correctly (sourced from FantasyLabs' current line, not The Odds API)",
+          game["away"]["implied_runs"] == 5.4 and game["home"]["implied_runs"] == 4.1,
+          str((game["away"]["implied_runs"], game["home"]["implied_runs"])))
+    check("FantasyLabs vegas line matched by team name (open + current total)",
+          game["vegas"].get("total_open") == 9.0 and game["vegas"].get("total_current") == 9.5,
+          str(game["vegas"]))
+    check("FantasyLabs open/current spread, moneyline, implied runs split correctly per side",
+          game["home"]["vegas_spread_open"] == 1.5
+          and game["home"]["vegas_spread_current"] == 1.0
+          and game["home"]["vegas_moneyline_open"] == 110
+          and game["home"]["vegas_moneyline_current"] == 117
+          and game["home"]["vegas_implied_runs_open"] == 3.9
+          and game["home"]["vegas_implied_runs_current"] == 4.1
+          and game["away"]["vegas_spread_open"] == -1.5
+          and game["away"]["vegas_moneyline_current"] == -135
+          and game["away"]["vegas_implied_runs_current"] == 5.4,
+          str({k: v for k, v in game["home"].items() if k.startswith("vegas_")}))
     check("weather attached", game["weather"].get("temp_f") == 88.0)
     check("hot weather boosts carry",
           game["weather"]["temperature_effect"]["hr_multiplier"] > 1.0,
@@ -960,6 +997,41 @@ async def main() -> int:
     check("_parse_players reads an empty (bench) lineup slot as lineup_spot=None, same as a "
           "manual CSV upload's 'BN'",
           rw_rows[2]["lineup_spot"] is None, str(rw_rows[2]))
+
+    print("\nFantasyLabs Vegas odds import (clients/fantasylabs.py) -- open + live lines")
+
+    fl_event_fixture = {
+        "EventId": 205310620,
+        "EventDetails": {
+            "Properties": {
+                "HomeTeam": "Detroit Tigers", "VisitorTeam": "Tampa Bay Rays",
+                "EventDateTime": "2026-08-24T18:40:00",
+                "HomeGameSpreadOpen": 1.50, "HomeGameSpreadCurrent": 1.50,
+                "VisitorGameSpreadOpen": -1.50, "VisitorGameSpreadCurrent": -1.50,
+                "HomeGameMoneylineOpen": 110, "HomeGameMoneylineCurrent": 117,
+                "VisitorGameMoneylineOpen": -132, "VisitorGameMoneylineCurrent": -135,
+                "HomeGameOUOpen": 7.50, "HomeGameOUCurrent": 7.50,
+                "HomeVegasRunsOpen": 3.6, "HomeVegasRuns": 3.6,
+                "VisitorVegasRunsOpen": 4.1, "VisitorVegasRuns": 4.1,
+            },
+        },
+    }
+    fl_row = fantasylabs._parse_event(fl_event_fixture)
+    check("_parse_event reads team names, event id, and open/current spread/moneyline/total",
+          fl_row == {
+              "event_id": 205310620,
+              "home_team": "Detroit Tigers", "away_team": "Tampa Bay Rays",
+              "game_time_utc": "2026-08-24T18:40:00",
+              "home_spread_open": 1.50, "home_spread_current": 1.50,
+              "away_spread_open": -1.50, "away_spread_current": -1.50,
+              "home_moneyline_open": 110, "home_moneyline_current": 117,
+              "away_moneyline_open": -132, "away_moneyline_current": -135,
+              "total_open": 7.50, "total_current": 7.50,
+              "home_implied_runs_open": 3.6, "home_implied_runs_current": 3.6,
+              "away_implied_runs_open": 4.1, "away_implied_runs_current": 4.1,
+          }, str(fl_row))
+    check("_parse_event returns None for a malformed row rather than crashing",
+          fantasylabs._parse_event({}) is None)
 
     def fake_salary_load_in_slate(day):
         return [salary_row("Big Righty Bat", "NYY", 4200, 9.5, game_info="NYY@BOS 08/14/2026 07:10PM ET")]

@@ -7,7 +7,9 @@ THE FLOW
 1. Pull today's schedule (games, venues, probable pitchers).
 2. Pull the whole league's splits in a handful of requests, not one per
    player.
-3. Pull betting lines and match them to games by team name.
+3. Pull FantasyLabs' free Vegas lines (score/total/implied runs, open
+   and current) and The Odds API's event ids (needed only for player
+   props), matching both to games by team name.
 4. Pull a weather forecast per outdoor park.
 5. For each hitter, assemble the components and score the matchup.
 
@@ -24,7 +26,7 @@ from datetime import datetime
 from typing import Any
 
 from app import cache
-from app.clients import mlb, odds, savant, weather
+from app.clients import fantasylabs, mlb, odds, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
 from app.services import inhouse_projections, projections, salaries, scoring
 
@@ -147,6 +149,7 @@ async def build_slate(
         "pit_vr": mlb.get_league_splits(season, "vr", "pitching"),
         "pit_season": mlb.get_league_season(season, "pitching"),
         "lines": odds.get_game_lines("mlb", day=day, force=force_refresh),
+        "fantasylabs_vegas": fantasylabs.get_vegas_odds(day, force=force_refresh),
         "savant_hit": savant.get_hitter_batted_ball(season),
         "savant_pitch": savant.get_pitcher_batted_ball(season),
         "bullpen": mlb.get_bullpen_stats(season),
@@ -159,7 +162,7 @@ async def build_slate(
         if isinstance(result, Exception):
             log.warning("Fetch %s failed: %s", key, result)
             warnings.append(f"{key}: {result}")
-            data[key] = [] if key == "lines" else {}
+            data[key] = [] if key in ("lines", "fantasylabs_vegas") else {}
         else:
             data[key] = result
 
@@ -439,7 +442,34 @@ async def _build_game(
             roof_closed = True
 
     # --- Betting line ---
+    # `line` (The Odds API) is kept ONLY for its event_id, needed below to
+    # fetch player props (a per-event Odds API call with no FantasyLabs
+    # equivalent). The actual score/total/spread/moneyline/implied-runs
+    # numbers shown throughout the app now come from FantasyLabs instead
+    # (`betting`, right below) -- free, no credit cost, and it also
+    # carries the opening line `vegas` exposes separately. The Odds API's
+    # own line values are no longer read anywhere.
     line = _match_odds(lines, home_t.get("name"), away_t.get("name"))
+
+    # --- FantasyLabs open/current line (spread, moneyline, total, implied
+    # runs) ---
+    vegas = _match_odds(
+        data.get("fantasylabs_vegas") or [], home_t.get("name"), away_t.get("name")
+    )
+    betting = (
+        {
+            "total": vegas.get("total_current"),
+            "home_moneyline": vegas.get("home_moneyline_current"),
+            "away_moneyline": vegas.get("away_moneyline_current"),
+            "home_spread": vegas.get("home_spread_current"),
+            "away_spread": vegas.get("away_spread_current"),
+            "home_implied_runs": vegas.get("home_implied_runs_current"),
+            "away_implied_runs": vegas.get("away_implied_runs_current"),
+            "book": "FantasyLabs (consensus)",
+        }
+        if vegas
+        else None
+    )
 
     # --- Probable pitchers ---
     home_pp = (teams.get("home") or {}).get("probablePitcher") or {}
@@ -472,21 +502,34 @@ async def _build_game(
             if wx
             else {"note": "roof closed" if roof_closed else "forecast unavailable"}
         ),
-        "betting": line or {"note": "no line available"},
+        "betting": betting or {"note": "no line available"},
+        "vegas": vegas or {"note": "no FantasyLabs line available"},
         "home": {
             "team_id": home_t.get("id"),
             "abbrev": home_abbrev,
             "name": home_t.get("name"),
-            "implied_runs": (line or {}).get("home_implied_runs"),
-            "moneyline": (line or {}).get("home_moneyline"),
+            "implied_runs": (betting or {}).get("home_implied_runs"),
+            "moneyline": (betting or {}).get("home_moneyline"),
+            "vegas_implied_runs_open": (vegas or {}).get("home_implied_runs_open"),
+            "vegas_implied_runs_current": (vegas or {}).get("home_implied_runs_current"),
+            "vegas_moneyline_open": (vegas or {}).get("home_moneyline_open"),
+            "vegas_moneyline_current": (vegas or {}).get("home_moneyline_current"),
+            "vegas_spread_open": (vegas or {}).get("home_spread_open"),
+            "vegas_spread_current": (vegas or {}).get("home_spread_current"),
             "probable_pitcher": home_pitcher,
         },
         "away": {
             "team_id": away_t.get("id"),
             "abbrev": away_t.get("abbreviation"),
             "name": away_t.get("name"),
-            "implied_runs": (line or {}).get("away_implied_runs"),
-            "moneyline": (line or {}).get("away_moneyline"),
+            "implied_runs": (betting or {}).get("away_implied_runs"),
+            "moneyline": (betting or {}).get("away_moneyline"),
+            "vegas_implied_runs_open": (vegas or {}).get("away_implied_runs_open"),
+            "vegas_implied_runs_current": (vegas or {}).get("away_implied_runs_current"),
+            "vegas_moneyline_open": (vegas or {}).get("away_moneyline_open"),
+            "vegas_moneyline_current": (vegas or {}).get("away_moneyline_current"),
+            "vegas_spread_open": (vegas or {}).get("away_spread_open"),
+            "vegas_spread_current": (vegas or {}).get("away_spread_current"),
             "probable_pitcher": away_pitcher,
         },
     }
@@ -526,7 +569,7 @@ async def _build_game(
             home_t.get("id"), season, data, baselines, env,
             opposing_pitcher=away_pitcher, opponent_team_id=away_t.get("id"),
             is_home=True,
-            implied_runs=(line or {}).get("home_implied_runs"),
+            implied_runs=(betting or {}).get("home_implied_runs"),
             confirmed=lineups.get("home") or [],
             team_abbrev=home_abbrev, salary_lookup=salary_lookup,
             projection_lookup=projection_lookup,
@@ -537,7 +580,7 @@ async def _build_game(
             away_t.get("id"), season, data, baselines, env,
             opposing_pitcher=home_pitcher, opponent_team_id=home_t.get("id"),
             is_home=False,
-            implied_runs=(line or {}).get("away_implied_runs"),
+            implied_runs=(betting or {}).get("away_implied_runs"),
             confirmed=lineups.get("away") or [],
             team_abbrev=away_t.get("abbreviation") or "", salary_lookup=salary_lookup,
             projection_lookup=projection_lookup,
