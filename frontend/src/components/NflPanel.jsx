@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { NflContestGeneratorPanel } from './NflContestGeneratorPanel'
 import { NflLineupsPanel } from './NflLineupsPanel'
+import { NflStackTable } from './NflStackTable'
 
 function currentNflSeason() {
   const d = new Date()
@@ -250,6 +251,9 @@ export function NflPanel() {
             <button className={`tab ${tab === 'matchups' ? 'active' : ''}`} onClick={() => setTab('matchups')}>
               Matchups
             </button>
+            <button className={`tab ${tab === 'stacks' ? 'active' : ''}`} onClick={() => setTab('stacks')}>
+              Stacks
+            </button>
             <button className={`tab ${tab === 'lineups' ? 'active' : ''}`} onClick={() => setTab('lineups')}>
               Lineups
             </button>
@@ -259,6 +263,7 @@ export function NflPanel() {
           </div>
 
           {tab === 'matchups' && <NflMatchups slate={slate} />}
+          {tab === 'stacks' && <NflStackTable season={slate.season} week={slate.week} />}
           {tab === 'lineups' && <NflLineupsPanel season={slate.season} week={slate.week} slate={slate} />}
           {tab === 'contest' && <NflContestGeneratorPanel season={slate.season} week={slate.week} />}
         </>

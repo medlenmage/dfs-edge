@@ -395,6 +395,14 @@ export const api = {
     return request(`/api/nfl/slate${qs ? `?${qs}` : ''}`)
   },
 
+  nflStacks: (season, week) => {
+    const params = new URLSearchParams()
+    if (season) params.set('season', season)
+    if (week) params.set('week', week)
+    const qs = params.toString()
+    return request(`/api/nfl/stacks${qs ? `?${qs}` : ''}`)
+  },
+
   nflUploadSalaries: (season, week, file) =>
     uploadFile(`/api/nfl/salaries?season=${season}&week=${week}`, file),
 
