@@ -956,11 +956,20 @@ def main() -> int:
 
     print("\nNFL stack rating (nfl_stack_rating.py) -- Vegas + PROE + real correlation combined")
 
-    shootout = nfl_stack_rating._game_total_component(50.0, 3.5)
-    no_shootout = nfl_stack_rating._game_total_component(50.0, 10.0)
+    shootout = nfl_stack_rating._game_total_component(50.0, 3.5, True)
+    no_shootout = nfl_stack_rating._game_total_component(50.0, 10.0, True)
     check("a 50-pt total with a tight (<=7.5) spread gets a shootout bonus a wide-spread game of the "
           "same total doesn't",
           shootout["value"] > no_shootout["value"], str((shootout, no_shootout)))
+    favored_detail = nfl_stack_rating._game_total_component(44.0, 3.5, True)
+    dog_detail = nfl_stack_rating._game_total_component(44.0, 3.5, False)
+    unknown_detail = nfl_stack_rating._game_total_component(44.0, 3.5, None)
+    check("_game_total_component's detail text and favored field clearly distinguish favored from "
+          "underdog at the same spread magnitude, not just a bare number",
+          favored_detail["favored"] is True and "favored by 3.5" in favored_detail["detail"]
+          and dog_detail["favored"] is False and "underdog by 3.5" in dog_detail["detail"]
+          and unknown_detail["favored"] is None and "favorite unknown" in unknown_detail["detail"],
+          str((favored_detail, dog_detail, unknown_detail)))
 
     proe_capped = nfl_stack_rating._proe_component(100.0)
     check("PROE component is clamped at PROE_MAX_ADJUSTMENT even for an extreme value",

@@ -67,23 +67,44 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, value))
 
 
-def _game_total_component(total_line: float | None, spread_magnitude: float | None) -> dict[str, Any]:
+def _spread_label(spread_magnitude: float | None, favored: bool | None) -> str:
+    """A plain-English favored/underdog read, not just a bare number --
+    the same spread magnitude means something very different for a team
+    favored by 3.5 vs. an underdog by 3.5."""
+    if spread_magnitude is None:
+        return "no spread available"
+    if spread_magnitude == 0:
+        return "pick'em"
+    if favored is None:
+        return f"{spread_magnitude:g}-pt spread (favorite unknown)"
+    return f"favored by {spread_magnitude:g}" if favored else f"underdog by {spread_magnitude:g}"
+
+
+def _game_total_component(
+    total_line: float | None, spread_magnitude: float | None, favored: bool | None
+) -> dict[str, Any]:
     if total_line is None:
-        return {"value": 0.0, "detail": "no game total available"}
+        return {"value": 0.0, "favored": favored, "spread": spread_magnitude, "detail": "no game total available"}
 
     value = _clamp(
         (total_line - LEAGUE_AVG_GAME_TOTAL) * GAME_TOTAL_SENSITIVITY,
         -GAME_TOTAL_MAX_ADJUSTMENT, GAME_TOTAL_MAX_ADJUSTMENT,
     )
-    detail = f"{total_line:g} game total"
+    spread_label = _spread_label(spread_magnitude, favored)
+    detail = f"{total_line:g} game total, {spread_label}"
     if (
         total_line >= SHOOTOUT_MIN_TOTAL
         and spread_magnitude is not None
         and spread_magnitude <= SHOOTOUT_SPREAD_MAX
     ):
         value += SHOOTOUT_BONUS
-        detail += f", shootout spot ({spread_magnitude:g}-pt spread)"
-    return {"value": round(value, 1), "detail": detail}
+        detail += " (shootout spot)"
+    return {
+        "value": round(value, 1),
+        "favored": favored,
+        "spread": spread_magnitude,
+        "detail": detail,
+    }
 
 
 def _proe_component(off_proe: float | None) -> dict[str, Any]:
@@ -168,10 +189,11 @@ def _rate_team(
     implied_total = team_data.get("implied_total")
     total_line = betting.get("total_line")
     spread_magnitude = abs(betting["spread_line"]) if betting.get("spread_line") is not None else None
+    favored = team_data.get("favored")
 
     env = nfl_scoring.team_environment_score(implied_total, is_home=team_data.get("is_home", False))
 
-    game_total = _game_total_component(total_line, spread_magnitude)
+    game_total = _game_total_component(total_line, spread_magnitude, favored)
     team_proe = (proe.get(team) or {}).get("off_proe")
     opp_def_proe = (proe.get(opp) or {}).get("def_proe_allowed")
     proe_c = _proe_component(team_proe)
