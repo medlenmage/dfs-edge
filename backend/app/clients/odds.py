@@ -1,13 +1,25 @@
 """
 Betting lines via The Odds API (the-odds-api.com).
 
+GAME LINES ARE NO LONGER DISPLAYED FROM HERE -- see clients/fantasylabs.py.
+services/mlb_slate.py sources every game's actual score/total/spread/
+moneyline/implied-runs from FantasyLabs' free Vegas dashboard instead
+(no credit cost, and it also has the OPENING line, which this API never
+exposed). `get_game_lines()` below is still called once per slate build,
+but ONLY to read each game's Odds-API `event_id` off the response --
+that id is what `get_player_props()` needs to fetch props for a specific
+game, and FantasyLabs has no props data at all. The h2h/spreads/totals
+values in `get_game_lines()`'s own return shape are computed and cached
+same as always, just no longer read by anything.
+
 CREDIT COST -- read this before turning props on
 ------------------------------------------------
 The Odds API charges "credits". Roughly:
 
   * One /odds call for a whole sport costs
         (number of markets) x (number of regions)
-    ...so pulling h2h + spreads + totals for all of MLB costs 3 credits.
+    ...so pulling h2h + spreads + totals for all of MLB costs 3 credits
+    -- paid purely for the event_id lookup now, see above.
 
   * Player props are priced PER GAME (there's no bulk multi-game props
     call, only per-event). Pulling this app's 3 prop markets
@@ -23,11 +35,12 @@ how many times the slate gets rebuilt. Pass `force=True` (the existing
 pull a genuinely fresh line/prop within the same day.
 
 At that once-a-day cadence, a real 500-credit/month free-tier budget
-covers game lines (3 credits/day = ~90/month) plus 3-market props on a
-realistic ~10-game slate (30 credits/day = ~900/month for props ALONE
-if pulled every single day) -- still tight for a full-season daily
-habit, but the $30/month/20,000-credit plan comfortably covers both at
-this cadence with a lot of room to spare.
+covers game lines (3 credits/day = ~90/month, now spent solely to
+unlock props' event_id) plus 3-market props on a realistic ~10-game
+slate (30 credits/day = ~900/month for props ALONE if pulled every
+single day) -- still tight for a full-season daily habit, but the
+$30/month/20,000-credit plan comfortably covers both at this cadence
+with a lot of room to spare.
 
 Your remaining balance comes back in response headers on every call and
 is surfaced at /api/health so you can keep an eye on it.

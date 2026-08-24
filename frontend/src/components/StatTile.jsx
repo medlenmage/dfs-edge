@@ -65,7 +65,7 @@ export function SlateTiles({ slate }) {
       <StatTile
         label="Average game total"
         value={avgTotal ?? '—'}
-        sub={avgTotal ? 'combined runs, Vegas' : 'add an Odds API key'}
+        sub={avgTotal ? 'combined runs, Vegas' : 'no FantasyLabs line yet'}
       />
       <StatTile
         label="Highest implied team"
