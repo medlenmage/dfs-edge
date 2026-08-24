@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import draftkings, mlb, odds, rotowire, savant, weather  # noqa: E402
+from app.clients import dk_sportsbook, draftkings, mlb, odds, rotowire, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     atbat_sim,
@@ -2491,6 +2491,178 @@ async def main() -> int:
           k_lines[salaries.normalize_name("Gerrit Cole")] == 6.5, str(k_lines))
     check("_market_line_by_name returns an empty dict for no rows, not a crash",
           mlb_slate._market_line_by_name([]) == {}, "")
+
+    print("\nDraftKings Sportsbook odds source (clients/dk_sportsbook.py's own parsing -- "
+          "an ALTERNATIVE free/no-key source to The Odds API, ODDS_SOURCE=draftkings in "
+          "config.py. Built defensively against DK's general public API shape since a live "
+          "payload was never reachable from this dev environment (403 at Akamai's edge) -- "
+          "these tests lock in this module's OWN parsing behavior against a best-effort "
+          "fixture, not a proof the fixture matches DK's real live shape.)")
+
+    dk_eventgroup_fixture = {
+        "eventGroup": {
+            "eventGroupId": 84240,
+            "events": [
+                {
+                    "eventId": "29372173",
+                    "name": "BOS Red Sox @ NYY Yankees",
+                    "startDate": "2026-08-23T23:05:00Z",
+                },
+                {
+                    "eventId": "29372199",
+                    "name": "SEA Mariners @ LAD Dodgers",
+                    "startDate": "2026-08-24T02:10:00Z",
+                },
+            ],
+            "offerCategories": [
+                {
+                    "name": "Game Lines",
+                    "offerSubcategoryDescriptors": [
+                        {
+                            "name": "Moneyline",
+                            "offerSubcategory": {
+                                "offers": [
+                                    [
+                                        {
+                                            "eventId": "29372173",
+                                            "outcomes": [
+                                                {"label": "NYY Yankees", "oddsAmerican": "-150"},
+                                                {"label": "BOS Red Sox", "oddsAmerican": "+130"},
+                                            ],
+                                        }
+                                    ]
+                                ]
+                            },
+                        },
+                        {
+                            "name": "Run Line",
+                            "offerSubcategory": {
+                                "offers": [
+                                    [
+                                        {
+                                            "eventId": "29372173",
+                                            "outcomes": [
+                                                {"label": "NYY Yankees", "line": -1.5, "oddsAmerican": "+120"},
+                                                {"label": "BOS Red Sox", "line": 1.5, "oddsAmerican": "-140"},
+                                            ],
+                                        }
+                                    ]
+                                ]
+                            },
+                        },
+                        {
+                            "name": "Total",
+                            "offerSubcategory": {
+                                "offers": [
+                                    [
+                                        {
+                                            "eventId": "29372173",
+                                            "outcomes": [
+                                                {"label": "Over", "line": 8.5, "oddsAmerican": "-110"},
+                                                {"label": "Under", "line": 8.5, "oddsAmerican": "-110"},
+                                            ],
+                                        }
+                                    ]
+                                ]
+                            },
+                        },
+                    ],
+                },
+                {
+                    "name": "Home Runs",
+                    "offerSubcategoryDescriptors": [
+                        {
+                            "name": "Home Runs",
+                            "offerSubcategory": {
+                                "offers": [
+                                    [
+                                        {
+                                            "eventId": "29372173",
+                                            "outcomes": [
+                                                {"label": "Over", "participant": "Aaron Judge", "line": 0.5, "oddsAmerican": "+180"},
+                                                {"label": "Under", "participant": "Aaron Judge", "line": 0.5, "oddsAmerican": "-220"},
+                                            ],
+                                        }
+                                    ]
+                                ]
+                            }
+                        }
+                    ],
+                },
+                {
+                    "name": "Strikeouts",
+                    "offerSubcategoryDescriptors": [
+                        {
+                            "name": "Strikeouts",
+                            "offerSubcategory": {
+                                "offers": [
+                                    [
+                                        {
+                                            "eventId": "29372173",
+                                            "outcomes": [
+                                                {"label": "Over", "participant": "Gerrit Cole", "line": 6.5, "oddsAmerican": "-110"},
+                                                {"label": "Under", "participant": "Gerrit Cole", "line": 6.5, "oddsAmerican": "-110"},
+                                            ],
+                                        }
+                                    ]
+                                ]
+                            }
+                        }
+                    ],
+                },
+            ],
+        }
+    }
+
+    dk_lines = dk_sportsbook._parse_game_lines(dk_eventgroup_fixture)
+    dk_line_1 = next(l for l in dk_lines if l["event_id"] == "29372173")
+    check("_parse_game_lines reads home/away from DK's own 'AWAY @ HOME' event name convention "
+          "(same convention already confirmed for DK's DFS lobby API in clients/draftkings.py)",
+          dk_line_1["home_team"] == "NYY Yankees" and dk_line_1["away_team"] == "BOS Red Sox",
+          str(dk_line_1))
+    check("_parse_game_lines matches moneyline outcomes to the correct side by team-name label, "
+          "not by outcome order",
+          dk_line_1["home_moneyline"] == -150 and dk_line_1["away_moneyline"] == 130,
+          str(dk_line_1))
+    check("_parse_game_lines reads the run line's spread (not its price) as home/away_spread",
+          dk_line_1["home_spread"] == -1.5 and dk_line_1["away_spread"] == 1.5,
+          str(dk_line_1))
+    check("_parse_game_lines reads the total from the Over row's line",
+          dk_line_1["total"] == 8.5, str(dk_line_1))
+    check("_parse_game_lines computes home/away implied runs from the total and spread, same "
+          "formula as clients/odds.py's _implied_team_runs",
+          dk_line_1["home_implied_runs"] == 5.0 and dk_line_1["away_implied_runs"] == 3.5,
+          str(dk_line_1))
+    check("_parse_game_lines tags every row with book='DraftKings'",
+          dk_line_1["book"] == "DraftKings", str(dk_line_1))
+    dk_line_2 = next(l for l in dk_lines if l["event_id"] == "29372199")
+    check("_parse_game_lines returns an event with no matching Game Lines offers as an empty-line "
+          "row rather than dropping it or crashing",
+          dk_line_2["home_team"] == "LAD Dodgers" and dk_line_2["total"] is None
+          and dk_line_2["home_moneyline"] is None,
+          str(dk_line_2))
+    check("_parse_game_lines returns an empty list for an empty payload, not a crash",
+          dk_sportsbook._parse_game_lines({}) == [], "")
+
+    dk_hr_props = dk_sportsbook._parse_player_props(dk_eventgroup_fixture, event_id="29372173")
+    check("_parse_player_props maps DK's own 'Home Runs' subcategory name to this app's "
+          "batter_home_runs market key (same key clients/odds.py uses)",
+          "batter_home_runs" in dk_hr_props, str(dk_hr_props))
+    judge_over = next(r for r in dk_hr_props["batter_home_runs"] if r["side"] == "Over")
+    check("_parse_player_props reads the player's name from the outcome's participant field",
+          judge_over["player"] == "Aaron Judge", str(judge_over))
+    check("_parse_player_props reads the American price and derives implied_pct from it, same "
+          "conversion clients/odds.py's own american_to_probability uses",
+          judge_over["price"] == 180 and judge_over["implied_pct"] == odds.american_to_probability(180),
+          str(judge_over))
+    check("_parse_player_props reads the line and tags book='DraftKings'",
+          judge_over["line"] == 0.5 and judge_over["book"] == "DraftKings", str(judge_over))
+    check("_parse_player_props maps 'Strikeouts' to pitcher_strikeouts and filters to only the "
+          "requested event_id",
+          dk_sportsbook._parse_player_props(dk_eventgroup_fixture, event_id="29372199") == {},
+          str(dk_sportsbook._parse_player_props(dk_eventgroup_fixture, event_id="29372199")))
+    check("_parse_player_props returns an empty dict for an empty payload, not a crash",
+          dk_sportsbook._parse_player_props({}, event_id="29372173") == {}, "")
 
     print("\nMarket props: wired end-to-end through a real slate rebuild "
           "(fetch -> parse -> match by name -> blended into edge.components)")
