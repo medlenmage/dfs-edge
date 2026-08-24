@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from datetime import date as date_cls
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile
 
+from app import cache
 from app.clients import nfl, rotowire_nfl
 from app.services import nfl_contest, nfl_optimizer, nfl_slate, nfl_variance, player_match, projections, salaries
 
@@ -222,8 +224,12 @@ async def generate_lineups(
     return {"season": resolved_season, "week": resolved_week, **result}
 
 
-_NFL_SIM_TRIALS = 2000
+# Same trial count and batch-cache TTL as the MLB side's own
+# /contest-entries-simulated -- always run, not user-configurable, so
+# results are directly comparable run to run.
+_NFL_SIM_TRIALS = 10_000
 _NFL_ENTRIES_PREVIEW_CAP = 200
+_NFL_CONTEST_BATCH_TTL = 3600
 
 
 @router.get("/contest-types")
@@ -280,8 +286,17 @@ async def build_contest_entries(
     except nfl_contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    result["results"] = result["results"][:_NFL_ENTRIES_PREVIEW_CAP]
-    result["entries"] = result["entries"][:_NFL_ENTRIES_PREVIEW_CAP]
+    full_entries = result.pop("entries")
+    full_results = result["results"]
+    batch_id = uuid4().hex
+    cache.put(
+        f"nfl_contest_batch:{batch_id}",
+        {"entries": full_entries, "results": full_results},
+        _NFL_CONTEST_BATCH_TTL,
+    )
+    result["batch_id"] = batch_id
+    result["results"] = full_results[:_NFL_ENTRIES_PREVIEW_CAP]
+    result["sample_entries"] = full_entries[:_NFL_ENTRIES_PREVIEW_CAP]
     return {"season": resolved_season, "week": resolved_week, **result}
 
 
@@ -344,6 +359,40 @@ async def build_contest_entries_simulated(
     except nfl_contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    result["results"] = result["results"][:_NFL_ENTRIES_PREVIEW_CAP]
-    result["entries"] = result["entries"][:_NFL_ENTRIES_PREVIEW_CAP]
+    full_entries = result.pop("entries")
+    full_results = result["results"]
+    batch_id = uuid4().hex
+    cache.put(
+        f"nfl_contest_batch:{batch_id}",
+        {"entries": full_entries, "results": full_results},
+        _NFL_CONTEST_BATCH_TTL,
+    )
+    result["batch_id"] = batch_id
+    result["results"] = full_results[:_NFL_ENTRIES_PREVIEW_CAP]
+    result["sample_entries"] = full_entries[:_NFL_ENTRIES_PREVIEW_CAP]
     return {"season": resolved_season, "week": resolved_week, **result}
+
+
+@router.get("/contest-entries/{batch_id}/csv")
+async def download_contest_entries_csv(batch_id: str) -> Response:
+    """
+    The full batch from a POST /contest-entries or
+    /contest-entries-simulated call, as a CSV -- one row per entry, one
+    column per NFL roster slot (name), plus the primary/secondary
+    stack and bring-back facts and the rank/cash/payout estimate from
+    that batch's evaluation. The NFL sibling of MLB's own contest-
+    entries CSV download; meant for a batch bigger than the 200-entry
+    JSON preview covers.
+    """
+    cached = cache.get(f"nfl_contest_batch:{batch_id}")
+    if not cached:
+        raise HTTPException(
+            status_code=404,
+            detail="That batch has expired or doesn't exist -- generate a new one and download again.",
+        )
+    csv_text = nfl_contest.lineups_to_csv(cached["entries"], results=cached["results"])
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="nfl-contest-entries-{batch_id}.csv"'},
+    )
