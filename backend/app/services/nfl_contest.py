@@ -23,14 +23,6 @@ first, self_play, field_sharpness, min/max salary, max_exposure,
 field_size, entries to build), NOT every feature contest.py has grown
 over many separate passes was ported:
 
-  - No named stack-shape system (contest.py's STACK_SHAPES/5-3/5-2-1/
-    etc., or DK's own 5-hitter-per-team rule -- NFL has no equivalent
-    DK roster restriction to enforce). Entries are built by plain
-    per-slot weighted random sampling, same distinctness/exposure-cap
-    mechanics, just no deliberate team-stacking bias. nfl_optimizer.py's
-    own MILP-based qb_stack_min is the real stacking tool for a small,
-    exact batch; this mass-generation path doesn't have an equivalent
-    yet.
   - No `engine="atbat"` alternative -- MLB's at-bat-level slate
     simulator (atbat_sim.py) has no NFL analog; this always uses the
     bootstrap outcome-pool engine (nfl_variance.py).
@@ -45,6 +37,50 @@ over many separate passes was ported:
 Player ids are strings throughout (DK's own numeric id, matching
 nfl_optimizer.py's convention), not the ints contest.py's MLB player
 ids are.
+
+STACK ARCHETYPES (built in, not user-selectable)
+--------------------------------------------------
+Every generated lineup (both the user's own entries and the sampled
+opponent field) is built toward a real, weighted NFL GPP stack shape,
+matching an explicit real-world construction taxonomy the user gave
+directly rather than left to unconstrained per-slot sampling:
+
+  PRIMARY (same team -- the QB stack, or a non-QB game-correlated pair):
+    qb_naked  -- a QB alone, no pass-catchers. Restricted to real
+                 RUNNING quarterbacks only (see _classify_pool() below)
+                 -- his own rushing floor is the real "stack" instead
+                 of a teammate, not a construction choice that makes
+                 sense for a pure pocket passer.
+    qb_1/2/3  -- a QB + N of his own team's pass-catchers (WR, TE, or a
+                 real pass-catching RB -- see PASS_CATCHING_RB_TARGETS_
+                 PER_GAME below). qb_1/qb_2 are weighted heaviest
+                 (PRIMARY_STACK_WEIGHTS) -- the most common real
+                 construction and the one that wins the most real
+                 tournaments -- every type still gets built sometimes.
+    rb_dst    -- an unrelated primary type: one team's RB + that same
+                 team's own DST, no QB involved at all.
+
+  SECONDARY (1-2 mini-groups from team(s) OTHER than the primary's own
+  team, filling the rest of the roster -- a real mix of WR/TE/RB from
+  the same team/game, not restricted to pass-catchers the way the
+  primary is): "1+1" (two different teams, one player each), "2+1"/
+  "1+2" (one team gets 2, another gets 1 -- kept as two separate listed
+  shapes since a bring-back bias can land on either group, not because
+  they're functionally different once assigned), "2" (one team gets 2,
+  no second secondary group).
+
+  BRING-BACK: with real, deliberate probability (BRINGBACK_PROBABILITY,
+  not left to chance), a lineup's first secondary group is biased
+  toward the PRIMARY stack's own real opponent -- rostering the other
+  side of that specific game alongside the stack, the classic "betting
+  on a shootout" GPP move. Every generated entry reports the real,
+  as-built (not just as-intended) result as `has_bringback` -- true
+  whenever ANY rostered player's team is the primary stack's real
+  opponent, computed from the actual finished roster, not merely
+  whether the bias was applied.
+
+Any roster slots left after the primary + secondary groups are filled
+as ordinary weighted one-off picks, same as before this feature.
 """
 
 from __future__ import annotations
@@ -55,6 +91,7 @@ from typing import Any
 
 import numpy as np
 
+from app.clients import nfl
 from app.services import nfl_variance
 from app.services.contest import (
     CONTEST_TYPES,
@@ -95,6 +132,201 @@ def _fpts_weight(p: dict[str, Any]) -> float:
     return max(p["projected_fpts"], _FPTS_FLOOR) ** _FPTS_SAMPLING_EXPONENT
 
 
+# --------------------------------------------------------------------------
+# Stack archetypes -- see the module docstring for the full taxonomy.
+# --------------------------------------------------------------------------
+
+PRIMARY_STACK_TYPES = ("qb_naked", "qb_1", "qb_2", "qb_3", "rb_dst")
+# qb_1/qb_2 weighted heaviest per the user's own real-world framing;
+# every type still gets built sometimes. A real, stated, tunable
+# approximation -- not derived from real win-rate data, same
+# "clearly-labeled" convention contest.py's own STACK_SHAPE_WEIGHTS uses.
+PRIMARY_STACK_WEIGHTS = (1.0, 3.0, 3.0, 1.0, 1.0)
+
+SECONDARY_STACK_TYPES = ("1+1", "2+1", "1+2", "2")
+SECONDARY_STACK_GROUPS: dict[str, list[int]] = {"1+1": [1, 1], "2+1": [2, 1], "1+2": [2, 1], "2": [2]}
+SECONDARY_STACK_WEIGHTS = (1.0, 1.0, 1.0, 1.0)
+
+# Real, deliberate chance a lineup's secondary stack is biased toward
+# the primary stack's own real opponent -- a real, common GPP move
+# ("betting on a shootout"), not left entirely to chance.
+BRINGBACK_PROBABILITY = 0.4
+
+# A QB's average real rushing volume (nfl.PRIOR_SEASON game logs) above
+# which he counts as a genuine "running QB" -- calibrated against real
+# 2025 names the user gave as examples (Josh Allen, Lamar Jackson,
+# Jayden Daniels all comfortably clear this on their real season
+# rushing volume; a pure pocket passer sits well under it).
+RUNNING_QB_CARRIES_PER_GAME = 5.0
+
+# A RB's average real target volume above which he counts as a genuine
+# receiving threat, eligible to fill a QB stack's pass-catcher slot the
+# same way a WR/TE would.
+PASS_CATCHING_RB_TARGETS_PER_GAME = 3.5
+
+
+async def _classify_pool(
+    candidates_by_slot: dict[str, list[dict[str, Any]]], season: int
+) -> tuple[frozenset[str], frozenset[str]]:
+    """
+    Real running-QB and pass-catching-RB classification from
+    nfl.PRIOR_SEASON's actual game logs -- run ONCE per contest-
+    generation call, not per lineup, and passed down as a plain lookup
+    into the (synchronous) sampling functions below.
+
+    Uses clients/nfl.get_grouped_season_stats() directly (one parsed-
+    and-cached structure for the whole season) rather than looping
+    get_player_game_log() per player -- a real, measured difference at
+    real slate size: classifying a full week's 60-100+ QB/RB pool one
+    per-player call at a time took over two minutes the first time this
+    was built; one shared grouped fetch is a single pass regardless of
+    how many players get classified.
+    """
+    qbs = {p["id"]: p for p in candidates_by_slot.get("QB", [])}
+    rbs = {p["id"]: p for p in candidates_by_slot.get("RB", [])}
+
+    grouped = await nfl.get_grouped_season_stats(season)
+
+    def _avg(pid: str, field: str) -> float:
+        log = grouped.get(pid) or []
+        if not log:
+            return 0.0
+        return sum(g.get(field, 0.0) for g in log) / len(log)
+
+    qb_ids = list(qbs)
+    rb_ids = list(rbs)
+    qb_carries = [_avg(pid, "carries") for pid in qb_ids]
+    rb_targets = [_avg(pid, "targets") for pid in rb_ids]
+
+    running_qb_ids = frozenset(pid for pid, c in zip(qb_ids, qb_carries) if c >= RUNNING_QB_CARRIES_PER_GAME)
+    pass_catching_rb_ids = frozenset(
+        pid for pid, t in zip(rb_ids, rb_targets) if t >= PASS_CATCHING_RB_TARGETS_PER_GAME
+    )
+    return running_qb_ids, pass_catching_rb_ids
+
+
+def _pick_primary(
+    candidates_by_slot: dict[str, list[dict[str, Any]]],
+    running_qb_ids: frozenset[str],
+    weight_fn: Callable[[dict[str, Any]], float],
+    rng: random.Random,
+) -> dict[str, Any] | None:
+    """One of PRIMARY_STACK_TYPES for this lineup, weighted, restricted
+    to what the real pool can actually support (qb_naked needs a real
+    running QB available; rb_dst needs a team with both an eligible RB
+    and DST). Returns None if literally nothing is buildable."""
+    qbs = candidates_by_slot.get("QB", [])
+    if not qbs:
+        return None
+    dst_teams = {p["team"] for p in candidates_by_slot.get("DST", [])}
+    rb_dst_teams = {p["team"] for p in candidates_by_slot.get("RB", []) if p["team"] in dst_teams}
+
+    types, weights = [], []
+    for t, w in zip(PRIMARY_STACK_TYPES, PRIMARY_STACK_WEIGHTS):
+        if t == "qb_naked" and not any(p["id"] in running_qb_ids for p in qbs):
+            continue
+        if t == "rb_dst" and not rb_dst_teams:
+            continue
+        types.append(t)
+        weights.append(w)
+    if not types:
+        return None
+    chosen = rng.choices(types, weights=weights, k=1)[0]
+
+    if chosen == "rb_dst":
+        team = rng.choice(sorted(rb_dst_teams))
+        return {"type": chosen, "team": team, "qb_id": None, "pass_catcher_count": 0}
+
+    pool = [p for p in qbs if p["id"] in running_qb_ids] if chosen == "qb_naked" else qbs
+    qb_weights = [weight_fn(p) for p in pool]
+    qb = rng.choices(pool, weights=qb_weights, k=1)[0]
+    count = {"qb_naked": 0, "qb_1": 1, "qb_2": 2, "qb_3": 3}[chosen]
+    return {"type": chosen, "team": qb["team"], "qb_id": qb["id"], "pass_catcher_count": count}
+
+
+def _pick_secondary_teams(
+    candidates_by_slot: dict[str, list[dict[str, Any]]],
+    primary_team: str,
+    bringback_team: str | None,
+    shape_groups: list[int],
+    weight_fn: Callable[[dict[str, Any]], float],
+    rng: random.Random,
+) -> list[tuple[str, int]] | None:
+    """
+    Assign each of `shape_groups`' sizes to a real team OTHER than the
+    primary's own, weighted toward whichever teams carry the most
+    aggregate `weight_fn` signal among their available players -- same
+    technique contest.py's own _pick_stack_teams() uses for MLB.
+    `bringback_team`, if given, is preferred for the FIRST group when
+    it has enough eligible players -- the deliberate bring-back bias
+    (see BRINGBACK_PROBABILITY). Returns None if some group has no
+    feasible team left.
+    """
+    team_pool: dict[str, dict[str, dict[str, Any]]] = {}
+    for players in candidates_by_slot.values():
+        for p in players:
+            if p["team"] != primary_team:
+                team_pool.setdefault(p["team"], {})[p["id"]] = p
+    teams_available = {t: list(v.values()) for t, v in team_pool.items()}
+
+    assigned: list[tuple[str, int]] = []
+    used_teams: set[str] = set()
+    for idx, size in enumerate(shape_groups):
+        candidates = {
+            t: players for t, players in teams_available.items() if t not in used_teams and len(players) >= size
+        }
+        if not candidates:
+            return None
+        if idx == 0 and bringback_team and bringback_team in candidates:
+            team = bringback_team
+        else:
+            teams = list(candidates)
+            weights = [sum(weight_fn(p) for p in candidates[t]) for t in teams]
+            team = rng.choices(teams, weights=weights, k=1)[0]
+        assigned.append((team, size))
+        used_teams.add(team)
+    return assigned
+
+
+def _pick_stack_plan(
+    candidates_by_slot: dict[str, list[dict[str, Any]]],
+    running_qb_ids: frozenset[str],
+    weight_fn: Callable[[dict[str, Any]], float],
+    rng: random.Random,
+) -> tuple[dict[str, Any] | None, list[tuple[str, int]] | None]:
+    """
+    One lineup's full stack plan -- a primary archetype (or None if
+    nothing buildable at all, e.g. every QB was excluded) and its
+    secondary team assignment (or None if no feasible secondary teams
+    exist for the chosen shape, in which case the caller falls back to
+    an unconstrained secondary for that one lineup rather than failing
+    it outright). Picked once per lineup, outside the retry loop below
+    -- same reason contest.py's own MLB stack-shape picks a shape once
+    per lineup: a genuinely harder shape gets a fair, dedicated shot at
+    a working team assignment instead of losing out to whichever easier
+    shape happens to get rolled on a given retry attempt.
+    """
+    primary = _pick_primary(candidates_by_slot, running_qb_ids, weight_fn, rng)
+    if primary is None:
+        return None, None
+
+    shape = rng.choices(SECONDARY_STACK_TYPES, weights=SECONDARY_STACK_WEIGHTS, k=1)[0]
+    groups = SECONDARY_STACK_GROUPS[shape]
+
+    bringback_team = None
+    if rng.random() < BRINGBACK_PROBABILITY:
+        primary_team_players = [
+            p for players in candidates_by_slot.values() for p in players if p["team"] == primary["team"]
+        ]
+        if primary_team_players:
+            bringback_team = primary_team_players[0].get("opponent")
+
+    secondary_teams = _pick_secondary_teams(
+        candidates_by_slot, primary["team"], bringback_team, groups, weight_fn, rng
+    )
+    return primary, secondary_teams
+
+
 def _build_candidate_pool(slate: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
     """Shared setup: the eligible-by-slot pool and the fixed 9-slot fill
     order, or a ContestError if either is empty."""
@@ -117,6 +349,10 @@ def _build_candidate_pool(slate: dict[str, Any]) -> tuple[dict[str, list[dict[st
     return candidates_by_slot, slot_order
 
 
+_PASS_CATCHER_SLOTS = ("WR", "TE", "FLEX")
+_RB_DST_ELIGIBLE_SLOTS = ("RB", "FLEX")
+
+
 def _sample_one_lineup(
     candidates_by_slot: dict[str, list[dict[str, Any]]],
     slot_order: list[str],
@@ -126,6 +362,9 @@ def _sample_one_lineup(
     excluded_ids: frozenset[str] = frozenset(),
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
+    primary: dict[str, Any] | None = None,
+    pass_catching_rb_ids: frozenset[str] = frozenset(),
+    secondary_teams: list[tuple[str, int]] | None = None,
 ) -> dict[str, Any] | None:
     """
     Build one randomly-weighted lineup within the salary cap (and the
@@ -134,12 +373,33 @@ def _sample_one_lineup(
     field, projected points for the user's own entries) but constrained
     to what still leaves enough budget for the cheapest possible player
     at every remaining slot. `excluded_ids` removes players entirely
-    (e.g. ones that have hit an exposure cap). Returns None if this
-    particular random walk couldn't complete; the caller retries.
+    (e.g. ones that have hit an exposure cap).
+
+    `primary`/`secondary_teams`, if given (see _pick_primary()/
+    _pick_secondary_teams()), constrain this lineup toward the chosen
+    stack archetype: the primary's own QB (if any) is required outright;
+    its pass-catcher count is preferred at WR/TE/FLEX slots (restricted
+    to the primary's own team, WR/TE, or a real pass-catching RB) when
+    a qualifying player is available at that slot, falling back to an
+    ordinary unrestricted pick for that one slot otherwise -- an
+    unsatisfied requirement fails the WHOLE attempt at the final check
+    below, not silently. Each secondary team similarly prefers filling
+    its own remaining need at any RB/WR/TE/FLEX slot.
+
+    Returns None if this particular random walk couldn't complete
+    (including an unsatisfied primary/secondary requirement); the
+    caller retries.
     """
     used_ids: set[str] = set()
     picks: list[dict[str, Any]] = []
     salary_so_far = 0
+
+    qb_required_id = primary.get("qb_id") if primary else None
+    pass_catchers_needed = primary.get("pass_catcher_count", 0) if primary else 0
+    primary_team = primary.get("team") if primary else None
+    need_rb_dst_rb = primary is not None and primary["type"] == "rb_dst"
+    need_rb_dst_dst = primary is not None and primary["type"] == "rb_dst"
+    secondary_needed: dict[str, int] = dict(secondary_teams) if secondary_teams else {}
 
     for i, slot in enumerate(slot_order):
         remaining_slots = slot_order[i + 1 :]
@@ -148,6 +408,32 @@ def _sample_one_lineup(
         ]
         if not eligible:
             return None
+
+        if slot == "QB" and qb_required_id is not None:
+            eligible = [p for p in eligible if p["id"] == qb_required_id]
+            if not eligible:
+                return None
+        elif slot == "DST" and need_rb_dst_dst:
+            restricted = [p for p in eligible if p["team"] == primary_team]
+            if restricted:
+                eligible = restricted
+        elif slot in _RB_DST_ELIGIBLE_SLOTS and need_rb_dst_rb:
+            restricted = [p for p in eligible if p["team"] == primary_team and p["position"] == "RB"]
+            if restricted:
+                eligible = restricted
+        elif slot in _PASS_CATCHER_SLOTS and pass_catchers_needed > 0 and primary_team:
+            restricted = [
+                p for p in eligible
+                if p["team"] == primary_team
+                and (p["position"] in ("WR", "TE") or p["id"] in pass_catching_rb_ids)
+            ]
+            if restricted:
+                eligible = restricted
+        elif secondary_needed and slot in ("RB", "WR", "TE", "FLEX"):
+            needy_teams = {t for t, n in secondary_needed.items() if n > 0}
+            restricted = [p for p in eligible if p["team"] in needy_teams]
+            if restricted:
+                eligible = restricted
 
         min_cost_of_rest = sum(
             min(
@@ -172,13 +458,37 @@ def _sample_one_lineup(
         used_ids.add(pick["id"])
         salary_so_far += pick["salary"]
 
+        if slot == "DST" and need_rb_dst_dst and pick["team"] == primary_team:
+            need_rb_dst_dst = False
+        elif slot in _RB_DST_ELIGIBLE_SLOTS and need_rb_dst_rb and pick["team"] == primary_team and pick["position"] == "RB":
+            need_rb_dst_rb = False
+        elif (
+            pass_catchers_needed > 0
+            and pick["team"] == primary_team
+            and (pick["position"] in ("WR", "TE") or pick["id"] in pass_catching_rb_ids)
+        ):
+            pass_catchers_needed -= 1
+        elif pick["team"] in secondary_needed and secondary_needed[pick["team"]] > 0:
+            secondary_needed[pick["team"]] -= 1
+
+    if pass_catchers_needed > 0 or need_rb_dst_rb or need_rb_dst_dst or any(n > 0 for n in secondary_needed.values()):
+        return None  # couldn't fully satisfy the chosen stack shape -- caller retries
     if not (min_salary <= salary_so_far <= max_salary):
         return None
+
+    # picks[0] is always whatever filled the QB slot -- NOT necessarily
+    # a primary-team player for the rb_dst archetype (QB is picked
+    # unconstrained there) -- find a real primary-team player instead.
+    primary_team_pick = next((p for p in picks if p["team"] == primary_team), None) if primary else None
+    primary_opponent = primary_team_pick.get("opponent") if primary_team_pick else None
+    has_bringback = primary_opponent is not None and any(p["team"] == primary_opponent for p in picks)
 
     return {
         "salary_used": salary_so_far,
         "projected_points": round(sum(p["projected_fpts"] for p in picks), 2),
         "total_ownership_pct": round(sum(p["ownership_pct"] for p in picks), 1),
+        "primary_stack": primary["type"] if primary else None,
+        "has_bringback": has_bringback,
         "players": [
             {
                 "id": p["id"],
@@ -205,12 +515,23 @@ def generate_field(
     max_salary: int = SALARY_CAP,
     seed: int | None = None,
     field_sharpness: str = "marquee",
+    running_qb_ids: frozenset[str] = frozenset(),
+    pass_catching_rb_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """
     Build `sample_size` synthetic opponent lineups, weighted toward
     whatever RotoWire's ownership% says the public actually rosters --
     see contest.py's generate_field() for the full rationale, which
     applies unchanged here. `field_sharpness`: see FIELD_SHARPNESS_LEVELS.
+
+    Each lineup is built toward a real, weighted NFL stack archetype
+    (see the module docstring) -- `running_qb_ids`/`pass_catching_rb_ids`
+    (from _classify_pool(), computed once by the caller from real
+    season game logs) decide which QBs a "naked" primary stack can use
+    and which RBs count as pass-catchers for a QB stack's pass-catcher
+    slots. Left empty (the default), qb_naked is simply never chosen
+    and no RB counts as a pass-catcher -- a safe default for callers
+    that don't have classification data on hand.
     """
     if sample_size < 1:
         raise ContestError("sample_size must be at least 1.")
@@ -229,11 +550,14 @@ def generate_field(
     rng = random.Random(seed)
     field: list[dict[str, Any]] = []
     for _ in range(sample_size):
+        primary, secondary_teams = _pick_stack_plan(candidates_by_slot, running_qb_ids, field_weight_fn, rng)
         lineup = None
         for _ in range(max_attempts_per_lineup):
             lineup = _sample_one_lineup(
                 candidates_by_slot, slot_order, rng, field_weight_fn,
                 min_salary=min_salary, max_salary=max_salary,
+                primary=primary, pass_catching_rb_ids=pass_catching_rb_ids,
+                secondary_teams=list(secondary_teams) if secondary_teams else None,
             )
             if lineup is not None:
                 break
@@ -259,6 +583,8 @@ def generate_entries(
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
     seed: int | None = None,
+    running_qb_ids: frozenset[str] = frozenset(),
+    pass_catching_rb_ids: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """
     Build up to `num_lineups` of the user's OWN entries -- see
@@ -268,6 +594,9 @@ def generate_entries(
     which applies unchanged here. Returns as many legal entries as the
     pool/exposure cap could support rather than failing the whole
     request short of the count; only an empty result raises.
+
+    Same stack-archetype machinery as generate_field() -- see its own
+    docstring for what `running_qb_ids`/`pass_catching_rb_ids` do.
     """
     if num_lineups < 1:
         raise ContestError("num_lineups must be at least 1.")
@@ -287,12 +616,15 @@ def generate_entries(
     entries: list[dict[str, Any]] = []
 
     for _ in range(num_lineups):
+        primary, secondary_teams = _pick_stack_plan(candidates_by_slot, running_qb_ids, _fpts_weight, rng)
         lineup = None
         for _ in range(max_attempts_per_lineup):
             candidate = _sample_one_lineup(
                 candidates_by_slot, slot_order, rng, _fpts_weight,
                 excluded_ids=frozenset(capped_ids),
                 min_salary=min_salary, max_salary=max_salary,
+                primary=primary, pass_catching_rb_ids=pass_catching_rb_ids,
+                secondary_teams=list(secondary_teams) if secondary_teams else None,
             )
             if candidate is None:
                 continue
@@ -332,6 +664,8 @@ def _build_contest_and_entries(
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
     seed: int | None,
+    running_qb_ids: frozenset[str] = frozenset(),
+    pass_catching_rb_ids: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Shared setup: validate the contest type/size and build the
     user's own entries. Split out so self-play mode can skip sampling
@@ -358,6 +692,7 @@ def _build_contest_and_entries(
         max_exposure_pct=max_exposure_pct,
         min_salary=min_salary, max_salary=max_salary,
         allow_duplicates=allow_duplicates, seed=seed,
+        running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
     return contest, entries
 
@@ -375,6 +710,8 @@ def _build_entries_and_field(
     allow_duplicates: bool = False,
     seed: int | None,
     field_sharpness: str = "marquee",
+    running_qb_ids: frozenset[str] = frozenset(),
+    pass_catching_rb_ids: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Shared setup for the default (vs-a-separate-field) mode: build
     the user's own entries and sample an opponent field to rank them
@@ -384,6 +721,7 @@ def _build_entries_and_field(
         max_exposure_pct=max_exposure_pct, field_size=field_size,
         min_salary=min_salary, max_salary=max_salary,
         allow_duplicates=allow_duplicates, seed=seed,
+        running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
 
     field_sample = sample_size or min(contest["field_size"], MAX_SAMPLE_SIZE)
@@ -392,15 +730,17 @@ def _build_entries_and_field(
         min_salary=min_salary, max_salary=max_salary,
         seed=(seed + 1) if seed is not None else None,
         field_sharpness=field_sharpness,
+        running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
     return contest, entries, field
 
 
-def build_contest_entries(
+async def build_contest_entries(
     slate: dict[str, Any],
     contest_type: str,
     num_lineups: int,
     *,
+    season: int,
     max_exposure_pct: float | None = None,
     field_size: int | None = None,
     sample_size: int | None = None,
@@ -416,13 +756,19 @@ def build_contest_entries(
     simulated opponent field's *projected* points -- see
     build_contest_entries_simulated() for the real Monte Carlo
     alternative. Mirrors contest.py's build_contest_entries() output
-    shape.
+    shape. Now async -- classifying real running QBs/pass-catching RBs
+    (see _classify_pool()) needs one real fetch of `season`'s game logs
+    before any lineup can be built toward the stack archetypes.
     """
+    candidates_by_slot, _ = _build_candidate_pool(slate)
+    running_qb_ids, pass_catching_rb_ids = await _classify_pool(candidates_by_slot, season)
+
     contest, entries, field = _build_entries_and_field(
         slate, contest_type, num_lineups,
         max_exposure_pct=max_exposure_pct, field_size=field_size, sample_size=sample_size,
         min_salary=min_salary, max_salary=max_salary,
         allow_duplicates=allow_duplicates, seed=seed, field_sharpness=field_sharpness,
+        running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
     evaluation = _evaluate_batch_against_field(entries, field, contest)
 
@@ -710,12 +1056,16 @@ async def build_contest_entries_simulated(
     from the caller until the season being drafted has its own
     in-progress data worth using instead.
     """
+    candidates_by_slot, _ = _build_candidate_pool(slate)
+    running_qb_ids, pass_catching_rb_ids = await _classify_pool(candidates_by_slot, season)
+
     if self_play:
         contest, entries = _build_contest_and_entries(
             slate, contest_type, num_lineups,
             max_exposure_pct=max_exposure_pct, field_size=field_size,
             min_salary=min_salary, max_salary=max_salary,
             allow_duplicates=allow_duplicates, seed=seed,
+            running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
         )
         evaluation = await evaluate_field_mirrored(
             entries, contest, season=season, num_trials=num_trials, seed=seed,
@@ -727,6 +1077,7 @@ async def build_contest_entries_simulated(
             max_exposure_pct=max_exposure_pct, field_size=field_size, sample_size=sample_size,
             min_salary=min_salary, max_salary=max_salary,
             allow_duplicates=allow_duplicates, seed=seed, field_sharpness=field_sharpness,
+            running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
         )
         evaluation = await evaluate_batch_simulated(
             entries, field, contest, season=season, num_trials=num_trials,

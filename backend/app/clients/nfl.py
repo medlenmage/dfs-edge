@@ -243,6 +243,45 @@ async def _load_player_stats_csv(season: int, *, force: bool = False) -> str:
     return await cached(f"nfl:player_stats:{season}:raw", settings.ttl_stats * 4, _load, force=force)
 
 
+async def get_grouped_season_stats(
+    season: int, *, force: bool = False
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    The full season's regular-season player_stats, parsed ONCE and
+    grouped by player_id (each player's own rows sorted by week) --
+    the shared building block get_player_game_log() and a real bulk
+    classification pass (e.g. nfl_contest._classify_pool(), checking
+    running-QB/pass-catching-RB status across every QB/RB in a whole
+    week's pool at once) both use, instead of each re-scanning every
+    row in the ~9,000-row season file from scratch. A real, measured
+    cost this replaces: classifying a full week's 60-100+ QB/RB pool
+    one get_player_game_log() call at a time (the original
+    implementation) took over two minutes; grouping once and reusing
+    it is a single pass over the file regardless of how many players
+    get looked up afterward.
+
+    Cached as this parsed structure (not just the raw CSV text), same
+    TTL as the raw file.
+    """
+    settings = get_settings()
+
+    async def _load() -> dict[str, list[dict[str, Any]]]:
+        text = await _load_player_stats_csv(season, force=force)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in csv.DictReader(io.StringIO(text)):
+            if row.get("season_type") != "REG":
+                continue
+            pid = row.get("player_id")
+            if not pid:
+                continue
+            grouped.setdefault(pid, []).append(_parse_stat_row(row))
+        for rows in grouped.values():
+            rows.sort(key=lambda r: r["week"] or 0)
+        return grouped
+
+    return await cached(f"nfl:player_stats:{season}:grouped", settings.ttl_stats * 4, _load, force=force)
+
+
 async def get_player_game_log(
     player_id: str, season: int, *, force: bool = False
 ) -> list[dict[str, Any]]:
@@ -260,14 +299,8 @@ async def get_player_game_log(
     mixing them in would make some players' logs deeper than others for
     a reason unrelated to their actual week-to-week volatility.
     """
-    text = await _load_player_stats_csv(season, force=force)
-    rows = [
-        _parse_stat_row(row)
-        for row in csv.DictReader(io.StringIO(text))
-        if row.get("player_id") == player_id and row.get("season_type") == "REG"
-    ]
-    rows.sort(key=lambda r: r["week"] or 0)
-    return rows
+    grouped = await get_grouped_season_stats(season, force=force)
+    return grouped.get(player_id, [])
 
 
 async def get_prior_season_context(season: int = PRIOR_SEASON) -> dict[str, Any]:

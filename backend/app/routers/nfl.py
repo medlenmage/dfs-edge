@@ -270,8 +270,9 @@ async def build_contest_entries(
     resolved_season, resolved_week = await _resolve_season_week(season, week)
     slate = await nfl_slate.build_slate(resolved_season, resolved_week)
     try:
-        result = nfl_contest.build_contest_entries(
+        result = await nfl_contest.build_contest_entries(
             slate, contest_type, num_lineups,
+            season=nfl.PRIOR_SEASON,
             max_exposure_pct=max_exposure_pct, field_size=field_size, sample_size=sample_size,
             min_salary=min_salary, max_salary=max_salary,
             allow_duplicates=allow_duplicates, field_sharpness=field_sharpness,

@@ -6,10 +6,23 @@ import { api } from '../api'
  * ContestGeneratorPanel.jsx (MLB). Scoped to what nfl_contest.py
  * actually supports: contest type, entries to build, allow duplicates,
  * self-play, field sharpness, min/max salary, max exposure, field size,
- * percent-to-first. No stack shapes, no post-hoc reshape, no CSV export
- * yet -- see nfl_contest.py's own module docstring for the full list of
- * what wasn't ported from the MLB version and why.
+ * percent-to-first. No post-hoc reshape, no CSV export yet -- see
+ * nfl_contest.py's own module docstring for the full list of what
+ * wasn't ported from the MLB version and why.
+ *
+ * Every entry is built toward a real, weighted NFL stack archetype
+ * (also nfl_contest.py's own module docstring) -- not a control here,
+ * it's baked into generation. STACK_LABELS below is just how those
+ * archetype codes are shown in the entries table.
  */
+const STACK_LABELS = {
+  qb_naked: 'QB (naked)',
+  qb_1: 'QB+1',
+  qb_2: 'QB+2',
+  qb_3: 'QB+3',
+  rb_dst: 'RB+DST',
+}
+
 export function NflContestGeneratorPanel({ season, week }) {
   const [contestTypes, setContestTypes] = useState({})
   const [contestType, setContestType] = useState('gpp_small')
@@ -217,6 +230,8 @@ export function NflContestGeneratorPanel({ season, week }) {
               <thead>
                 <tr>
                   <th>#</th>
+                  <th>Stack</th>
+                  <th>Bring-back</th>
                   <th className="num">Salary</th>
                   <th className="num">Proj FPTS</th>
                   <th className="num">Cash%</th>
@@ -231,6 +246,8 @@ export function NflContestGeneratorPanel({ season, week }) {
                   return (
                     <tr key={i}>
                       <td>{i + 1}</td>
+                      <td className="dim">{STACK_LABELS[entry.primary_stack] || entry.primary_stack || '—'}</td>
+                      <td className={entry.has_bringback ? 'ok' : 'dim'}>{entry.has_bringback ? 'Yes' : 'No'}</td>
                       <td className="num">${entry.salary_used.toLocaleString()}</td>
                       <td className="num">{entry.projected_points.toFixed(1)}</td>
                       <td className="num">{r.cash_probability_pct}%</td>
