@@ -3277,13 +3277,21 @@ async def main() -> int:
     check("lineups_to_csv has one name column per DK roster slot (P1/P2/C/1B/2B/3B/SS/OF1/OF2/OF3)",
           all(f"{label}_name" in opt_csv_rows[0] for label in lineup_export.SLOT_LABELS),
           str(sorted(opt_csv_rows[0].keys())))
-    check("lineups_to_csv no longer carries per-player team/salary/proj_fpts/own_pct sub-columns",
-          not any(k.endswith(("_team", "_salary", "_proj_fpts", "_own_pct")) for k in opt_csv_rows[0]),
+    check("lineups_to_csv carries per-player salary/fpts sub-columns (slot-labeled) but not team/own_pct",
+          all(f"{label}_salary" in opt_csv_rows[0] and f"{label}_fpts" in opt_csv_rows[0]
+              for label in lineup_export.SLOT_LABELS)
+          and not any(k.endswith(("_team", "_own_pct")) for k in opt_csv_rows[0]),
           str(sorted(opt_csv_rows[0].keys())))
     p1_name_in_csv = opt_csv_rows[0]["P1_name"]
     p1_name_in_lineup = opt_lineup["slots"]["P"][0]["name"]
     check("the optimizer's grouped `slots` shape flattens into the CSV in the right roster order",
           p1_name_in_csv == p1_name_in_lineup, str((p1_name_in_csv, p1_name_in_lineup)))
+    p1_player_in_lineup = opt_lineup["slots"]["P"][0]
+    check("P1_salary/P1_fpts in the CSV match the actual P1 player's salary/projected_fpts",
+          (float(opt_csv_rows[0]["P1_salary"]), float(opt_csv_rows[0]["P1_fpts"]))
+          == (float(p1_player_in_lineup["salary"]), float(p1_player_in_lineup["projected_fpts"])),
+          str((opt_csv_rows[0]["P1_salary"], opt_csv_rows[0]["P1_fpts"],
+               p1_player_in_lineup["salary"], p1_player_in_lineup["projected_fpts"])))
     check("lineup-level totals (salary_used, projected_points) are carried into the CSV row",
           float(opt_csv_rows[0]["salary_used"]) == opt_lineup["salary_used"], opt_csv_rows[0]["salary_used"])
     opt_expected_stack_type, opt_expected_stack = lineup_export.stack_info(opt_lineup)
