@@ -444,4 +444,42 @@ export const api = {
         num_trials: numTrials,
       }),
     }),
+
+  nflContestTypes: () => request('/api/nfl/contest-types'),
+
+  nflBuildContestEntriesSimulated: (
+    season,
+    week,
+    {
+      contestType,
+      numLineups,
+      maxExposurePct = null,
+      fieldSize = null,
+      sampleSize = null,
+      minSalary = 0,
+      maxSalary = 50000,
+      allowDuplicates = false,
+      selfPlay = false,
+      fieldSharpness = 'marquee',
+      firstPlacePct = null,
+    },
+  ) =>
+    request('/api/nfl/contest-entries-simulated', {
+      method: 'POST',
+      body: JSON.stringify({
+        season,
+        week,
+        contest_type: contestType,
+        num_lineups: numLineups,
+        max_exposure_pct: maxExposurePct,
+        field_size: fieldSize,
+        sample_size: sampleSize,
+        min_salary: minSalary,
+        max_salary: maxSalary,
+        allow_duplicates: allowDuplicates,
+        self_play: selfPlay,
+        field_sharpness: fieldSharpness,
+        first_place_pct: firstPlacePct,
+      }),
+    }),
 }

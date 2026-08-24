@@ -279,10 +279,26 @@ def team_environment_multiplier(rng: random.Random) -> float:
 
 
 def _flatten_lineup(entry: dict[str, Any]) -> list[dict[str, Any]]:
-    """nfl_optimizer.py's `{"slots": {"QB": [...], "RB": [...], ...}}`
-    shape -> a flat list of every rostered player, each carrying their
-    OWN real position (not just which slot they filled -- FLEX doesn't
-    say whether it's an RB/WR/TE)."""
+    """
+    Accepts both lineup shapes this codebase produces -- nfl_optimizer.py's
+    `{"slots": {"QB": [...], "RB": [...], ...}}` and nfl_contest.py's flat
+    `{"players": [...]}` -- so callers don't need to know or care which
+    generator produced a given entry (same duality MLB's
+    lineup_export.players_in_slot_order() already handles between
+    optimizer.py and contest.py). Every player carries their OWN real
+    position (not just which slot they filled -- FLEX doesn't say
+    whether it's an RB/WR/TE).
+    """
+    if "players" in entry:
+        return [
+            {
+                "id": p["id"],
+                "team": p.get("team"),
+                "opponent": p.get("opponent"),
+                "position": p.get("position"),
+            }
+            for p in entry["players"]
+        ]
     out: list[dict[str, Any]] = []
     for slot, players in (entry.get("slots") or {}).items():
         for p in players:

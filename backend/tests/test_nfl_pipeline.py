@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
 from app.clients import nfl, rotowire_nfl  # noqa: E402
-from app.services import nfl_dk_points, nfl_optimizer, nfl_scoring, nfl_variance, player_match, salaries  # noqa: E402
+from app.services import nfl_contest, nfl_dk_points, nfl_optimizer, nfl_scoring, nfl_variance, player_match, salaries  # noqa: E402
 
 _FAKE_CACHE: dict[str, object] = {}
 
@@ -696,6 +696,65 @@ def main() -> int:
           "lineups, dispatching offensive players to player_outcome_pool and DST to "
           "dst_outcome_pool",
           set(pools_for_entries) == {"stack_qb", "stack_wr", "aaa_dst"}, str(sorted(pools_for_entries)))
+
+    # --------------------------------------------------------------------
+    # services/nfl_contest.py -- the NFL contest generator + Monte Carlo
+    # simulator, tied to nfl_variance.py the same way contest.py (MLB)
+    # is tied to variance.py. Reuses the 16-player SEA/NE slate fixture
+    # already built for the optimizer tests above.
+    # --------------------------------------------------------------------
+    print("\nContest generator + Monte Carlo simulator (nfl_contest.py)")
+
+    try:
+        nfl_contest.build_contest_entries(slate, "not_a_real_type", 3)
+        check("build_contest_entries raises ContestError on an unknown contest_type", False, "")
+    except nfl_contest.ContestError:
+        check("build_contest_entries raises ContestError on an unknown contest_type", True, "")
+
+    det = nfl_contest.build_contest_entries(slate, "double_up", 2, allow_duplicates=True)
+    check("build_contest_entries (deterministic) builds real entries against the double_up preset",
+          det["num_entries_built"] >= 1 and det["contest"]["field_size"] == 100, str(det["contest"]))
+    check("build_contest_entries's summary reports real cash-rate/payout economics",
+          "cashing_pct" in det["summary"] and "avg_roi_pct" in det["summary"], str(det["summary"]))
+    check("build_contest_entries's entries each carry a real duplicate_count",
+          all("duplicate_count" in e for e in det["entries"]), "")
+
+    no_dupes = nfl_contest.generate_entries(slate, 2, allow_duplicates=False, seed=1)
+    dupes_allowed = nfl_contest.generate_entries(slate, 2, allow_duplicates=True, seed=1)
+    no_dupes_sigs = {frozenset(p["id"] for p in e["players"]) for e in no_dupes}
+    check("generate_entries without allow_duplicates never returns two identical lineups",
+          len(no_dupes_sigs) == len(no_dupes), str(len(no_dupes)))
+    check("generate_entries with allow_duplicates=True can return exact repeats with the same seed",
+          len(dupes_allowed) == 2, str(len(dupes_allowed)))
+
+    sim = asyncio.run(nfl_contest.build_contest_entries_simulated(
+        slate, "gpp_small", 3, season=2098, num_trials=300, allow_duplicates=True,
+        self_play=False, field_sharpness="marquee",
+    ))
+    check("build_contest_entries_simulated (self_play=False) ranks the batch against a "
+          "separately-sampled field and returns real per-entry simulated results",
+          sim["self_play"] is False and len(sim["results"]) == sim["num_entries_built"],
+          str((sim["self_play"], len(sim["results"]), sim["num_entries_built"])))
+    check("every simulated result carries a real cash_probability_pct and roi_pct",
+          all("cash_probability_pct" in r and "roi_pct" in r for r in sim["results"]), "")
+    check("build_contest_entries_simulated's entries are sorted by simulated roi_pct, best first",
+          all(sim["results"][i]["roi_pct"] >= sim["results"][i + 1]["roi_pct"]
+              for i in range(len(sim["results"]) - 1)),
+          str([r["roi_pct"] for r in sim["results"]]))
+    check("first_place_pct defaults to the gpp_small preset's own value (15.0) when not overridden",
+          sim["first_place_pct"] == 15.0, str(sim["first_place_pct"]))
+
+    self_play_sim = asyncio.run(nfl_contest.build_contest_entries_simulated(
+        slate, "gpp_small", 3, season=2098, num_trials=300, allow_duplicates=True,
+        self_play=True, first_place_pct=25.0,
+    ))
+    check("self_play=True ranks the batch against ITSELF (no separate field) and reports it",
+          self_play_sim["self_play"] is True, "")
+    check("first_place_pct override is echoed back exactly when given",
+          self_play_sim["first_place_pct"] == 25.0, str(self_play_sim["first_place_pct"]))
+
+    check("field_baseline reports the contest's closed-form zero-skill cash rate and ROI",
+          sim["field_baseline"]["avg_cash_probability_pct"] == 20.0, str(sim["field_baseline"]))
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")

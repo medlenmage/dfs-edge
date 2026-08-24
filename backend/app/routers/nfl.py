@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
 from app.clients import nfl, rotowire_nfl
-from app.services import nfl_optimizer, nfl_slate, nfl_variance, player_match, projections, salaries
+from app.services import nfl_contest, nfl_optimizer, nfl_slate, nfl_variance, player_match, projections, salaries
 
 router = APIRouter(prefix="/api/nfl", tags=["nfl"])
 
@@ -219,4 +219,130 @@ async def generate_lineups(
                 "ceiling": round(ordered[round(0.90 * (n - 1))], 2),
                 "mean": round(sum(ordered) / n, 2),
             }
+    return {"season": resolved_season, "week": resolved_week, **result}
+
+
+_NFL_SIM_TRIALS = 2000
+_NFL_ENTRIES_PREVIEW_CAP = 200
+
+
+@router.get("/contest-types")
+async def get_contest_types() -> dict[str, Any]:
+    """Named contest presets the field generator can build against --
+    same DK archetypes contest.py's MLB version uses."""
+    return {"contest_types": nfl_contest.CONTEST_TYPES}
+
+
+@router.post("/contest-entries")
+async def build_contest_entries(
+    season: int | None = Body(None, embed=True),
+    week: int | None = Body(None, embed=True),
+    contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
+    num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {nfl_contest.MAX_USER_LINEUPS:,}"),
+    max_exposure_pct: float | None = Body(
+        None, embed=True, description="Cap how often any one player appears across the whole batch"
+    ),
+    field_size: int | None = Body(
+        None, embed=True, description="Override the preset's real contest size (entries) -- must be >= num_lineups"
+    ),
+    sample_size: int | None = Body(
+        None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
+    ),
+    min_salary: int = Body(0, embed=True, description="Floor on each entry's total salary"),
+    max_salary: int = Body(
+        nfl_optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's total salary"
+    ),
+    allow_duplicates: bool = Body(
+        False, embed=True,
+        description="Allow exact duplicate entries in the batch (a real GPP move). Each entry reports duplicate_count.",
+    ),
+    field_sharpness: str = Body(
+        "marquee", embed=True,
+        description="How sharp the simulated opponent field is: 'low', 'marquee' (default), or 'high'.",
+    ),
+) -> dict[str, Any]:
+    """
+    The deterministic mass multi-entry contest generator -- build up to
+    `num_lineups` of your own entries for a named contest type, ranked
+    against a simulated opponent field's *projected* points. See
+    POST /contest-entries-simulated for the real Monte Carlo alternative.
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    slate = await nfl_slate.build_slate(resolved_season, resolved_week)
+    try:
+        result = nfl_contest.build_contest_entries(
+            slate, contest_type, num_lineups,
+            max_exposure_pct=max_exposure_pct, field_size=field_size, sample_size=sample_size,
+            min_salary=min_salary, max_salary=max_salary,
+            allow_duplicates=allow_duplicates, field_sharpness=field_sharpness,
+        )
+    except nfl_contest.ContestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result["results"] = result["results"][:_NFL_ENTRIES_PREVIEW_CAP]
+    result["entries"] = result["entries"][:_NFL_ENTRIES_PREVIEW_CAP]
+    return {"season": resolved_season, "week": resolved_week, **result}
+
+
+@router.post("/contest-entries-simulated")
+async def build_contest_entries_simulated(
+    season: int | None = Body(None, embed=True),
+    week: int | None = Body(None, embed=True),
+    contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
+    num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {nfl_contest.MAX_USER_LINEUPS:,}"),
+    max_exposure_pct: float | None = Body(
+        None, embed=True, description="Cap how often any one player appears across the whole batch"
+    ),
+    field_size: int | None = Body(
+        None, embed=True, description="Override the preset's real contest size (entries) -- must be >= num_lineups"
+    ),
+    sample_size: int | None = Body(
+        None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
+    ),
+    min_salary: int = Body(0, embed=True, description="Floor on each entry's total salary"),
+    max_salary: int = Body(
+        nfl_optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's total salary"
+    ),
+    allow_duplicates: bool = Body(
+        False, embed=True,
+        description="Allow exact duplicate entries in the batch. Duplicates' cash probability/payout/ROI are averaged across the tied group, matching DK's real tie-payout split.",
+    ),
+    self_play: bool = Body(
+        False, embed=True,
+        description="Rank this batch against ITSELF instead of a separately-sampled public field -- every lineup competing against every other lineup you generated, in the same simulated trial.",
+    ),
+    field_sharpness: str = Body(
+        "marquee", embed=True,
+        description="How sharp the simulated opponent field is: 'low', 'marquee' (default), or 'high'. Ignored when self_play=True.",
+    ),
+    first_place_pct: float | None = Body(
+        None, embed=True,
+        description="Override the contest preset's own percent-to-first for this run. Defaults to the preset's own value when omitted.",
+    ),
+) -> dict[str, Any]:
+    """
+    Like POST /contest-entries, but ranks the batch against a genuine
+    Monte Carlo simulation (nfl_contest.build_contest_entries_simulated())
+    using real per-player/DST outcome pools bootstrapped from
+    nfl.PRIOR_SEASON's actual 2025 game logs, correlated by team/opponent
+    (see nfl_variance.py's own module docstring) -- each entry's
+    cash_probability_pct is the real fraction of simulated trials it
+    lands in the paid zone, not a point estimate.
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    slate = await nfl_slate.build_slate(resolved_season, resolved_week)
+    try:
+        result = await nfl_contest.build_contest_entries_simulated(
+            slate, contest_type, num_lineups,
+            season=nfl.PRIOR_SEASON, num_trials=_NFL_SIM_TRIALS,
+            max_exposure_pct=max_exposure_pct, field_size=field_size, sample_size=sample_size,
+            min_salary=min_salary, max_salary=max_salary,
+            allow_duplicates=allow_duplicates, self_play=self_play,
+            field_sharpness=field_sharpness, first_place_pct=first_place_pct,
+        )
+    except nfl_contest.ContestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result["results"] = result["results"][:_NFL_ENTRIES_PREVIEW_CAP]
+    result["entries"] = result["entries"][:_NFL_ENTRIES_PREVIEW_CAP]
     return {"season": resolved_season, "week": resolved_week, **result}
