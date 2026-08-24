@@ -10,7 +10,16 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, Response, Uploa
 
 from app import cache
 from app.clients import nfl, rotowire_nfl
-from app.services import nfl_contest, nfl_optimizer, nfl_slate, nfl_variance, player_match, projections, salaries
+from app.services import (
+    nfl_contest,
+    nfl_optimizer,
+    nfl_slate,
+    nfl_stack_rating,
+    nfl_variance,
+    player_match,
+    projections,
+    salaries,
+)
 
 router = APIRouter(prefix="/api/nfl", tags=["nfl"])
 
@@ -32,6 +41,21 @@ async def get_slate(
     """The week's slate: games, Vegas-implied context, weather, and (once uploaded) every rostered player."""
     resolved_season, resolved_week = await _resolve_season_week(season, week)
     return await nfl_slate.build_slate(resolved_season, resolved_week)
+
+
+@router.get("/stacks")
+async def get_stack_ratings(
+    season: int | None = Query(None, description="e.g. 2026 -- defaults to the current NFL season"),
+    week: int | None = Query(None, description="1-18 -- defaults to the current week"),
+) -> dict[str, Any]:
+    """
+    Every team's QB-stack rating for the week, best-first -- Vegas
+    environment, real PROE/pass-funnel, and empirically-correlated
+    recommended partners (own top pass-catchers + a bring-back).
+    Requires a DK salary CSV loaded for the week (same as /lineups).
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    return await nfl_stack_rating.build_stack_ratings(resolved_season, resolved_week)
 
 
 @router.post("/salaries")

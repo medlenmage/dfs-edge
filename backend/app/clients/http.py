@@ -97,6 +97,46 @@ async def get_json(
     raise ApiError(f"{source} failed after retries: {last_error}", source=source)
 
 
+async def get_bytes(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    source: str = "api",
+    retries: int = 2,
+) -> bytes:
+    """Same as get_json/get_text, but for binary payloads (e.g. a gzipped CSV)."""
+    client = get_client()
+    last_error: Exception | None = None
+
+    for attempt in range(retries + 1):
+        try:
+            resp = await client.get(url, params=params)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_error = exc
+            if attempt < retries:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            raise ApiError(
+                f"Could not reach {source}: {exc}", source=source
+            ) from exc
+
+        if resp.status_code == 200:
+            return resp.content
+
+        if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+            await asyncio.sleep(2.0 * (attempt + 1))
+            continue
+
+        detail = resp.text[:300]
+        raise ApiError(
+            f"{source} returned HTTP {resp.status_code}: {detail}",
+            status=resp.status_code,
+            source=source,
+        )
+
+    raise ApiError(f"{source} failed after retries: {last_error}", source=source)
+
+
 async def get_text(
     url: str,
     *,

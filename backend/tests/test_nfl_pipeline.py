@@ -19,8 +19,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import nfl, rotowire_nfl  # noqa: E402
-from app.services import nfl_contest, nfl_dk_points, nfl_optimizer, nfl_scoring, nfl_variance, player_match, salaries  # noqa: E402
+from app.clients import nfl, nfl_pbp, rotowire_nfl  # noqa: E402
+from app.services import (  # noqa: E402
+    nfl_contest,
+    nfl_correlations,
+    nfl_dk_points,
+    nfl_optimizer,
+    nfl_scoring,
+    nfl_stack_rating,
+    nfl_variance,
+    player_match,
+    salaries,
+)
 
 _FAKE_CACHE: dict[str, object] = {}
 
@@ -844,6 +854,184 @@ def main() -> int:
               candidates_by_slot_for_test, "SEA", None, [2, 1], nfl_contest._fpts_weight, random.Random(2)
           ) is None,
           "")
+
+    print("\nPlay-by-play PROE (clients/nfl_pbp.py) -- real xpass-based pass rate over expectation")
+
+    neutral_row = {
+        "posteam": "AAA", "defteam": "BBB", "down": 2.0, "pass_oe": 10.0, "wp": 0.5,
+        "qb_spike": False, "qb_kneel": False, "half_seconds_remaining": 900.0,
+    }
+    check("a normal down-2, mid-wp, non-two-minute play is neutral script",
+          nfl_pbp._is_neutral_script(neutral_row))
+    check("a qb_spike play is excluded from neutral script",
+          not nfl_pbp._is_neutral_script({**neutral_row, "qb_spike": True}))
+    check("a qb_kneel play is excluded from neutral script",
+          not nfl_pbp._is_neutral_script({**neutral_row, "qb_kneel": True}))
+    check("a 4th-down play is excluded from neutral script (go/punt/FG, not a pass-vs-run call)",
+          not nfl_pbp._is_neutral_script({**neutral_row, "down": 4.0}))
+    check("a garbage-time play (wp near 1) is excluded from neutral script",
+          not nfl_pbp._is_neutral_script({**neutral_row, "wp": 0.95}))
+    check("a two-minute-drill play is excluded from neutral script even at a neutral wp",
+          not nfl_pbp._is_neutral_script({**neutral_row, "half_seconds_remaining": 60.0}))
+    check("a play with no pass_oe (model couldn't score it) is excluded",
+          not nfl_pbp._is_neutral_script({**neutral_row, "pass_oe": None}))
+
+    async def fake_pbp_rows(season):
+        # AAA passes a lot more than expected on neutral-script plays;
+        # BBB's defense allows a lot more passing than expected (a pass
+        # funnel). One qb_kneel play per team proves it's excluded from
+        # the aggregate rather than dragging it down.
+        rows = []
+        for _ in range(5):
+            rows.append({"posteam": "AAA", "defteam": "CCC", "down": 1.0, "pass_oe": 20.0, "wp": 0.5,
+                         "qb_spike": False, "qb_kneel": False, "half_seconds_remaining": 900.0})
+        for _ in range(5):
+            rows.append({"posteam": "CCC", "defteam": "AAA", "down": 1.0, "pass_oe": -5.0, "wp": 0.5,
+                         "qb_spike": False, "qb_kneel": False, "half_seconds_remaining": 900.0})
+        for _ in range(5):
+            rows.append({"posteam": "DDD", "defteam": "BBB", "down": 1.0, "pass_oe": 15.0, "wp": 0.5,
+                         "qb_spike": False, "qb_kneel": False, "half_seconds_remaining": 900.0})
+        rows.append({"posteam": "AAA", "defteam": "CCC", "down": 1.0, "pass_oe": 999.0, "wp": 0.5,
+                     "qb_spike": False, "qb_kneel": True, "half_seconds_remaining": 900.0})
+        return rows
+
+    nfl_pbp._load_pbp_rows = fake_pbp_rows
+    proe = asyncio.run(nfl_pbp.get_team_proe(2099, force=True))
+    check("get_team_proe averages a team's own offensive PROE over its neutral-script plays only",
+          proe["AAA"]["off_proe"] == 20.0, str(proe.get("AAA")))
+    check("get_team_proe correctly aggregates a team's defensive PROE-allowed from the opposing side's plays",
+          proe["BBB"]["def_proe_allowed"] == 15.0, str(proe.get("BBB")))
+    check("get_team_proe's off_plays_sampled excludes the qb_kneel play (5, not 6)",
+          proe["AAA"]["off_plays_sampled"] == 5, str(proe.get("AAA")))
+
+    print("\nEmpirical QB/pass-catcher correlation (nfl_correlations.py) -- real Pearson from game logs")
+
+    _original_game_points = nfl_dk_points.game_points
+    nfl_dk_points.game_points = lambda row: row["_test_pts"]
+
+    def corr_row(team, week, opp, pos, pts):
+        return {"week": week, "team": team, "opponent_team": opp, "position_group": pos, "_test_pts": pts}
+
+    grouped_corr = {
+        # AAA's top-ranked WR's points move in perfect lockstep with the
+        # QB's; the second-ranked WR is flat every week (no signal at
+        # all); the RB moves in perfect ANTI-lockstep.
+        "qbA": [corr_row("AAA", 1, "BBB", "QB", 10.0), corr_row("AAA", 2, "CCC", "QB", 20.0),
+                corr_row("AAA", 3, "BBB", "QB", 10.0), corr_row("AAA", 4, "CCC", "QB", 20.0)],
+        "wrA1": [corr_row("AAA", 1, "BBB", "WR", 12.0), corr_row("AAA", 2, "CCC", "WR", 22.0),
+                 corr_row("AAA", 3, "BBB", "WR", 12.0), corr_row("AAA", 4, "CCC", "WR", 22.0)],
+        "wrA2": [corr_row("AAA", 1, "BBB", "WR", 5.0), corr_row("AAA", 2, "CCC", "WR", 5.0),
+                 corr_row("AAA", 3, "BBB", "WR", 5.0), corr_row("AAA", 4, "CCC", "WR", 5.0)],
+        "rbA1": [corr_row("AAA", 1, "BBB", "RB", 20.0), corr_row("AAA", 2, "CCC", "RB", 10.0),
+                 corr_row("AAA", 3, "BBB", "RB", 20.0), corr_row("AAA", 4, "CCC", "RB", 10.0)],
+        # BBB/CCC deliberately have no QB of their own in this fixture --
+        # only their WR1 is needed (for AAA's bring-back pairing), and a
+        # QB here would pool INTO the qb_wr1/qb_wr2/qb_rb1 aggregates
+        # below (which are genuinely league-wide, not per-team), diluting
+        # the clean signal this fixture is built to prove.
+        "wrB1": [corr_row("BBB", 1, "AAA", "WR", 9.0), corr_row("BBB", 3, "AAA", "WR", 25.0)],
+        "wrC1": [corr_row("CCC", 2, "AAA", "WR", 7.0), corr_row("CCC", 4, "AAA", "WR", 30.0)],
+    }
+
+    async def fake_grouped_for_corr(season, *, force=False):
+        return grouped_corr
+
+    nfl.get_grouped_season_stats = fake_grouped_for_corr
+    corr = asyncio.run(nfl_correlations.get_league_correlations(2099, force=True))
+    nfl_dk_points.game_points = _original_game_points
+
+    check("qb_wr1 shows a strong positive correlation when the QB's own top-scoring WR's points track his",
+          corr["qb_wr1"]["correlation"] is not None and corr["qb_wr1"]["correlation"] > 0.9,
+          str(corr["qb_wr1"]))
+    check("qb_wr2 (flat points every week, no real signal) shows a much weaker read than qb_wr1",
+          corr["qb_wr2"]["correlation"] is None or corr["qb_wr2"]["correlation"] < corr["qb_wr1"]["correlation"],
+          str((corr["qb_wr1"], corr["qb_wr2"])))
+    check("qb_rb1 (inversely paired points) shows a negative correlation -- the real signal this feature "
+          "exists to surface (QB-RB is a much weaker/wrong-direction pairing than QB-WR)",
+          corr["qb_rb1"]["correlation"] is not None and corr["qb_rb1"]["correlation"] < 0,
+          str(corr["qb_rb1"]))
+    check("qb_bring_back_wr1 pairs the QB's points with whichever opponent's WR1 he actually faced that "
+          "week, not a fixed player -- real paired games exist",
+          corr["qb_bring_back_wr1"]["paired_games"] > 0, str(corr["qb_bring_back_wr1"]))
+
+    print("\nNFL stack rating (nfl_stack_rating.py) -- Vegas + PROE + real correlation combined")
+
+    shootout = nfl_stack_rating._game_total_component(50.0, 3.5)
+    no_shootout = nfl_stack_rating._game_total_component(50.0, 10.0)
+    check("a 50-pt total with a tight (<=7.5) spread gets a shootout bonus a wide-spread game of the "
+          "same total doesn't",
+          shootout["value"] > no_shootout["value"], str((shootout, no_shootout)))
+
+    proe_capped = nfl_stack_rating._proe_component(100.0)
+    check("PROE component is clamped at PROE_MAX_ADJUSTMENT even for an extreme value",
+          proe_capped["value"] == nfl_stack_rating.PROE_MAX_ADJUSTMENT, str(proe_capped))
+
+    funnel = nfl_stack_rating._funnel_component(5.0)
+    tough = nfl_stack_rating._funnel_component(-5.0)
+    check("a positive opponent def_proe_allowed (pass funnel) produces a positive rating bump, a "
+          "negative one (tough pass D) produces a negative adjustment",
+          funnel["value"] > 0 and tough["value"] < 0, str((funnel, tough)))
+
+    stack_players = [
+        {"name": "QB One", "position": "QB", "salary": 7000, "projection": {"fpts": 20.0, "ownership_pct": 15.0}},
+        {"name": "WR Best", "position": "WR", "salary": 8000, "projection": {"fpts": 18.0, "ownership_pct": 25.0}},
+        {"name": "WR Second", "position": "WR", "salary": 5000, "projection": {"fpts": 10.0, "ownership_pct": 8.0}},
+        {"name": "TE One", "position": "TE", "salary": 3000, "projection": {"fpts": 6.0, "ownership_pct": 3.0}},
+        {"name": "RB One", "position": "RB", "salary": 6000, "projection": {"fpts": 14.0, "ownership_pct": 12.0}},
+    ]
+    stack_corr = {
+        "qb_wr1": {"correlation": 0.4}, "qb_wr2": {"correlation": 0.3},
+        "qb_te1": {"correlation": 0.2}, "qb_rb1": {"correlation": 0.05},
+        "qb_bring_back_wr1": {"correlation": 0.1},
+    }
+    partners = nfl_stack_rating._pick_partners(stack_players, stack_corr)
+    check("_pick_partners ranks the team's own top WR ahead of the second WR, matching real roster order",
+          [p["name"] for p in partners] == ["WR Best", "WR Second", "TE One", "RB One"], str(partners))
+    check("each partner carries its own real correlation coefficient from the passed-in correlations",
+          partners[0]["correlation"] == 0.4 and partners[3]["correlation"] == 0.05, str(partners))
+
+    stack_opp_players = [
+        {"name": "Opp WR1", "position": "WR", "team": "OPP", "salary": 7500,
+         "projection": {"fpts": 15.0, "ownership_pct": 10.0}},
+    ]
+    bring_back = nfl_stack_rating._pick_bring_back(stack_opp_players, stack_corr)
+    check("_pick_bring_back picks the opponent's own top WR and tags it with the real bring-back correlation",
+          bring_back["name"] == "Opp WR1" and bring_back["correlation"] == 0.1, str(bring_back))
+
+    full_rating = nfl_stack_rating._rate_team(
+        {"abbrev": "AAA", "implied_total": 25.0, "is_home": True, "favored": True, "players": stack_players},
+        {"abbrev": "OPP", "implied_total": 19.0, "is_home": False, "favored": False, "players": stack_opp_players},
+        {"total_line": 50.0, "spread_line": -3.5},
+        {"AAA": {"off_proe": 3.0, "def_proe_allowed": -1.0}, "OPP": {"off_proe": -1.0, "def_proe_allowed": 1.0}},
+        stack_corr,
+    )
+    check("_rate_team's overall rating is the exact sum of its own named components (environment + game "
+          "total/shootout + PROE + pass funnel), clamped 0-100",
+          full_rating["rating"] == round(
+              full_rating["components"]["environment"]["score"]
+              + full_rating["components"]["game_total"]["value"]
+              + full_rating["components"]["proe"]["value"]
+              + full_rating["components"]["pass_funnel"]["value"],
+              1,
+          ),
+          str(full_rating))
+    check("_rate_team's top_stack_value combines the QB and top partner's real salary/fpts/ownership",
+          full_rating["top_stack_value"]["combined_salary"] == 7000 + 8000
+          and full_rating["top_stack_value"]["combined_projected_fpts"] == 38.0
+          and full_rating["top_stack_value"]["combined_ownership_pct"] == 40.0,
+          str(full_rating["top_stack_value"]))
+
+    no_pool_rating = nfl_stack_rating._rate_team(
+        {"abbrev": "AAA", "implied_total": 28.0, "is_home": True, "favored": True, "players": []},
+        {"abbrev": "OPP", "implied_total": 20.0, "is_home": False, "favored": False, "players": []},
+        {"total_line": 50.0, "spread_line": -3.5},
+        {}, stack_corr,
+    )
+    check("_rate_team degrades gracefully (no partners/bring-back/top_stack_value) when no player pool "
+          "is loaded for either side",
+          no_pool_rating["partners"] == [] and no_pool_rating["bring_back"] is None
+          and no_pool_rating["top_stack_value"] is None,
+          str(no_pool_rating))
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
