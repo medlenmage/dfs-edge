@@ -24,13 +24,24 @@ from datetime import datetime
 from typing import Any
 
 from app import cache
-from app.clients import mlb, odds, savant, weather
+from app.clients import dk_sportsbook, mlb, odds, savant, weather
+from app.config import get_settings
 from app.data.parks import get_park, hr_factor_for_hand
 from app.services import inhouse_projections, projections, salaries, scoring
 
 log = logging.getLogger(__name__)
 
 PITCHER_POSITIONS = {"P", "SP", "RP", "TWP"}
+
+
+def _odds_client():
+    """
+    Which betting-lines source is active (config.py's ODDS_SOURCE) --
+    both clients/odds.py and clients/dk_sportsbook.py expose the exact
+    same get_game_lines()/get_player_props() shapes, so every caller
+    below works identically regardless of which one this returns.
+    """
+    return dk_sportsbook if get_settings().odds_source == "draftkings" else odds
 
 
 # --------------------------------------------------------------------------
@@ -146,7 +157,7 @@ async def build_slate(
         "pit_vl": mlb.get_league_splits(season, "vl", "pitching"),
         "pit_vr": mlb.get_league_splits(season, "vr", "pitching"),
         "pit_season": mlb.get_league_season(season, "pitching"),
-        "lines": odds.get_game_lines("mlb", day=day, force=force_refresh),
+        "lines": _odds_client().get_game_lines("mlb", day=day, force=force_refresh),
         "savant_hit": savant.get_hitter_batted_ball(season),
         "savant_pitch": savant.get_pitcher_batted_ball(season),
         "bullpen": mlb.get_bullpen_stats(season),
@@ -504,7 +515,7 @@ async def _build_game(
     # slate-build mode -- see routers/mlb.py's GET /games), so fetching
     # them there would spend real credits for data nothing uses.
     props = (
-        await odds.get_player_props(line["event_id"], day=day, force=force_refresh)
+        await _odds_client().get_player_props(line["event_id"], day=day, force=force_refresh)
         if line and line.get("event_id")
         else {}
     )
