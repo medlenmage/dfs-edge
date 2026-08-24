@@ -12,6 +12,7 @@ Run it with:
 from __future__ import annotations
 
 import asyncio
+import random
 import sys
 from pathlib import Path
 
@@ -706,12 +707,12 @@ def main() -> int:
     print("\nContest generator + Monte Carlo simulator (nfl_contest.py)")
 
     try:
-        nfl_contest.build_contest_entries(slate, "not_a_real_type", 3)
+        asyncio.run(nfl_contest.build_contest_entries(slate, "not_a_real_type", 3, season=2098))
         check("build_contest_entries raises ContestError on an unknown contest_type", False, "")
     except nfl_contest.ContestError:
         check("build_contest_entries raises ContestError on an unknown contest_type", True, "")
 
-    det = nfl_contest.build_contest_entries(slate, "double_up", 2, allow_duplicates=True)
+    det = asyncio.run(nfl_contest.build_contest_entries(slate, "double_up", 2, season=2098, allow_duplicates=True))
     check("build_contest_entries (deterministic) builds real entries against the double_up preset",
           det["num_entries_built"] >= 1 and det["contest"]["field_size"] == 100, str(det["contest"]))
     check("build_contest_entries's summary reports real cash-rate/payout economics",
@@ -755,6 +756,94 @@ def main() -> int:
 
     check("field_baseline reports the contest's closed-form zero-skill cash rate and ROI",
           sim["field_baseline"]["avg_cash_probability_pct"] == 20.0, str(sim["field_baseline"]))
+
+    check("every real generated entry carries a primary_stack type and a has_bringback boolean",
+          all("primary_stack" in e and isinstance(e["has_bringback"], bool) for e in sim["entries"]),
+          str(sim["entries"][0]))
+
+    print("\nStack archetypes (nfl_contest.py's _classify_pool/_pick_primary/_pick_secondary_teams)")
+
+    def _qb_rush_game(carries):
+        return {"attempts": 25.0, "carries": carries, "targets": 0.0}
+
+    def _rb_target_game(targets):
+        return {"attempts": 0.0, "carries": 12.0, "targets": targets}
+
+    # Real running QB (real 2025 example threshold, 5.0+ carries/game):
+    # 6 games averaging 7 carries. A pure pocket passer stays under it.
+    nfl_variance_logs["1"] = [_qb_rush_game(7.0)] * 6  # QB_A (SEA) -- running
+    nfl_variance_logs["9"] = [_qb_rush_game(1.5)] * 6  # QB_B (NE) -- pocket passer
+    # A real receiving-threat RB (3.5+ targets/game) vs. a between-the-
+    # tackles runner who stays under it.
+    nfl_variance_logs["2"] = [_rb_target_game(5.0)] * 6  # RB_A1 (SEA) -- pass-catcher
+    nfl_variance_logs["3"] = [_rb_target_game(1.0)] * 6  # RB_A2 (SEA) -- pure runner
+
+    candidates_by_slot_for_test = {
+        slot: [p for p in nfl_contest.build_player_pool(slate) if slot in p["slots"]]
+        for slot in nfl_contest.SLOT_TYPES
+    }
+
+    # _classify_pool() reads clients/nfl.get_grouped_season_stats()
+    # directly (not per-player get_player_game_log() calls) for real
+    # bulk-performance reasons -- see that function's own docstring --
+    # so it needs its own fake here rather than reusing the earlier
+    # get_player_game_log fake, which it now bypasses entirely.
+    async def fake_grouped_season_stats(season, *, force=False):
+        return dict(nfl_variance_logs)
+
+    nfl.get_grouped_season_stats = fake_grouped_season_stats
+
+    running_qb_ids, pass_catching_rb_ids = asyncio.run(
+        nfl_contest._classify_pool(candidates_by_slot_for_test, 2098)
+    )
+    check("_classify_pool correctly identifies a real running QB from real rushing volume",
+          "1" in running_qb_ids, str(running_qb_ids))
+    check("_classify_pool correctly excludes a pocket passer from the running-QB set",
+          "9" not in running_qb_ids, str(running_qb_ids))
+    check("_classify_pool correctly identifies a real pass-catching RB from real target volume",
+          "2" in pass_catching_rb_ids, str(pass_catching_rb_ids))
+    check("_classify_pool correctly excludes a between-the-tackles runner from the pass-catching set",
+          "3" not in pass_catching_rb_ids, str(pass_catching_rb_ids))
+
+    rng = random.Random(3)
+    primary_types_seen = set()
+    for _ in range(50):
+        p = nfl_contest._pick_primary(candidates_by_slot_for_test, running_qb_ids, nfl_contest._fpts_weight, rng)
+        if p:
+            primary_types_seen.add(p["type"])
+    check("_pick_primary produces a real mix of primary stack types across many draws, not just one",
+          len(primary_types_seen) >= 3, str(primary_types_seen))
+
+    naked_qb = nfl_contest._pick_primary(
+        candidates_by_slot_for_test, frozenset(), nfl_contest._fpts_weight, random.Random(1)
+    )
+    check("_pick_primary never selects qb_naked when no real running QB is known (empty running_qb_ids)",
+          all(
+              nfl_contest._pick_primary(
+                  candidates_by_slot_for_test, frozenset(), nfl_contest._fpts_weight, random.Random(i)
+              )["type"] != "qb_naked"
+              for i in range(20)
+          ),
+          "")
+
+    # This fixture only has 2 teams (SEA/NE) -- a [2, 1] shape needing
+    # TWO distinct non-primary teams isn't satisfiable with only one
+    # (NE) available, so this uses a single-group [2] shape instead,
+    # which is.
+    secondary = nfl_contest._pick_secondary_teams(
+        candidates_by_slot_for_test, "SEA", "NE", [2], nfl_contest._fpts_weight, random.Random(2)
+    )
+    check("_pick_secondary_teams biases the first group toward the given bring-back team when it "
+          "has enough eligible players",
+          secondary is not None and secondary[0][0] == "NE", str(secondary))
+    check("_pick_secondary_teams never assigns the primary's own team to a secondary group",
+          secondary is not None and all(t != "SEA" for t, _ in secondary), str(secondary))
+    check("_pick_secondary_teams returns None when a shape needs more distinct non-primary teams "
+          "than the pool actually has (this fixture has only SEA/NE -- a [2, 1] shape needs two)",
+          nfl_contest._pick_secondary_teams(
+              candidates_by_slot_for_test, "SEA", None, [2, 1], nfl_contest._fpts_weight, random.Random(2)
+          ) is None,
+          "")
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
