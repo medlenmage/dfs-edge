@@ -157,6 +157,14 @@ CONTEST_TYPES: dict[str, dict[str, Any]] = {
         "shape": "top_heavy",
         "first_place_pct": 15.0,
     },
+    "gpp_mid": {
+        "label": "Mid-field GPP (1K-5K)",
+        "field_size": 3_000,
+        "entry_fee": 10.0,
+        "payout_pct": 0.19,
+        "shape": "top_heavy",
+        "first_place_pct": 15.0,
+    },
     "gpp_large": {
         "label": "Large-field GPP",
         "field_size": 10_000,

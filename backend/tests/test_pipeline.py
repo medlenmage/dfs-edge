@@ -2927,6 +2927,20 @@ async def main() -> int:
     except contest.ContestError:
         check("build_contest_field rejects an unknown contest_type", True)
 
+    check("CONTEST_TYPES has a mid-field GPP preset covering the real 1K-5K entry-count gap between "
+          "gpp_small (500) and gpp_large (10,000)",
+          "gpp_mid" in contest.CONTEST_TYPES
+          and 1_000 <= contest.CONTEST_TYPES["gpp_mid"]["field_size"] <= 5_000,
+          str(contest.CONTEST_TYPES.get("gpp_mid")))
+    mid_field_batch = contest.build_contest_entries(mul_slate, "gpp_mid", 5, sample_size=50, seed=41)
+    check("build_contest_entries builds real entries against the new gpp_mid preset",
+          len(mid_field_batch["entries"]) == 5, str(len(mid_field_batch["entries"])))
+    check("gpp_mid's field_baseline reflects its own real field_size/payout_pct, not gpp_small's or "
+          "gpp_large's",
+          mid_field_batch["field_baseline"]["avg_cash_probability_pct"]
+          == round(contest.CONTEST_TYPES["gpp_mid"]["payout_pct"] * 100, 1),
+          str(mid_field_batch["field_baseline"]))
+
     print("\nContest field generator: end-to-end against the optimizer")
 
     opt_lineups = optimizer.generate_lineups(mul_slate, num_lineups=2)["lineups"]
