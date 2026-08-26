@@ -271,6 +271,20 @@ _RAW_FPTS_WEIGHT = 1.0
 _TEAM_TOTAL_WEIGHT = 0.4
 _SALARY_TIER_WEIGHT = 0.3
 
+# A real, well-known field-behavior pattern the four signals above
+# can't see on their own: when the pitcher a hitter is facing is
+# himself heavily owned (a "safe," popular pitcher play), public
+# attention -- and roster spots -- concentrate on that pitcher at the
+# expense of the offense he's shutting down. Modest by design (0.25 --
+# roughly a quarter of value/raw_fpts' own weight): this is a real but
+# secondary leverage signal, not meant to swamp the hitter's own
+# matchup/projection quality. Applied AFTER pitchers' own group is
+# scored (see the two-pass structure in project_ownership() below) as
+# a subtraction scaled by how far the opposing pitcher's OWN modelled
+# ownership sits above the pitcher group's average -- a pitcher at
+# exactly league-average ownership contributes no adjustment at all.
+_OPPONENT_PITCHER_CHALK_WEIGHT = 0.25
+
 # Softmax temperature: how concentrated ownership gets on the top
 # play(s) within a position group. Lower = more chalk-heavy (the best
 # play dominates); higher = flatter, more evenly spread. Temperature
@@ -302,6 +316,10 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     (whichever projection is driving this -- inhouse_fpts if
     available, RotoWire's otherwise), and implied_runs (that player's
     team's Vegas implied run total, or None if no odds are loaded).
+    A hitter entry may also carry `opponent_pitcher_id` (the id of the
+    starting pitcher he's actually facing) to enable the leverage
+    adjustment described below -- optional, a hitter missing it (or
+    whose opposing pitcher isn't itself in `pool`) just skips it.
 
     Combines four signals into one raw "ownership propensity" score,
     then softmax-normalizes WITHIN each DK roster-slot group so every
@@ -377,6 +395,21 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     is, gives studs a real signal that isn't purely price-relative,
     without discarding `value`'s own genuine role for the min-priced
     end of a position group.
+
+    LEVERAGE: A CHALKY OPPOSING PITCHER SUPPRESSES A HITTER'S OWNERSHIP
+    -------------------------------------------------------------
+    A real, well-documented field-behavior pattern the four signals
+    above have no way to see on their own: public attention (and roster
+    spots) concentrate on a popular "safe pitcher" play at the expense
+    of the offense he's shutting down. Applied as a two-pass process --
+    the `P` group is scored first and completely unaffected by anything
+    below, then every hitter's raw score gets `_OPPONENT_PITCHER_CHALK_
+    WEIGHT * max(0, (opposing pitcher's own just-computed ownership% -
+    the P group's average) / that average)` subtracted before ITS
+    group's own softmax -- a real, asymmetric penalty (only ever a
+    penalty, never a symmetric bonus for a below-average-owned
+    opponent) scaled by how far above pitcher-average the specific
+    opposing arm actually sits, zero for a pitcher at or below it.
     """
     ownership: dict[int, float] = {}
 
@@ -384,14 +417,18 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     for p in pool:
         groups.setdefault(p["position"], []).append(p)
 
-    for position, players in groups.items():
+    def _score_group(
+        position: str,
+        players: list[dict[str, Any]],
+        opponent_penalty: dict[int, float] | None = None,
+    ) -> None:
         slot_count = SLOT_REQUIREMENTS.get(position)
         if not slot_count:
-            continue  # not a real DK roster slot -- skip rather than guess
+            return  # not a real DK roster slot -- skip rather than guess
 
         player_salaries = [p["salary"] for p in players if p.get("salary")]
         if not player_salaries:
-            continue
+            return
         min_salary, max_salary = min(player_salaries), max(player_salaries)
         mid_salary = (min_salary + max_salary) / 2
         salary_half_span = max((max_salary - min_salary) / 2, 1)
@@ -418,12 +455,15 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
 
             salary_tier = abs(salary - mid_salary) / salary_half_span
 
-            raw_scores.append(
+            score = (
                 _VALUE_WEIGHT * value
                 + _RAW_FPTS_WEIGHT * fpts_norm
                 + _TEAM_TOTAL_WEIGHT * team_total
                 + _SALARY_TIER_WEIGHT * salary_tier
             )
+            if opponent_penalty is not None:
+                score -= opponent_penalty.get(p["id"], 0.0)
+            raw_scores.append(score)
 
         # Softmax, shifted by the group's own max for numerical
         # stability -- doesn't change the resulting distribution.
@@ -433,5 +473,29 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
 
         for p, weight in zip(players, weights):
             ownership[p["id"]] = round((weight / total_weight) * slot_count * 100, 2)
+
+    # Pass 1: pitchers, scored exactly as any other group -- nothing
+    # downstream can affect a pitcher's own ownership.
+    pitcher_players = groups.pop("P", [])
+    if pitcher_players:
+        _score_group("P", pitcher_players)
+    pitcher_ownerships = [ownership[p["id"]] for p in pitcher_players if p["id"] in ownership]
+    avg_pitcher_ownership = sum(pitcher_ownerships) / len(pitcher_ownerships) if pitcher_ownerships else None
+
+    # Pass 2: every other group, with a real (one-directional) leverage
+    # penalty for any hitter whose own opposing pitcher just scored
+    # above the pitcher group's own average.
+    opponent_penalty: dict[int, float] = {}
+    if avg_pitcher_ownership:
+        for p in pool:
+            opp_id = p.get("opponent_pitcher_id")
+            opp_own = ownership.get(opp_id) if opp_id is not None else None
+            if opp_own is not None:
+                opponent_penalty[p["id"]] = _OPPONENT_PITCHER_CHALK_WEIGHT * max(
+                    0.0, (opp_own - avg_pitcher_ownership) / avg_pitcher_ownership
+                )
+
+    for position, players in groups.items():
+        _score_group(position, players, opponent_penalty)
 
     return ownership

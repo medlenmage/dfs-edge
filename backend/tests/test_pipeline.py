@@ -6019,6 +6019,45 @@ async def main() -> int:
           "raw_fpts gives absolute point volume a real signal independent of price efficiency",
           raw_fpts_ownership[85002] > raw_fpts_ownership[85001], str(raw_fpts_ownership))
 
+    print("\nCorrelated field ownership: a chalky opposing pitcher suppresses a hitter's own ownership")
+
+    # Two pitchers with very different raw ownership propensity (one
+    # much higher salary/fpts) -- one ends up clearly the chalkier play.
+    chalky_pitcher = {"id": 91001, "position": "P", "salary": 9000, "fpts": 25.0, "implied_runs": 4.4}
+    plain_pitcher = {"id": 91002, "position": "P", "salary": 5000, "fpts": 12.0, "implied_runs": 4.4}
+    # Two otherwise-IDENTICAL hitters (same salary/fpts/team_total) --
+    # only which pitcher they're facing differs.
+    hitter_vs_chalky = {
+        "id": 91011, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 4.4,
+        "opponent_pitcher_id": 91001,
+    }
+    hitter_vs_plain = {
+        "id": 91012, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 4.4,
+        "opponent_pitcher_id": 91002,
+    }
+    leverage_pool = [chalky_pitcher, plain_pitcher, hitter_vs_chalky, hitter_vs_plain]
+    leverage_ownership = inhouse_projections.project_ownership(leverage_pool)
+    check("the chalky pitcher's own modelled ownership is genuinely higher than the plain one's "
+          "(precondition for the leverage test below to mean anything)",
+          leverage_ownership[91001] > leverage_ownership[91002], str(leverage_ownership))
+    check("a hitter facing a chalkier-than-average opposing pitcher gets LOWER modelled ownership "
+          "than an otherwise-identical hitter facing a less-chalky one",
+          leverage_ownership[91011] < leverage_ownership[91012], str(leverage_ownership))
+
+    original_chalk_weight = inhouse_projections._OPPONENT_PITCHER_CHALK_WEIGHT
+    inhouse_projections._OPPONENT_PITCHER_CHALK_WEIGHT = 0.0
+    no_leverage_ownership = inhouse_projections.project_ownership(leverage_pool)
+    inhouse_projections._OPPONENT_PITCHER_CHALK_WEIGHT = original_chalk_weight
+    check("with the leverage weight at 0, the two otherwise-identical hitters get IDENTICAL "
+          "ownership -- the adjustment is purely additive, not a rewrite of the base model",
+          no_leverage_ownership[91011] == no_leverage_ownership[91012], str(no_leverage_ownership))
+
+    no_opp_pool = [chalky_pitcher, plain_pitcher, {
+        "id": 91013, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 4.4,
+    }]
+    check("a hitter with no opponent_pitcher_id at all still gets scored normally, no crash",
+          91013 in inhouse_projections.project_ownership(no_opp_pool), "")
+
     print("\nLeverage: real ceiling (variance.py's outcome pool) minus ownership%")
 
     check("ceiling_from_pool reads the exact percentile from a known pool",
