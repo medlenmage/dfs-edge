@@ -81,7 +81,15 @@ export function StackTable({ slate }) {
         opponent: opp.abbrev,
         startTime: localTime(g.game_time_utc),
         score: t.stack_score,
-        impliedRuns: t.implied_runs,
+        // FantasyLabs (see clients/fantasylabs.py) tracks both the
+        // originally-set (open) implied total and today's live one --
+        // "Implied runs" stays the opening number so it doesn't shift
+        // under someone mid-session, "Live" is the separate up-to-date
+        // read for whenever FantasyLabs updates it. Falls back to the
+        // single implied_runs field (pre-FantasyLabs slates/tests)
+        // when the open/current split isn't available.
+        impliedRuns: t.vegas_implied_runs_open ?? t.implied_runs,
+        liveImpliedRuns: t.vegas_implied_runs_current ?? t.implied_runs,
         avgXwoba: avgOf(t.hitters || [], 'xwoba'),
         avgBarrel: avgOf(t.hitters || [], 'barrel_pct'),
         confirmed: t.lineup_confirmed,
@@ -161,7 +169,12 @@ export function StackTable({ slate }) {
             <th>Team</th>
             <th>Start</th>
             <th>Stack score</th>
-            <th className="num">Implied runs</th>
+            <th className="num" title="The implied run total as originally set -- doesn't move once loaded">
+              Implied runs
+            </th>
+            <th className="num" title="Today's live implied run total, from FantasyLabs -- updates as the line moves">
+              Live
+            </th>
             <th className="num">Contact quality</th>
             <th>Opposing starter</th>
             <th>Park / conditions</th>
@@ -189,6 +202,24 @@ export function StackTable({ slate }) {
               </td>
               <td className="num">
                 {r.impliedRuns != null ? r.impliedRuns.toFixed(1) : '—'}
+              </td>
+              <td className="num">
+                {r.liveImpliedRuns != null ? (
+                  <span
+                    style={
+                      r.impliedRuns != null && r.liveImpliedRuns !== r.impliedRuns
+                        ? { color: r.liveImpliedRuns > r.impliedRuns ? 'var(--good)' : 'var(--critical)' }
+                        : undefined
+                    }
+                  >
+                    {r.liveImpliedRuns.toFixed(1)}
+                    {r.impliedRuns != null && r.liveImpliedRuns !== r.impliedRuns && (
+                      <> {r.liveImpliedRuns > r.impliedRuns ? '▲' : '▼'}</>
+                    )}
+                  </span>
+                ) : (
+                  '—'
+                )}
               </td>
               <td className="num">
                 {r.avgXwoba != null ? r.avgXwoba.toFixed(3) : '—'}
