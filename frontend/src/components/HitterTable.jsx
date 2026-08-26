@@ -23,6 +23,21 @@ const COLUMNS = [
   { key: 'why', label: 'Biggest factor', sortable: false },
 ]
 
+// DK roster-slot positions, in Classic MLB order. A player's real DK
+// salary position (when a salary CSV is loaded -- e.g. "1B/3B" for a
+// multi-eligible player) wins; otherwise falls back to a normalized
+// read of the MLB bio position (which splits the outfield into
+// LF/CF/RF and has no DH slot at all), since that's all that's known
+// before a salary file exists.
+const POSITIONS = ['C', '1B', '2B', '3B', 'SS', 'OF', 'DH']
+
+function canonicalPosition(dkSalaryPosition, bioPosition) {
+  if (dkSalaryPosition) return dkSalaryPosition.split('/')[0].trim()
+  if (bioPosition === 'LF' || bioPosition === 'CF' || bioPosition === 'RF') return 'OF'
+  if (bioPosition === 'TWP') return 'DH' // a two-way player's hitting-only days are a DH/util role
+  return bioPosition || ''
+}
+
 const DRIVER_LABELS = {
   platoon: 'his platoon split',
   pitcher: 'the pitcher',
@@ -43,6 +58,7 @@ export function HitterTable({ slate, limit = 50 }) {
   const [sortDir, setSortDir] = useState('desc')
   const [minScore, setMinScore] = useState(0)
   const [search, setSearch] = useState('')
+  const [positionFilter, setPositionFilter] = useState('')
   const [showGames, setShowGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
 
@@ -97,6 +113,7 @@ export function HitterTable({ slate, limit = 50 }) {
             game_pk: g.game_pk,
             name: h.name,
             position: h.position,
+            dkPosition: canonicalPosition(h.salary?.position, h.position),
             bats: h.bats,
             order: h.batting_order,
             team: team.abbrev,
@@ -138,6 +155,7 @@ export function HitterTable({ slate, limit = 50 }) {
       (r) =>
         (!slateGames.length || includedGames.has(r.game_pk)) &&
         r.score >= minScore &&
+        (!positionFilter || r.dkPosition === positionFilter) &&
         (!q ||
           r.name?.toLowerCase().includes(q) ||
           r.team?.toLowerCase().includes(q)),
@@ -153,7 +171,7 @@ export function HitterTable({ slate, limit = 50 }) {
       return (av - bv) * dir
     })
     return list.slice(0, limit)
-  }, [rows, sortKey, sortDir, minScore, search, limit, includedGames, slateGames])
+  }, [rows, sortKey, sortDir, minScore, positionFilter, search, limit, includedGames, slateGames])
 
   function toggleSort(key) {
     if (key === sortKey) {
@@ -183,6 +201,17 @@ export function HitterTable({ slate, limit = 50 }) {
           onChange={(e) => setSearch(e.target.value)}
           style={{ minWidth: 220 }}
         />
+        <label className="dim" style={{ fontSize: 13 }}>
+          Position{' '}
+          <select value={positionFilter} onChange={(e) => setPositionFilter(e.target.value)}>
+            <option value="">All</option>
+            {POSITIONS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="dim" style={{ fontSize: 13 }}>
           Min score{' '}
           <select
