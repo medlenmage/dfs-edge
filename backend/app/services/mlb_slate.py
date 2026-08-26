@@ -26,7 +26,7 @@ from datetime import datetime
 from typing import Any
 
 from app import cache
-from app.clients import fantasylabs, mlb, odds, savant, weather
+from app.clients import fantasylabs, mlb, odds, rotowire_umpires, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
 from app.services import inhouse_projections, projections, salaries, scoring
 
@@ -150,6 +150,7 @@ async def build_slate(
         "pit_season": mlb.get_league_season(season, "pitching"),
         "lines": odds.get_game_lines("mlb", day=day, force=force_refresh),
         "fantasylabs_vegas": fantasylabs.get_vegas_odds(day, force=force_refresh),
+        "umpires": rotowire_umpires.get_todays_umpires(force=force_refresh),
         "savant_hit": savant.get_hitter_batted_ball(season),
         "savant_pitch": savant.get_pitcher_batted_ball(season),
         "bullpen": mlb.get_bullpen_stats(season),
@@ -192,6 +193,13 @@ async def build_slate(
         # sample of relief innings, so no further gate here either.
         "bullpen_era": scoring.league_average(data["bullpen"], "era", 0, "era"),
         "bullpen_workload_outs": scoring.league_average(data["bullpen_workload"], "outs", 0, "outs"),
+        # Self-calibrating league-average umpire RPG/KPG from whatever
+        # RotoWire has posted TODAY (not a fixed guessed constant) --
+        # None (not a fake number) until at least 5 real games' worth
+        # of umpire-games have posted, same "don't trust a thin sample"
+        # gate every other league_average() call here already uses.
+        "umpire_avg_rpg": scoring.league_average(data["umpires"], "rpg", 5, "games"),
+        "umpire_avg_kpg": scoring.league_average(data["umpires"], "kpg", 5, "games"),
     }
 
     # Salaries and projections are manual uploads, not a fetch -- see
@@ -479,6 +487,10 @@ async def _build_game(
         else None
     )
 
+    # --- Today's umpire (RotoWire) -- absent until RotoWire itself has
+    # a posted assignment, same "not yet known" convention as betting.
+    umpire = (data.get("umpires") or {}).get(f"{away_t.get('abbreviation')}@{home_abbrev}")
+
     # --- Probable pitchers ---
     home_pp = (teams.get("home") or {}).get("probablePitcher") or {}
     away_pp = (teams.get("away") or {}).get("probablePitcher") or {}
@@ -512,6 +524,7 @@ async def _build_game(
         ),
         "betting": betting or {"note": "no line available"},
         "vegas": vegas or {"note": "no FantasyLabs line available"},
+        "umpire": umpire or {"note": "not yet assigned"},
         "home": {
             "team_id": home_t.get("id"),
             "abbrev": home_abbrev,
@@ -569,6 +582,7 @@ async def _build_game(
         "roof_closed": roof_closed,
         "temp_fx": temp_fx,
         "wind_fx": wind_fx,
+        "umpire": umpire,
     }
     lineups = await mlb.get_lineups(game_pk) if game_pk else {"home": [], "away": []}
 
@@ -762,6 +776,11 @@ def _pitcher_edge(
     weather_comp = scoring.weather_component(env["temp_fx"], env["wind_fx"], env["roof_closed"])
     weather_comp = {**weather_comp, "value": scoring.invert_for_pitcher(weather_comp["value"])}
 
+    umpire_comp = scoring.umpire_component(
+        env.get("umpire"), baselines.get("umpire_avg_rpg"), baselines.get("umpire_avg_kpg")
+    )
+    umpire_comp = {**umpire_comp, "value": scoring.invert_for_pitcher(umpire_comp["value"])}
+
     components = {
         "opp_lineup": scoring.opp_lineup_component(facing_hitters),
         "strikeout_potential": scoring.strikeout_potential_component(
@@ -783,6 +802,7 @@ def _pitcher_edge(
         ),
         "park": park_comp,
         "weather": weather_comp,
+        "umpire": umpire_comp,
     }
     edge = scoring.combine(components, scoring.PITCHER_WEIGHTS)
     return {**edge, "components": components}
@@ -1010,6 +1030,9 @@ async def _team_hitters(
                 (data["hit_home"] if is_home else data["hit_away"]).get(pid),
                 season_stat,
                 is_home,
+            ),
+            "umpire": scoring.umpire_component(
+                env.get("umpire"), baselines.get("umpire_avg_rpg"), baselines.get("umpire_avg_kpg")
             ),
         }
         edge = scoring.combine(components)
