@@ -308,6 +308,13 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
     for g in out_games:
         for side in ("home", "away"):
             implied_runs = g[side]["implied_runs"]
+            # The pitcher this side's hitters actually face -- already
+            # sitting right there in the same already-built game dict,
+            # no new fetch needed. Feeds project_ownership()'s opposing-
+            # pitcher-chalk leverage adjustment.
+            opp_side = "away" if side == "home" else "home"
+            opponent_pitcher = g[opp_side]["probable_pitcher"]
+            opponent_pitcher_id = opponent_pitcher.get("id") if opponent_pitcher else None
             for hitter in g[side]["hitters"]:
                 fpts = inhouse.get(hitter["id"])
                 salary_info = hitter.get("salary")
@@ -319,6 +326,7 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                             "salary": salary_info["salary"],
                             "fpts": fpts,
                             "implied_runs": implied_runs,
+                            "opponent_pitcher_id": opponent_pitcher_id,
                         }
                     )
             pitcher = g[side]["probable_pitcher"]
