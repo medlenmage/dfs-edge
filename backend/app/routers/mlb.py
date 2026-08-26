@@ -734,6 +734,11 @@ async def build_contest_entries(
         embed=True,
         description="Allow exact duplicate entries in the batch (a real GPP move -- entering a signature build multiple times). Each entry reports duplicate_count",
     ),
+    max_duplication_risk: float | None = Body(
+        None,
+        embed=True,
+        description="Reject any entry whose cumulative (log-product) ownership exceeds this -- a chalk filter distinct from a salary/exposure cap, catching a lineup where every player is moderately chalky together (the real 'exact duplicate' risk) even when its SUMMED total_ownership_pct looks unremarkable. More negative = stricter (closer to 0 = looser). Unset by default (unconstrained).",
+    ),
     field_sharpness: str = Body(
         "marquee",
         embed=True,
@@ -779,6 +784,7 @@ async def build_contest_entries(
             min_salary=min_salary,
             max_salary=max_salary,
             allow_duplicates=allow_duplicates,
+            max_duplication_risk=max_duplication_risk,
             field_sharpness=field_sharpness,
         )
     except contest.ContestError as exc:
@@ -831,6 +837,11 @@ async def build_contest_entries_simulated(
         False,
         embed=True,
         description="Allow exact duplicate entries in the batch (a real GPP move -- entering a signature build multiple times). Duplicates' cash probability/payout/ROI are averaged across the tied group, matching DK's real tie-payout split. Each entry reports duplicate_count",
+    ),
+    max_duplication_risk: float | None = Body(
+        None,
+        embed=True,
+        description="Reject any entry whose cumulative (log-product) ownership exceeds this -- a chalk filter distinct from a salary/exposure cap, catching a lineup where every player is moderately chalky together (the real 'exact duplicate' risk) even when its SUMMED total_ownership_pct looks unremarkable. More negative = stricter (closer to 0 = looser). Unset by default (unconstrained).",
     ),
     self_play: bool = Body(
         False,
@@ -888,6 +899,7 @@ async def build_contest_entries_simulated(
             min_salary=min_salary,
             max_salary=max_salary,
             allow_duplicates=allow_duplicates,
+            max_duplication_risk=max_duplication_risk,
             self_play=self_play,
             engine=engine,
             field_sharpness=field_sharpness,

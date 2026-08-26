@@ -30,6 +30,11 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [minSalary, setMinSalary] = useState('47000')
   const [maxSalary, setMaxSalary] = useState('')
   const [allowDuplicates, setAllowDuplicates] = useState(false)
+  // Cumulative (log-product, not summed) ownership cap -- a chalk
+  // filter distinct from total_ownership_pct, catching a lineup where
+  // every player is moderately chalky TOGETHER. Values are negative
+  // (closer to 0 = looser); '' means unconstrained.
+  const [maxDuplicationRisk, setMaxDuplicationRisk] = useState('')
   const [fieldSharpness, setFieldSharpness] = useState('marquee')
   // Percent-to-first override for the SIMULATED payout curve, Stokastic-
   // style -- '' means "use the contest preset's own value." Only ever
@@ -176,6 +181,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
         minSalary: minSalary.trim() ? Number(minSalary) : 0,
         maxSalary: maxSalary.trim() ? Number(maxSalary) : 50000,
         allowDuplicates,
+        maxDuplicationRisk: maxDuplicationRisk.trim() ? Number(maxDuplicationRisk) : null,
         fieldSharpness,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
@@ -438,6 +444,21 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             onChange={(e) => setAllowDuplicates(e.target.checked)}
           />
           Allow duplicates
+        </label>
+        <label
+          className="dim"
+          style={{ fontSize: 13 }}
+          title="Reject any entry whose cumulative (log-product) ownership exceeds this -- catches a lineup where every player is moderately chalky TOGETHER even when its summed Own% looks unremarkable, the real 'the field will build this exact lineup too' risk. Values are negative; closer to 0 is looser. Leave blank for unconstrained."
+        >
+          Max duplication risk{' '}
+          <input
+            type="number"
+            step="0.5"
+            placeholder="none"
+            value={maxDuplicationRisk}
+            onChange={(e) => setMaxDuplicationRisk(e.target.value)}
+            style={{ width: 70 }}
+          />
         </label>
         <label
           className="dim"
@@ -794,6 +815,12 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                   {state.summary.estimated_net_profit >= 0 ? '+' : ''}$
                   {state.summary.estimated_net_profit.toLocaleString()} est. net
                 </span>
+                <span
+                  className="badge"
+                  title="Cumulative (log-product) ownership, averaged across the batch -- how consistently chalky a typical entry's players are TOGETHER, distinct from summed ownership%."
+                >
+                  {state.summary.avg_duplication_risk} avg duplication risk
+                </span>
               </div>
             ) : (
               <div className="controls" style={{ flexWrap: 'wrap' }}>
@@ -813,6 +840,12 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                   {state.summary.min_projected_points.toFixed(1)}–{state.summary.max_projected_points.toFixed(1)} range
                 </span>
                 <span className="badge">{state.summary.avg_total_ownership_pct.toFixed(1)}% avg ownership</span>
+                <span
+                  className="badge"
+                  title="Cumulative (log-product) ownership, averaged across the batch -- how consistently chalky a typical entry's players are TOGETHER, distinct from summed ownership%."
+                >
+                  {state.summary.avg_duplication_risk} avg duplication risk
+                </span>
               </div>
             )}
 
@@ -1170,6 +1203,12 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                       </>
                     )}
                     <th className="num">Own%</th>
+                    <th
+                      className="num"
+                      title="Cumulative (log-product) ownership -- how consistently chalky every player in this lineup is TOGETHER, distinct from Own% (a sum). Closer to 0 means the field is more likely to build this exact combination too."
+                    >
+                      Dup. risk
+                    </th>
                     {state.simulated ? (
                       <>
                         <th className="num">Cash %</th>
@@ -1219,6 +1258,7 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                           </>
                         )}
                         <td className="num">{e.total_ownership_pct.toFixed(1)}%</td>
+                        <td className="num">{e.duplication_risk}</td>
                         {state.simulated ? (
                           <>
                             <td className="num">{r ? `${r.cash_probability_pct}%` : '—'}</td>

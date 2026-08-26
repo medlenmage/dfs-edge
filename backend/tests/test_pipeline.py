@@ -3036,6 +3036,63 @@ async def main() -> int:
           all(lu["duplicate_count"] == 3 for lu in dupes_allowed),
           str([lu["duplicate_count"] for lu in dupes_allowed]))
 
+    # Same sum (153.0) either way -- one lineup with one 90%-owned "auto
+    # include" plus 9 barely-owned pieces, the other with all 10 players
+    # evenly at 15.3%. Real DFS "product ownership" reasoning (and the
+    # AM-GM inequality this log-sum formula follows): a lineup is only
+    # at real risk of being exactly replicated when EVERY player in it
+    # is simultaneously popular -- one chalk stud surrounded by unique
+    # pieces is actually a much LESS duplicable build than one where
+    # everything is moderately chalky, even at an identical summed Own%.
+    concentrated_picks = [{"ownership_pct": 90.0}] + [{"ownership_pct": 7.0}] * 9
+    flat_picks = [{"ownership_pct": 15.3}] * 10
+    concentrated_sum = sum(p["ownership_pct"] for p in concentrated_picks)
+    flat_sum = sum(p["ownership_pct"] for p in flat_picks)
+    check("cumulative (log-product) duplication_risk is a genuinely different signal than summed "
+          "total_ownership_pct -- two rosters with an IDENTICAL sum but very different "
+          "concentration must show different duplication_risk",
+          concentrated_sum == flat_sum
+          and contest._duplication_risk(concentrated_picks) != contest._duplication_risk(flat_picks),
+          str((concentrated_sum, flat_sum,
+               contest._duplication_risk(concentrated_picks), contest._duplication_risk(flat_picks))))
+    check("an evenly-chalky lineup (every player moderately owned) shows HIGHER (closer to 0, more "
+          "duplicable) risk than one with a single mega-chalk player surrounded by unique pieces, "
+          "at the same summed ownership -- the real signal a pure sum can't see",
+          contest._duplication_risk(flat_picks) > contest._duplication_risk(concentrated_picks),
+          str((contest._duplication_risk(flat_picks), contest._duplication_risk(concentrated_picks))))
+
+    unfiltered_entries = contest.generate_entries(mul_slate, 20, seed=17)
+    check("generate_entries always attaches a real duplication_risk to every entry",
+          all("duplication_risk" in lu for lu in unfiltered_entries),
+          str(unfiltered_entries[0].get("duplication_risk")))
+
+    # Median of a real unfiltered batch's own risk values -- loose enough
+    # that roughly half of ordinary random draws should still satisfy
+    # it (good retry odds within max_attempts_per_lineup), unlike an
+    # arbitrary fixed offset in log space, where even a small-looking
+    # subtraction can be an enormous relative tightening.
+    sorted_risks = sorted(lu["duplication_risk"] for lu in unfiltered_entries)
+    median_cap = sorted_risks[len(sorted_risks) // 2]
+    capped_entries = contest.generate_entries(
+        mul_slate, 10, seed=17, max_duplication_risk=median_cap, max_attempts_per_lineup=60
+    )
+    check("max_duplication_risk rejects any entry whose own duplication_risk exceeds the cap -- "
+          "every returned entry must be at or under it",
+          len(capped_entries) > 0
+          and all(lu["duplication_risk"] <= median_cap for lu in capped_entries),
+          str([lu["duplication_risk"] for lu in capped_entries]))
+
+    field_with_risk = contest.generate_field(mul_slate, 10, seed=13)
+    check("generate_field's synthetic opponent lineups also carry duplication_risk (informational "
+          "only -- generate_field never filters on it, real chalk clustering there is intentional)",
+          all("duplication_risk" in lu for lu in field_with_risk),
+          str(field_with_risk[0].get("duplication_risk")))
+
+    dup_risk_batch = contest.build_contest_entries(mul_slate, "gpp_small", 10, sample_size=50, seed=19)
+    check("build_contest_entries's summary reports a real avg_duplication_risk across the batch",
+          "avg_duplication_risk" in dup_risk_batch["summary"],
+          str(dup_risk_batch["summary"].get("avg_duplication_risk")))
+
     unweighted_field = contest.generate_field(mul_slate, 40, seed=13)
     avg_entry_points = sum(lu["projected_points"] for lu in entries) / len(entries)
     avg_field_points = sum(lu["projected_points"] for lu in unweighted_field) / len(unweighted_field)

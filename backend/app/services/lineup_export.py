@@ -128,7 +128,7 @@ def lineups_to_csv(
     buf = io.StringIO()
     fieldnames = [
         "lineup_index", "salary_used", "stack_type", "stack", "projected_points",
-        "total_ownership_pct", "duplicate_count",
+        "total_ownership_pct", "duplication_risk", "duplicate_count",
     ]
     for label in SLOT_LABELS:
         fieldnames += [f"{label}_name", f"{label}_salary", f"{label}_fpts"]
@@ -155,6 +155,7 @@ def lineups_to_csv(
             "stack": stack,
             "projected_points": lineup.get("projected_points"),
             "total_ownership_pct": lineup.get("total_ownership_pct"),
+            "duplication_risk": lineup.get("duplication_risk"),
             "duplicate_count": lineup.get("duplicate_count", 1),
         }
         for label, p in zip(SLOT_LABELS, players):

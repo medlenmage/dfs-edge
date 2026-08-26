@@ -49,6 +49,7 @@ for the date.
 
 from __future__ import annotations
 
+import math
 import random
 from collections import Counter
 from collections.abc import Callable
@@ -285,6 +286,34 @@ def _ownership_weight(p: dict[str, Any]) -> float:
     return max(p["ownership_pct"], _OWNERSHIP_FLOOR)
 
 
+def _duplication_risk(picks: list[dict[str, Any]]) -> float:
+    """
+    Cumulative ("product") ownership, in LOG space -- multiplying 10
+    real ownership fractions together underflows fast (they're all well
+    under 1.0), so this sums their logs instead: an exactly equivalent
+    ranking (log is monotonic) with none of the numerical issues.
+
+    This is the real "how likely is another random entry to be an exact
+    duplicate" read -- and it's genuinely different from
+    `total_ownership_pct` (the SUM), including in a counter-intuitive
+    direction: by the AM-GM inequality, for a FIXED sum, the product
+    (and so this log-sum) is HIGHEST when every value is close to
+    equal, and lowest when it's dominated by one big outlier. So a
+    lineup with one 90%-owned "must play" plus nine barely-owned unique
+    pieces actually scores LOWER (more negative, less duplicable) here
+    than a lineup where all 10 players are moderately chalky at the
+    identical summed ownership -- correctly, since exactly replicating
+    the first lineup needs another entry to independently land on the
+    same nine unlikely picks, while the second only needs everyone to
+    play the obvious plays, which real fields do constantly. Less
+    negative (closer to 0) = higher cumulative ownership = more likely
+    to be widely duplicated by the field.
+    """
+    return round(
+        sum(math.log(max(p["ownership_pct"], _OWNERSHIP_FLOOR) / 100) for p in picks), 3
+    )
+
+
 def _fpts_weight(p: dict[str, Any]) -> float:
     return max(p["projected_fpts"], _FPTS_FLOOR) ** _FPTS_SAMPLING_EXPONENT
 
@@ -453,6 +482,7 @@ def _sample_one_lineup(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     one_off_quality_ids: frozenset[int] | None = None,
+    max_duplication_risk: float | None = None,
 ) -> dict[str, Any] | None:
     """
     Build one randomly-weighted lineup within the salary cap (and the
@@ -498,6 +528,14 @@ def _sample_one_lineup(
     no way to know in advance whether the restriction is even
     satisfiable, so it degrades gracefully instead of burning retries
     on a guaranteed failure).
+
+    `max_duplication_risk`, if given, rejects a completed lineup whose
+    cumulative (log-product) ownership exceeds it -- see
+    _duplication_risk()'s own docstring. Only ever passed by
+    generate_entries() for the user's OWN batch; generate_field()'s
+    synthetic opponent field deliberately never filters on this, since
+    real chalk clustering in the field is the whole point of that
+    sample, not something to prune away.
 
     Returns None if this particular random walk couldn't complete; the
     caller just retries.
@@ -591,6 +629,10 @@ def _sample_one_lineup(
     if not (min_salary <= salary_so_far <= max_salary):
         return None  # outside the requested salary range -- caller retries
 
+    duplication_risk = _duplication_risk(picks)
+    if max_duplication_risk is not None and duplication_risk > max_duplication_risk:
+        return None  # too chalky -- caller retries
+
     stack_type, stack = stack_info({"players": picks})
     return {
         "salary_used": salary_so_far,
@@ -598,6 +640,7 @@ def _sample_one_lineup(
         "stack": stack,
         "projected_points": round(sum(p["projected_fpts"] for p in picks), 2),
         "total_ownership_pct": round(sum(p["ownership_pct"] for p in picks), 1),
+        "duplication_risk": duplication_risk,
         "players": [
             {
                 "id": p["id"],
@@ -756,6 +799,7 @@ def build_chalk_lineup(
         "stack": stack,
         "projected_points": round(sum(p["projected_fpts"] for p in picks), 2),
         "total_ownership_pct": round(sum(p["ownership_pct"] for p in picks), 1),
+        "duplication_risk": _duplication_risk(picks),
         "players": [
             {
                 "id": p["id"],
@@ -870,6 +914,7 @@ def generate_entries(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -889,6 +934,16 @@ def generate_entries(
     `min_salary`/`max_salary` bound each entry's total salary
     (unconstrained by default here; the HTTP API applies a $47,000
     floor unless overridden).
+
+    `max_duplication_risk`, if given, rejects any candidate entry whose
+    cumulative (log-product) ownership -- see `_duplication_risk()` --
+    exceeds it, retrying like any other infeasible attempt. Unlike
+    `total_ownership_pct` (a sum), this catches a lineup where every
+    player is moderately chalky TOGETHER even when its SUM looks
+    unremarkable -- the real signal for "the field will build this
+    exact lineup many times over," which a GPP wants to avoid on its
+    own entries even when the field itself (generate_field()) should
+    keep modelling that clustering honestly.
 
     `allow_duplicates`, if set, lets exact repeats of an earlier entry
     in this batch through -- a real, sometimes-deliberate GPP move
@@ -939,6 +994,7 @@ def generate_entries(
                 min_salary=min_salary,
                 max_salary=max_salary,
                 one_off_quality_ids=one_off_quality_ids,
+                max_duplication_risk=max_duplication_risk,
             )
             if candidate is None:
                 continue
@@ -1719,6 +1775,7 @@ def _build_contest_and_entries(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """
@@ -1760,6 +1817,7 @@ def _build_contest_and_entries(
         min_salary=min_salary,
         max_salary=max_salary,
         allow_duplicates=allow_duplicates,
+        max_duplication_risk=max_duplication_risk,
         seed=seed,
     )
     return contest, entries
@@ -1778,6 +1836,7 @@ def _build_entries_and_field(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None,
     field_sharpness: str = "marquee",
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1787,7 +1846,10 @@ def _build_entries_and_field(
     validate, build the user's own entries, and sample an opponent field
     to rank them against. `seed`, if given, offsets the opponent field's
     own seed by one so the two random walks aren't identical.
-    `field_sharpness`: see FIELD_SHARPNESS_LEVELS.
+    `field_sharpness`: see FIELD_SHARPNESS_LEVELS. `max_duplication_risk`
+    only applies to the user's own entries -- never passed to
+    generate_field() below, which should keep modelling real chalk
+    clustering honestly (see generate_entries()'s own docstring).
     """
     contest, entries = _build_contest_and_entries(
         slate,
@@ -1800,6 +1862,7 @@ def _build_entries_and_field(
         min_salary=min_salary,
         max_salary=max_salary,
         allow_duplicates=allow_duplicates,
+        max_duplication_risk=max_duplication_risk,
         seed=seed,
     )
 
@@ -1830,6 +1893,7 @@ def build_contest_entries(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None = None,
     field_sharpness: str = "marquee",
 ) -> dict[str, Any]:
@@ -1846,7 +1910,8 @@ def build_contest_entries(
     request. Deterministic and fast, ranking against the field's
     *projected* points -- see build_contest_entries_simulated() for the
     real Monte Carlo alternative. `field_sharpness`: see
-    FIELD_SHARPNESS_LEVELS.
+    FIELD_SHARPNESS_LEVELS. `max_duplication_risk`: see
+    generate_entries()'s own docstring.
     """
     contest, entries, field = _build_entries_and_field(
         slate,
@@ -1860,6 +1925,7 @@ def build_contest_entries(
         min_salary=min_salary,
         max_salary=max_salary,
         allow_duplicates=allow_duplicates,
+        max_duplication_risk=max_duplication_risk,
         seed=seed,
         field_sharpness=field_sharpness,
     )
@@ -1892,6 +1958,9 @@ def build_contest_entries(
             "max_projected_points": max(points),
             "avg_total_ownership_pct": round(
                 sum(e["total_ownership_pct"] for e in entries) / len(entries), 1
+            ),
+            "avg_duplication_risk": round(
+                sum(e["duplication_risk"] for e in entries) / len(entries), 3
             ),
         },
         "field_baseline": _field_baseline(
@@ -1931,6 +2000,7 @@ async def build_contest_entries_simulated(
     min_salary: int = 0,
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None = None,
     self_play: bool = False,
     engine: str = "bootstrap",
@@ -2001,6 +2071,7 @@ async def build_contest_entries_simulated(
             min_salary=min_salary,
             max_salary=max_salary,
             allow_duplicates=allow_duplicates,
+            max_duplication_risk=max_duplication_risk,
             seed=seed,
         )
         evaluation = await evaluate_field_mirrored(
@@ -2021,6 +2092,7 @@ async def build_contest_entries_simulated(
             min_salary=min_salary,
             max_salary=max_salary,
             allow_duplicates=allow_duplicates,
+            max_duplication_risk=max_duplication_risk,
             seed=seed,
             field_sharpness=field_sharpness,
         )
@@ -2087,6 +2159,9 @@ async def build_contest_entries_simulated(
             "total_entry_cost": total_cost,
             "total_expected_payout": total_expected_payout,
             "estimated_net_profit": round(total_expected_payout - total_cost, 2),
+            "avg_duplication_risk": round(
+                sum(e["duplication_risk"] for e in entries) / len(entries), 3
+            ),
         },
         "field_baseline": _field_baseline(
             contest["payout_pct"], evaluation["prize_pool"], contest["entry_fee"], evaluation["field_size"]
