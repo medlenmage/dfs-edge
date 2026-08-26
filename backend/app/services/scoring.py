@@ -25,21 +25,22 @@ from typing import Any
 # Weights -- these must sum to 1.0
 # --------------------------------------------------------------------------
 WEIGHTS = {
-    "platoon": 0.14,          # how the hitter performs vs this pitcher's hand
-    "team_total": 0.16,       # Vegas implied runs for his team
-    "pitcher": 0.13,          # how vulnerable this pitcher is to this hand
-    "contact_quality": 0.12,  # Statcast barrel/hard-hit/xwOBA vs league average
-    "stolen_base": 0.07,      # his own season-long stolen-base rate vs league average
-    "park": 0.08,             # ballpark HR factor for his handedness
-    "bullpen": 0.05,          # opposing team's relief corps' SEASON-long quality (ERA vs league)
-    "bullpen_workload": 0.04, # opposing bullpen's RECENT usage (last 2 days) -- independent of season quality
-    "weather": 0.06,          # temperature + wind
-    "form": 0.03,             # last 15 games vs season baseline
-    "home_road": 0.01,        # his own home/road split
-    "home_run": 0.06,         # his own individual HR probability vs this specific pitcher, blended with a real market HR prop when one exists
-    "hit_probability": 0.05,  # real market "will he get a hit tonight" prop -- neutral (no opinion) when no prop line was fetched
+    "platoon": 0.136,          # how the hitter performs vs this pitcher's hand
+    "team_total": 0.155,       # Vegas implied runs for his team
+    "pitcher": 0.126,          # how vulnerable this pitcher is to this hand
+    "contact_quality": 0.116,  # Statcast barrel/hard-hit/xwOBA vs league average
+    "stolen_base": 0.068,      # his own season-long stolen-base rate vs league average
+    "park": 0.078,             # ballpark HR factor for his handedness
+    "bullpen": 0.049,          # opposing team's relief corps' SEASON-long quality (ERA vs league)
+    "bullpen_workload": 0.039, # opposing bullpen's RECENT usage (last 2 days) -- independent of season quality
+    "weather": 0.058,          # temperature + wind
+    "form": 0.029,             # last 15 games vs season baseline
+    "home_road": 0.010,        # his own home/road split
+    "home_run": 0.058,         # his own individual HR probability vs this specific pitcher, blended with a real market HR prop when one exists
+    "hit_probability": 0.049,  # real market "will he get a hit tonight" prop -- neutral (no opinion) when no prop line was fetched
+    "umpire": 0.03,            # today's home-plate umpire's own season RPG/KPG -- neutral until RotoWire posts the assignment
 }
-# Thirteen weights, each trimmed a little (never gutted) to make room
+# Fourteen weights, each trimmed a little (never gutted) to make room
 # for the newest addition -- same philosophy each prior addition here
 # used (see `home_run`'s own original note): every existing signal
 # loses a little ground, none loses most of it.
@@ -229,6 +230,60 @@ def weather_component(
     return {
         "value": round(max(0.75, min(1.30, value)), 3),
         "detail": ", ".join(bits) or "no forecast",
+    }
+
+
+# Real MLB umpires still call every pitch under 2026's ABS challenge
+# system (each team gets 2 challenges/game, retained on success --
+# only the most egregious misses get overturned), so umpire tendency
+# stays a real, if damped, signal. Capped tighter than most other
+# components (+-15%, vs weather's +-30%) since even a real zone
+# difference is a much smaller lever on a hitter's night than his own
+# matchup quality -- this is meant to nudge, not dominate.
+UMPIRE_MULTIPLIER_CAP = 0.15
+
+
+def umpire_component(
+    umpire: dict[str, Any] | None,
+    league_avg_rpg: float | None,
+    league_avg_kpg: float | None,
+) -> dict[str, Any]:
+    """
+    Today's assigned home-plate umpire's own season rate stats (RotoWire's
+    RPG/KPG, see clients/rotowire_umpires.py) against the league average
+    among every OTHER umpire posted today -- self-calibrating the same
+    way league_average() is elsewhere in this module, rather than a
+    guessed fixed baseline. Above-average RPG (a hitter-friendly/small
+    zone) is hitter-favouring; above-average KPG (more punchouts) is
+    pitcher-favouring, so the two pull in opposite directions and get
+    averaged together into one multiplier.
+
+    Neutral (1.00) whenever RotoWire hasn't posted this game's
+    assignment yet, or there aren't enough OTHER umpires posted yet
+    today to trust a real league average -- both real, common, and
+    expected states well before first pitch, not errors.
+    """
+    if not umpire or not league_avg_rpg or not league_avg_kpg:
+        return {"value": NEUTRAL, "detail": "no umpire assignment yet"}
+
+    rpg, kpg = umpire.get("rpg"), umpire.get("kpg")
+    if not rpg or not kpg:
+        return {"value": NEUTRAL, "detail": f"{umpire.get('name', 'umpire')} -- no rate stats yet"}
+
+    cap = UMPIRE_MULTIPLIER_CAP
+    rpg_mult = max(1 - cap, min(1 + cap, rpg / league_avg_rpg))
+    # Higher KPG than average hurts hitters -- inverted the same way
+    # invert_for_pitcher() flips a hitter-favouring value, just applied
+    # here directly since this IS the hitter-side read.
+    kpg_mult = max(1 - cap, min(1 + cap, league_avg_kpg / kpg))
+    value = (rpg_mult + kpg_mult) / 2
+
+    return {
+        "value": round(value, 3),
+        "umpire": umpire.get("name"),
+        "rpg": rpg,
+        "kpg": kpg,
+        "detail": f"{umpire.get('name')}: {rpg:g} RPG, {kpg:g} KPG (league avg {league_avg_rpg:g}/{league_avg_kpg:g})",
     }
 
 
@@ -524,13 +579,14 @@ def contact_quality_component(
 # him.
 # --------------------------------------------------------------------------
 PITCHER_WEIGHTS = {
-    "opp_lineup": 0.20,               # strength of the lineup he's facing, vs him specifically
-    "strikeout_potential": 0.17,      # his K stuff + how whiff-prone the lineup is
-    "team_runs_against": 0.17,        # Vegas implied total for the team he's facing
-    "contact_quality_allowed": 0.14,  # Statcast barrel/hard-hit/xwOBA allowed
-    "own_quality": 0.12,              # his season ERA vs league average
-    "park": 0.11,                     # ballpark run/HR suppression
-    "weather": 0.09,                  # temperature + wind, suppression side
+    "opp_lineup": 0.194,               # strength of the lineup he's facing, vs him specifically
+    "strikeout_potential": 0.165,      # his K stuff + how whiff-prone the lineup is
+    "team_runs_against": 0.165,        # Vegas implied total for the team he's facing
+    "contact_quality_allowed": 0.136,  # Statcast barrel/hard-hit/xwOBA allowed
+    "own_quality": 0.116,              # his season ERA vs league average
+    "park": 0.107,                     # ballpark run/HR suppression
+    "weather": 0.087,                  # temperature + wind, suppression side
+    "umpire": 0.03,                    # today's home-plate umpire's own season RPG/KPG, inverted -- neutral until posted
 }
 
 

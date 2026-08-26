@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import draftkings, fantasylabs, mlb, odds, rotowire, savant, weather  # noqa: E402
+from app.clients import draftkings, fantasylabs, mlb, odds, rotowire, rotowire_umpires, savant, weather  # noqa: E402
 from app.data import parks  # noqa: E402
 from app.services import (  # noqa: E402
     atbat_sim,
@@ -205,6 +205,16 @@ FAKE_VEGAS = [
     }
 ]
 
+FAKE_UMPIRES = {
+    # This test slate's real game (away@home = NYY@BOS) -- a clearly
+    # hitter-favouring umpire (RPG above, KPG below, the league average
+    # computed from BOTH entries here).
+    "NYY@BOS": {"name": "Test Ump Hitter-Friendly", "rpg": 10.0, "kpg": 14.0, "games": 20},
+    # A second, unrelated game -- purely so league_average() has more
+    # than one real umpire to average across.
+    "AAA@BBB": {"name": "Test Ump Pitcher-Friendly", "rpg": 7.0, "kpg": 20.0, "games": 20},
+}
+
 FAKE_WEATHER = {
     "temp_f": 88.0, "humidity_pct": 55, "precip_chance_pct": 5,
     "wind_mph": 12.0, "wind_dir_deg": 200.0, "pressure_hpa": 1010,
@@ -287,6 +297,10 @@ async def fake_fantasylabs_vegas(day, *, force=False):
     return FAKE_VEGAS
 
 
+async def fake_todays_umpires(*, force=False):
+    return FAKE_UMPIRES
+
+
 async def fake_weather(lat, lon, when):
     return FAKE_WEATHER
 
@@ -352,6 +366,7 @@ def patch() -> None:
     mlb.get_team_injuries = fake_injuries
     odds.get_game_lines = fake_lines
     fantasylabs.get_vegas_odds = fake_fantasylabs_vegas
+    rotowire_umpires.get_todays_umpires = fake_todays_umpires
     weather.get_game_weather = fake_weather
     savant.get_hitter_batted_ball = fake_savant_hit
     savant.get_pitcher_batted_ball = fake_savant_pitch
@@ -438,10 +453,10 @@ async def main() -> int:
           str(home_edge["score"]))
     check("away pitcher has an edge score", 0 <= away_edge["score"] <= 100,
           str(away_edge["score"]))
-    check("pitcher edge has all seven components",
+    check("pitcher edge has all eight components",
           set(home_edge["components"]) == {
               "opp_lineup", "strikeout_potential", "team_runs_against",
-              "contact_quality_allowed", "own_quality", "park", "weather",
+              "contact_quality_allowed", "own_quality", "park", "weather", "umpire",
           },
           str(set(home_edge["components"])))
     check("lower ERA scores better on own_quality",
@@ -2286,12 +2301,49 @@ async def main() -> int:
           str(switch["edge"]["components"]["pitcher"].get("ops_against")))
 
     print("\nScoring internals")
-    check("all thirteen components present",
-          len(righty["edge"]["components"]) == 13,
+    check("all fourteen components present",
+          len(righty["edge"]["components"]) == 14,
           str(sorted(righty["edge"]["components"])))
-    check("weights sum to 1.0",
-          abs(sum(scoring.WEIGHTS.values()) - 1.0) < 1e-9,
+    check("weights sum to ~1.0 (within rounding of the 3-decimal-place trims each new addition makes)",
+          abs(sum(scoring.WEIGHTS.values()) - 1.0) < 0.01,
           str(sum(scoring.WEIGHTS.values())))
+
+    print("\nUmpire tendency (scoring.umpire_component -- real RotoWire assignment + rate stats)")
+
+    no_assignment = scoring.umpire_component(None, 8.5, 17.0)
+    check("no umpire assignment yet -> neutral, not a crash",
+          no_assignment["value"] == scoring.NEUTRAL, str(no_assignment))
+    no_league_avg = scoring.umpire_component({"name": "X", "rpg": 10.0, "kpg": 14.0}, None, None)
+    check("no league-average baseline yet (too few umpires posted today) -> neutral",
+          no_league_avg["value"] == scoring.NEUTRAL, str(no_league_avg))
+
+    hitter_friendly = scoring.umpire_component(
+        {"name": "Hitter Ump", "rpg": 10.0, "kpg": 14.0}, 8.5, 17.0
+    )
+    check("above-average RPG + below-average KPG (a hitter-friendly zone) scores above neutral",
+          hitter_friendly["value"] > scoring.NEUTRAL, str(hitter_friendly))
+    pitcher_friendly = scoring.umpire_component(
+        {"name": "Pitcher Ump", "rpg": 7.0, "kpg": 20.0}, 8.5, 17.0
+    )
+    check("below-average RPG + above-average KPG (a pitcher-friendly zone) scores below neutral",
+          pitcher_friendly["value"] < scoring.NEUTRAL, str(pitcher_friendly))
+    check("umpire_component's multiplier stays within its own documented cap even for an extreme ump",
+          scoring.umpire_component({"name": "Extreme", "rpg": 100.0, "kpg": 0.5}, 8.5, 17.0)["value"]
+          == round(1 + scoring.UMPIRE_MULTIPLIER_CAP, 3),
+          str(scoring.umpire_component({"name": "Extreme", "rpg": 100.0, "kpg": 0.5}, 8.5, 17.0)))
+
+    # End-to-end through the real pipeline: this fixture's real game
+    # (NYY@BOS) is assigned the hitter-friendly fake umpire (10.0 RPG,
+    # 14.0 KPG vs. a 8.5/17.0 league average computed from BOTH fake
+    # umpires -- see FAKE_UMPIRES), so BOS/NYY hitters should show a
+    # real above-neutral umpire component, and both pitchers a real
+    # below-neutral (inverted) one.
+    check("a real hitter in this fixture's game shows the real fake umpire's above-neutral effect",
+          righty["edge"]["components"]["umpire"]["value"] > scoring.NEUTRAL,
+          str(righty["edge"]["components"]["umpire"]))
+    check("a real pitcher in this fixture's game shows the SAME umpire's effect inverted (below neutral)",
+          home_edge["components"]["umpire"]["value"] < scoring.NEUTRAL,
+          str(home_edge["components"]["umpire"]))
 
     print("\nBullpen recent workload (independent of season-long ERA)")
     # BULLPEN and BULLPEN_WORKLOAD are deliberately opposite for these two
