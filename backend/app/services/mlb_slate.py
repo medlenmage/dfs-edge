@@ -335,6 +335,10 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                             "fpts": fpts,
                             "implied_runs": implied_runs,
                             "opponent_pitcher_id": opponent_pitcher_id,
+                            # Feeds project_ownership()'s team-stack layer --
+                            # MLB hitter ownership is driven team-first, so
+                            # teammates have to be scored together.
+                            "team": g[side]["abbrev"],
                         }
                     )
             pitcher = g[side]["probable_pitcher"]
