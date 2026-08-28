@@ -6112,6 +6112,107 @@ async def main() -> int:
     check("a hitter with no opponent_pitcher_id at all still gets scored normally, no crash",
           91013 in inhouse_projections.project_ownership(no_opp_pool), "")
 
+    print("\nOwnership: the team-stack layer (hitters are owned team-first)")
+
+    # Percentile helper: the primitive the whole layer rests on.
+    check("_percentiles ranks a spread of team values onto 0-1 endpoints",
+          inhouse_projections._percentiles({"A": 1.0, "B": 2.0, "C": 3.0}) == {"A": 0.0, "B": 0.5, "C": 1.0}, "")
+    check("_percentiles gives tied teams the same shared rank rather than an arbitrary order",
+          inhouse_projections._percentiles({"A": 5.0, "B": 5.0}) == {"A": 0.5, "B": 0.5}, "")
+    check("_percentiles is neutral (0.5) for a single team -- a percentile is meaningless "
+          "without something to rank against",
+          inhouse_projections._percentiles({"A": 4.0}) == {"A": 0.5}, "")
+
+    # Two identical hitters at the same position, same salary, same
+    # fpts -- differing ONLY in their team's implied runs. The real
+    # measured failure this layer fixes (see project_ownership's
+    # "WHY A TEAM-STACK LAYER EXISTS") was exactly this being invisible.
+    stack_ace = {"id": 92001, "position": "P", "salary": 9000, "fpts": 22.0, "implied_runs": 4.0}
+    stack_scrub = {"id": 92002, "position": "P", "salary": 5000, "fpts": 12.0, "implied_runs": 4.0}
+    hot_bat = {
+        "id": 92011, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 6.2,
+        "team": "HOT", "opponent_pitcher_id": 92002,
+    }
+    cold_bat = {
+        "id": 92012, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 3.1,
+        "team": "COLD", "opponent_pitcher_id": 92002,
+    }
+    stack_pool = [stack_ace, stack_scrub, hot_bat, cold_bat]
+    stack_ownership = inhouse_projections.project_ownership(stack_pool)
+    check("a hitter on a high-implied-total team outowns an otherwise-IDENTICAL hitter on a "
+          "low-total team -- the team-first effect the flat per-player model couldn't see",
+          stack_ownership[92011] > stack_ownership[92012], str(stack_ownership))
+
+    # The opposing-starter half of the layer, isolated: same implied
+    # runs on both sides, only the arm they face differs.
+    vs_ace = {
+        "id": 92021, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 4.5,
+        "team": "VSACE", "opponent_pitcher_id": 92001,
+    }
+    vs_scrub = {
+        "id": 92022, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 4.5,
+        "team": "VSSCRUB", "opponent_pitcher_id": 92002,
+    }
+    sp_pool = [stack_ace, stack_scrub, vs_ace, vs_scrub]
+    sp_ownership = inhouse_projections.project_ownership(sp_pool)
+    check("a team facing the pricier (better) starter gets LESS stack ownership than an "
+          "identical team facing the cheap arm",
+          sp_ownership[92021] < sp_ownership[92022], str(sp_ownership))
+
+    # Additivity. Implied runs feeds BOTH the new stack layer and the
+    # pre-existing (much weaker) team_total term, so isolating the new
+    # layer's contribution means zeroing both -- with the two hitters
+    # then identical in every input the model can see, any remaining
+    # difference would mean the layer had rewritten something rather
+    # than adding to it.
+    original_stack_weight = inhouse_projections._TEAM_STACK_WEIGHT
+    original_team_total_weight = inhouse_projections._TEAM_TOTAL_WEIGHT
+    inhouse_projections._TEAM_STACK_WEIGHT = 0.0
+    inhouse_projections._TEAM_TOTAL_WEIGHT = 0.0
+    no_stack_ownership = inhouse_projections.project_ownership(stack_pool)
+    inhouse_projections._TEAM_STACK_WEIGHT = original_stack_weight
+    inhouse_projections._TEAM_TOTAL_WEIGHT = original_team_total_weight
+    check("with both team-level weights at 0 the two hitters land identically -- the stack "
+          "layer is purely additive, not a rewrite of the per-player model underneath it",
+          no_stack_ownership[92011] == no_stack_ownership[92012], str(no_stack_ownership))
+
+    inhouse_projections._TEAM_STACK_WEIGHT = 0.0
+    stack_off_ownership = inhouse_projections.project_ownership(stack_pool)
+    inhouse_projections._TEAM_STACK_WEIGHT = original_stack_weight
+    check("the stack layer moves the high-total hitter substantially FURTHER ahead than the old "
+          "team_total term managed alone -- the real gap it was built to close",
+          (stack_ownership[92011] - stack_ownership[92012])
+          > 2 * (stack_off_ownership[92011] - stack_off_ownership[92012]),
+          f"with={stack_ownership}  without={stack_off_ownership}")
+
+    check("pitchers are deliberately untouched by the team-stack layer (their own model is "
+          "separate, and already the best-calibrated group)",
+          no_stack_ownership[92001] == stack_ownership[92001], str(stack_ownership))
+
+    # Graceful degradation: the layer's inputs are both optional.
+    teamless_pool = [
+        stack_ace, stack_scrub,
+        {"id": 92031, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 4.5},
+        {"id": 92032, "position": "OF", "salary": 4500, "fpts": 9.0, "implied_runs": 4.5},
+    ]
+    check("hitters carrying no team at all still get scored, no crash -- the layer degrades "
+          "to neutral rather than requiring a field that may not be there",
+          len(inhouse_projections.project_ownership(teamless_pool)) == 4, "")
+
+    # No odds loaded at all: implied runs is gone, so the layer has to
+    # carry on using the opposing-starter half by itself. These two
+    # face DIFFERENT arms, so a working fallback must still separate
+    # them -- a tie here would mean the layer had silently gone inert.
+    no_odds = [
+        dict(vs_ace, implied_runs=None),
+        dict(vs_scrub, implied_runs=None),
+        stack_ace, stack_scrub,
+    ]
+    no_odds_own = inhouse_projections.project_ownership(no_odds)
+    check("with no odds loaded at all the layer still separates teams on the opposing-starter "
+          "signal alone rather than silently going inert",
+          no_odds_own[92021] < no_odds_own[92022], str(no_odds_own))
+
     print("\nLeverage: real ceiling (variance.py's outcome pool) minus ownership%")
 
     check("ceiling_from_pool reads the exact percentile from a known pool",

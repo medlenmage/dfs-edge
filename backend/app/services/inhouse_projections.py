@@ -271,6 +271,29 @@ _RAW_FPTS_WEIGHT = 1.0
 _TEAM_TOTAL_WEIGHT = 0.4
 _SALARY_TIER_WEIGHT = 0.3
 
+# THE TEAM-STACK LAYER (hitters only) -- see WHY A TEAM-STACK LAYER
+# EXISTS in project_ownership()'s docstring for the real measured
+# failure that motivated it. MLB hitter ownership is driven team-first:
+# the field picks a team to stack, then picks bats from it, so
+# teammates' ownerships have to move together instead of being scored
+# independently. Weighted well above any individual-merit signal
+# because that's what the real archived data says: a team's implied
+# runs alone rank-correlates with its real summed hitter ownership at
+# r=+0.80 across 15 real slates, stronger than any per-player signal in
+# this module.
+_TEAM_STACK_WEIGHT = 2.0
+
+# The two team-level signals, blended into one 0-1 desirability score.
+# Both measured against real archived DK contest standings (see
+# scripts/probe_stack_features.py): implied runs r=+0.80, opposing
+# starter's salary (a clean, always-available proxy for how good the
+# arm the field thinks this offense has to beat is) r=-0.72. Both are
+# used as WITHIN-SLATE PERCENTILES, never raw -- a 5.0 implied total
+# means something different on a 2-game slate than a 13-game one, and
+# rank generalizes where the raw number doesn't.
+_STACK_IMPLIED_RUNS_WEIGHT = 0.7
+_STACK_OPPOSING_SP_WEIGHT = 0.3
+
 # A real, well-known field-behavior pattern the four signals above
 # can't see on their own: when the pitcher a hitter is facing is
 # himself heavily owned (a "safe," popular pitcher play), public
@@ -301,7 +324,79 @@ _OPPONENT_PITCHER_CHALK_WEIGHT = 0.25
 # temperature rose, peaking at 0.6 (0.594, vs 0.3's 0.583) before
 # falling off past ~0.8 -- a rare case where the more realistic choice
 # and the better-correlated choice were the same value.
-_SOFTMAX_TEMPERATURE = 0.6
+#
+# Re-swept a third time when the team-stack layer landed (below), and
+# moved 0.6 -> 1.0. That's expected, not a surprise: adding a real new
+# term widens the range raw_scores can span, so the same temperature
+# now concentrates harder than it used to. Swept jointly with the stack
+# weights across 4 real archived contests over 0.9-2.5; the optimum is
+# a broad plateau (stack weight 2.0-2.5, implied-runs split 0.6-0.8,
+# temperature 1.0-1.2) rather than a knife-edge, and the values chosen
+# sit at its centre rather than at its exact argmin -- with only 4
+# slates the 1-2% between them is noise, and the lower, rounder values
+# are the more conservative read of a signal this new.
+_SOFTMAX_TEMPERATURE = 1.0
+
+
+def _percentiles(values: dict[str, float]) -> dict[str, float]:
+    """Rank each key's value into a 0-1 within-slate percentile, ties
+    sharing the average rank. A single-entry input is neutral (0.5) --
+    a percentile is meaningless without something to rank against."""
+    if len(values) < 2:
+        return {k: 0.5 for k in values}
+    order = sorted(values, key=lambda k: values[k])
+    out: dict[str, float] = {}
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        rank = (i + j) / 2
+        for k in range(i, j + 1):
+            out[order[k]] = rank / (len(order) - 1)
+        i = j + 1
+    return out
+
+
+def _team_stack_scores(pool: list[dict[str, Any]]) -> dict[str, float]:
+    """A 0-1 "how much does the field want to stack this team" score per
+    team, from the two team-level signals that real archived contest
+    data says actually drive it (see the weights above).
+
+    Both inputs are optional: a slate with no odds loaded still gets a
+    real opposing-starter signal, and vice versa. A team missing both
+    lands at a neutral 0.5 rather than being pushed to either extreme.
+    """
+    salary_by_id = {p["id"]: p.get("salary") for p in pool}
+
+    implied_by_team: dict[str, float] = {}
+    opp_sp_salary_by_team: dict[str, float] = {}
+    for p in pool:
+        team = p.get("team")
+        if not team:
+            continue
+        if p.get("implied_runs") is not None:
+            implied_by_team[team] = p["implied_runs"]
+        opp_salary = salary_by_id.get(p.get("opponent_pitcher_id"))
+        if opp_salary:
+            opp_sp_salary_by_team[team] = opp_salary
+
+    implied_pct = _percentiles(implied_by_team)
+    opp_sp_pct = _percentiles(opp_sp_salary_by_team)
+
+    scores: dict[str, float] = {}
+    for team in {*implied_by_team, *opp_sp_salary_by_team}:
+        parts, weights = [], []
+        if team in implied_pct:
+            parts.append(_STACK_IMPLIED_RUNS_WEIGHT * implied_pct[team])
+            weights.append(_STACK_IMPLIED_RUNS_WEIGHT)
+        if team in opp_sp_pct:
+            # Inverted: a better (pricier) opposing arm suppresses the
+            # field's appetite for stacking this offense.
+            parts.append(_STACK_OPPOSING_SP_WEIGHT * (1.0 - opp_sp_pct[team]))
+            weights.append(_STACK_OPPOSING_SP_WEIGHT)
+        scores[team] = sum(parts) / sum(weights) if weights else 0.5
+    return scores
 
 
 def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
@@ -396,6 +491,66 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     without discarding `value`'s own genuine role for the min-priced
     end of a position group.
 
+    WHY A TEAM-STACK LAYER EXISTS (the largest real error found so far)
+    -------------------------------------------------------------
+    The four signals above are all PER-PLAYER: every hitter is scored
+    on his own merit and normalized against others at his position.
+    That is the wrong shape for MLB. Real DFS fields pick a TEAM to
+    stack first and bats second, so a chalk team's hitters all get
+    owned together, whatever their individual value ranks say.
+
+    Measured, not assumed. Against 4 real archived DK contests, global
+    Spearman looked respectable at +0.601 -- while the model was
+    missing entire real stacks by more than its whole ownership range:
+
+        2026-08-21  CLE  real 154.8% summed hitter ownership, model 47.0%
+        2026-08-24  MIN  real 180.3%,                         model 121.2%
+        2026-08-25  MIN  real 129.8%,                         model  47.7%
+
+    On that 08-21 slate five separate CLE bats ran 18-30% real
+    ownership against 2-8% modelled. Their individual merit was priced
+    roughly right; what the model had no way to see was that the field
+    had piled onto that one offense. This is exactly why global rank
+    correlation can't be the headline metric here (see
+    scripts/diagnose_ownership.py, which reports the ones that matter).
+
+    The fix is a real team-level layer (see _team_stack_scores()),
+    added to every hitter's raw score before his position group's
+    softmax so teammates move together. Its two inputs were chosen by
+    measuring which team-level signals actually separate stacked teams
+    from ignored ones on real archived slates -- not by picking
+    plausible-sounding ones (scripts/probe_stack_features.py):
+
+        implied team runs      r=+0.80   (15 real slates)
+        opposing SP salary     r=-0.72   (a clean, always-available
+                                          proxy for the quality of arm
+                                          the field thinks this offense
+                                          has to beat)
+        best-5-bats fpts       r=+0.47   } real but secondary, and
+        cheapest-5 stack cost  r=+0.42   } largely redundant with the
+                                         } two above -- not built
+        best-5 points-per-$    r=-0.13   -- no signal, deliberately
+                                            NOT built despite sounding
+                                            like it should work
+
+    Both inputs are used as WITHIN-SLATE PERCENTILES rather than raw
+    values, since a 5.0 implied total means something different on a
+    2-game slate than on a 13-game one.
+
+    Measured result across the same 4 real contests:
+
+                        before      after
+        chalk MAE       9.08pp  ->  7.26pp   (top 20 by real ownership)
+        team-stack MAE 16.88pp  -> 11.36pp
+        Spearman        +0.601  ->  +0.745
+
+    What this deliberately is NOT: a full hierarchical stack model
+    (predict P(team, stack_size), then distribute within the stack).
+    That's the right long-term shape, but honestly fitting a stack-size
+    distribution needs far more than 4 archived slates -- so this
+    captures the dominant measured effect with the data that actually
+    exists, and the fuller version waits for the archive to grow.
+
     LEVERAGE: A CHALKY OPPOSING PITCHER SUPPRESSES A HITTER'S OWNERSHIP
     -------------------------------------------------------------
     A real, well-documented field-behavior pattern the four signals
@@ -417,10 +572,14 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     for p in pool:
         groups.setdefault(p["position"], []).append(p)
 
+    team_stack = _team_stack_scores(pool)
+
     def _score_group(
         position: str,
         players: list[dict[str, Any]],
         opponent_penalty: dict[int, float] | None = None,
+        *,
+        use_team_stack: bool = False,
     ) -> None:
         slot_count = SLOT_REQUIREMENTS.get(position)
         if not slot_count:
@@ -461,6 +620,10 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
                 + _TEAM_TOTAL_WEIGHT * team_total
                 + _SALARY_TIER_WEIGHT * salary_tier
             )
+            # Hitters only -- pitcher ownership is a separate model
+            # (see Pass 1) and is already the best-calibrated group here.
+            if use_team_stack:
+                score += _TEAM_STACK_WEIGHT * team_stack.get(p.get("team"), 0.5)
             if opponent_penalty is not None:
                 score -= opponent_penalty.get(p["id"], 0.0)
             raw_scores.append(score)
@@ -496,6 +659,6 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
                 )
 
     for position, players in groups.items():
-        _score_group(position, players, opponent_penalty)
+        _score_group(position, players, opponent_penalty, use_team_stack=True)
 
     return ownership
