@@ -19,13 +19,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import nfl, nfl_pbp, rotowire_nfl  # noqa: E402
+from app.clients import fantasylabs, nfl, nfl_pbp, rotowire_nfl  # noqa: E402
 from app.services import (  # noqa: E402
     nfl_contest,
     nfl_correlations,
     nfl_dk_points,
     nfl_optimizer,
     nfl_scoring,
+    nfl_slate,
     nfl_stack_rating,
     nfl_variance,
     player_match,
@@ -1041,6 +1042,59 @@ def main() -> int:
           no_pool_rating["partners"] == [] and no_pool_rating["bring_back"] is None
           and no_pool_rating["top_stack_value"] is None,
           str(no_pool_rating))
+
+    print("\nFantasyLabs NFL Vegas odds (clients/fantasylabs.py + nfl_slate.py)")
+
+    nfl_fl_fixture = {
+        "EventId": 35546920,
+        "EventDetails": {
+            "Properties": {
+                "HomeTeam": "Seattle Seahawks", "VisitorTeam": "New England Patriots",
+                "HomeTeamShort": "SEA", "VisitorTeamShort": "NE",
+                "EventDateTime": "2026-09-09T20:20:00",
+                "HomeGameSpreadOpen": -2.5, "HomeGameSpreadCurrent": -3.0,
+                "VisitorGameSpreadOpen": 2.5, "VisitorGameSpreadCurrent": 3.0,
+                "HomeGameMoneylineOpen": -140, "HomeGameMoneylineCurrent": -155,
+                "VisitorGameMoneylineOpen": 120, "VisitorGameMoneylineCurrent": 130,
+                "HomeGameOUOpen": 44.5, "HomeGameOUCurrent": 45.5,
+            },
+        },
+    }
+    fl_nfl_row = fantasylabs._parse_event(nfl_fl_fixture)
+    check("_parse_event reads NFL's own HomeTeamShort/VisitorTeamShort abbreviations (shared parsing "
+          "with the MLB dashboard -- same endpoint shape, different sport id)",
+          fl_nfl_row["home_short"] == "SEA" and fl_nfl_row["away_short"] == "NE", str(fl_nfl_row))
+    check("_parse_event reads NFL's open/current spread/moneyline/total correctly",
+          fl_nfl_row["home_spread_open"] == -2.5 and fl_nfl_row["home_spread_current"] == -3.0
+          and fl_nfl_row["total_open"] == 44.5 and fl_nfl_row["total_current"] == 45.5,
+          str(fl_nfl_row))
+
+    fantasylabs_rows = [fl_nfl_row]
+    matched = nfl_slate._match_fantasylabs(fantasylabs_rows, "SEA", "NE")
+    check("_match_fantasylabs finds a real game by direct abbreviation lookup (no fuzzy name "
+          "matching needed for NFL, unlike MLB's own _match_odds())",
+          matched is not None and matched["event_id"] == 35546920, str(matched))
+    check("_match_fantasylabs returns None for a team pair with no matching FantasyLabs row",
+          nfl_slate._match_fantasylabs(fantasylabs_rows, "KC", "DEN") is None, "")
+    check("_match_fantasylabs is order-sensitive (home/away can't be swapped and still match)",
+          nfl_slate._match_fantasylabs(fantasylabs_rows, "NE", "SEA") is None, "")
+
+    check("_fantasylabs_has_line is True for a real row with an actual current value",
+          nfl_slate._fantasylabs_has_line(fl_nfl_row) is True, "")
+    check("_fantasylabs_has_line is False for no matched row at all",
+          nfl_slate._fantasylabs_has_line(None) is False, "")
+    # Real, live-confirmed scenario: a real, correctly-matched row for a
+    # game far enough out that FantasyLabs hasn't posted real numbers
+    # yet -- caught as a genuine bug (mis-labeled as "FantasyLabs
+    # (consensus)" for a line it never actually provided) before shipping.
+    empty_but_matched_row = {
+        "event_id": 1, "home_short": "KC", "away_short": "DEN",
+        "home_spread_current": None, "total_current": None,
+        "home_moneyline_current": None, "away_moneyline_current": None,
+    }
+    check("_fantasylabs_has_line is False for a real matched row whose fields haven't posted yet -- "
+          "the exact real bug this guards against (matched != has a real line)",
+          nfl_slate._fantasylabs_has_line(empty_but_matched_row) is False, "")
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
