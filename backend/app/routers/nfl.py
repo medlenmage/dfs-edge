@@ -37,10 +37,11 @@ async def _resolve_season_week(season: int | None, week: int | None) -> tuple[in
 async def get_slate(
     season: int | None = Query(None, description="e.g. 2026 -- defaults to the current NFL season"),
     week: int | None = Query(None, description="1-18 -- defaults to the current week"),
+    force: bool = Query(False, description="Bypass the FantasyLabs vegas-line cache and pull a fresh read"),
 ) -> dict[str, Any]:
     """The week's slate: games, Vegas-implied context, weather, and (once uploaded) every rostered player."""
     resolved_season, resolved_week = await _resolve_season_week(season, week)
-    return await nfl_slate.build_slate(resolved_season, resolved_week)
+    return await nfl_slate.build_slate(resolved_season, resolved_week, force_refresh=force)
 
 
 @router.get("/stacks")

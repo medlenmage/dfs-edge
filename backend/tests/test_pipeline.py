@@ -1020,6 +1020,7 @@ async def main() -> int:
         "EventDetails": {
             "Properties": {
                 "HomeTeam": "Detroit Tigers", "VisitorTeam": "Tampa Bay Rays",
+                "HomeTeamShort": "DET", "VisitorTeamShort": "TB",
                 "EventDateTime": "2026-08-24T18:40:00",
                 "HomeGameSpreadOpen": 1.50, "HomeGameSpreadCurrent": 1.50,
                 "VisitorGameSpreadOpen": -1.50, "VisitorGameSpreadCurrent": -1.50,
@@ -1036,6 +1037,7 @@ async def main() -> int:
           fl_row == {
               "event_id": 205310620,
               "home_team": "Detroit Tigers", "away_team": "Tampa Bay Rays",
+              "home_short": "DET", "away_short": "TB",
               "game_time_utc": "2026-08-24T18:40:00",
               "home_spread_open": 1.50, "home_spread_current": 1.50,
               "away_spread_open": -1.50, "away_spread_current": -1.50,
