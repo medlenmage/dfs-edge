@@ -87,6 +87,37 @@ CREATE TABLE IF NOT EXISTS contest_player_results (
 );
 CREATE INDEX IF NOT EXISTS idx_contest_player_results_date ON contest_player_results(date);
 
+-- How often the real field stacked each team, and at what size, from
+-- the `Lineup` column of the same standings export -- one row per
+-- (contest, team, stack size). This is the quantity real MLB field
+-- behaviour is actually organised around: the field picks a team to
+-- stack, then picks bats, so a flat per-player ownership vector can't
+-- express it (see inhouse_projections.project_ownership's own
+-- "WHY A TEAM-STACK LAYER EXISTS").
+--
+-- Deliberately stored as the AGGREGATE rather than the raw per-entry
+-- lineups those numbers are derived from. A single real 150-max
+-- contest here carries ~36,000 entries x 10 roster slots -- around
+-- 360,000 rows for one contest, and over a million across the archive,
+-- against a 500MB free-tier database. The distribution is what a
+-- stack model actually trains against; the raw lineups are ~1000x the
+-- storage for detail nothing currently reads. If per-entry joint
+-- structure is ever genuinely needed (real duplication counts are the
+-- obvious candidate), that's a deliberate separate decision about
+-- storage, not something to slip in by defaulting to raw.
+CREATE TABLE IF NOT EXISTS contest_stack_results (
+    contest_id     TEXT NOT NULL,
+    date           DATE NOT NULL,
+    contest_name   TEXT NOT NULL,
+    team           TEXT NOT NULL,
+    stack_size     SMALLINT NOT NULL,
+    entry_count    INTEGER NOT NULL,
+    field_size     INTEGER NOT NULL,
+    archived_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (contest_id, team, stack_size)
+);
+CREATE INDEX IF NOT EXISTS idx_contest_stack_results_date ON contest_stack_results(date);
+
 -- One row per real contest uploaded -- field size, entry fee, and
 -- (once identified, either by an exact EntryId or a best-effort
 -- handle match against EntryName) the user's own rank/points, for a
@@ -122,7 +153,8 @@ async def main() -> None:
 
     print(
         "Migration complete: slate_projections, player_game_results, "
-        "player_actual_results, contest_player_results, contest_uploads"
+        "player_actual_results, contest_player_results, contest_uploads, "
+        "contest_stack_results"
     )
 
 

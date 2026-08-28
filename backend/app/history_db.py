@@ -168,6 +168,111 @@ async def archive_contest_results(
         log.exception("Failed to archive contest results for %s", contest_id)
 
 
+async def archive_contest_stacks(
+    day: str,
+    contest_id: str,
+    contest_name: str,
+    distribution: dict[str, dict[int, int]],
+    *,
+    field_size: int,
+) -> None:
+    """
+    Archive how often the real field stacked each team, and at what
+    size, for one contest -- the aggregate derived from the standings
+    export's own per-entry `Lineup` column (see
+    contest_results.stack_distribution).
+
+    Stored as the distribution rather than the raw lineups it came from,
+    on purpose -- see the table's own comment in migrate_history_db.py
+    for the storage arithmetic behind that. Upserts on
+    (contest_id, team, stack_size) so re-processing the same export
+    overwrites rather than duplicates.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        return
+    rows = [
+        (contest_id, date_cls.fromisoformat(day), contest_name, team, size, count, field_size)
+        for team, sizes in distribution.items()
+        for size, count in sizes.items()
+    ]
+    if not rows:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO contest_stack_results
+                    (contest_id, date, contest_name, team, stack_size,
+                     entry_count, field_size)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (contest_id, team, stack_size) DO UPDATE SET
+                    entry_count = EXCLUDED.entry_count,
+                    field_size = EXCLUDED.field_size,
+                    archived_at = now()
+                """,
+                rows,
+            )
+    except Exception:
+        log.exception("Failed to archive contest stacks for %s", contest_id)
+
+
+async def get_contest_stack_results() -> list[dict[str, Any]]:
+    """
+    Every archived real team-stack distribution across every processed
+    contest. The training/evaluation target for a team-stack ownership
+    model. Returns [] rather than raising if Supabase isn't configured,
+    same convention as everything else here.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT date, contest_id, contest_name, team, stack_size,
+                       entry_count, field_size
+                FROM contest_stack_results
+                ORDER BY date, contest_id, team, stack_size
+                """
+            )
+        return [dict(r) for r in rows]
+    except Exception:
+        log.exception("Failed to read archived contest stacks")
+        return []
+
+
+async def get_archived_salaries(day: str) -> dict[str, dict[str, Any]]:
+    """
+    normalized_name -> {salary, team, position, rotowire_fpts} for one
+    past date, from the permanent slate_projections archive.
+
+    The local salary/projections cache is day-keyed with a 7-day TTL, so
+    backtesting anything more than a week old used to be impossible even
+    though the contest results were archived permanently -- 11 of 15
+    archived contests were unusable for exactly this reason. This reads
+    the durable copy instead.
+    """
+    pool = await _get_pool()
+    if pool is None:
+        return {}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT normalized_name, name, team, position, salary, rotowire_fpts
+                FROM slate_projections
+                WHERE date = $1 AND salary IS NOT NULL
+                """,
+                date_cls.fromisoformat(day),
+            )
+        return {r["normalized_name"]: dict(r) for r in rows}
+    except Exception:
+        log.exception("Failed to read archived salaries for %s", day)
+        return {}
+
+
 async def get_contest_player_results() -> list[dict[str, Any]]:
     """
     Every archived real player result across every uploaded contest --
