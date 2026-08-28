@@ -21,10 +21,98 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import zipfile
 from typing import Any
 
 from app.services.player_match import normalize_name
+
+
+# The 10 DK Classic MLB roster slots, as they appear as literal tokens
+# inside the standings export's own `Lineup` column.
+_SLOT_TOKENS = ("P", "C", "1B", "2B", "3B", "SS", "OF")
+
+# What a complete, valid Classic lineup must contain -- used to reject a
+# mis-parse rather than archive a wrong one (see parse_lineup).
+_EXPECTED_SLOTS = {"P": 2, "C": 1, "1B": 1, "2B": 1, "3B": 1, "SS": 1, "OF": 3}
+
+_SLOT_RE = re.compile(r"\b(" + "|".join(sorted(_SLOT_TOKENS, key=len, reverse=True)) + r")\b")
+
+
+def parse_lineup(raw: str) -> list[dict[str, str]] | None:
+    """
+    One entry's `Lineup` cell -> [{slot, name, normalized_name}, ...].
+
+    DK packs a whole roster into a single space-delimited cell as
+    `1B Pete Alonso 2B Jackson Holliday 3B Isaac Paredes ...`, with no
+    delimiter between a player's name and the next slot token. Splitting
+    on the slot tokens themselves is the only way in, and it's why this
+    format is generally described as resisting naive parsing.
+
+    Returns None -- never a partial roster -- if what comes back isn't
+    exactly a legal Classic lineup (2 P, 1 C, 1 1B, 1 2B, 1 3B, 1 SS,
+    3 OF). A real player surname that happened to collide with a slot
+    token would corrupt the split silently otherwise, and a wrong
+    lineup archived as fact is worse than a skipped one.
+    """
+    if not raw or not raw.strip():
+        return None
+
+    matches = list(_SLOT_RE.finditer(raw))
+    if not matches:
+        return None
+
+    slots: list[dict[str, str]] = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        name = raw[m.end():end].strip()
+        if not name:
+            return None
+        slots.append({"slot": m.group(1), "name": name, "normalized_name": normalize_name(name)})
+
+    counts: dict[str, int] = {}
+    for s in slots:
+        counts[s["slot"]] = counts.get(s["slot"], 0) + 1
+    if counts != _EXPECTED_SLOTS:
+        return None
+    return slots
+
+
+def stack_distribution(
+    lineups: list[list[dict[str, str]]], team_by_name: dict[str, str]
+) -> dict[str, dict[int, int]]:
+    """
+    team -> {stack_size: how many entries used exactly that many of
+    that team's HITTERS}.
+
+    This is the quantity real MLB field behaviour is actually organised
+    around, and the direct training/evaluation target for a team-stack model:
+    the field picks a team to stack, then picks bats. Pitchers are
+    excluded from the count because a rostered SP is not part of a
+    team's offensive stack (and DK's own 5-hitters-per-team cap counts
+    only hitters).
+
+    An entry using none of a team's hitters contributes to that team's
+    size-0 bucket, so each team's counts sum to the field size and the
+    result reads directly as a distribution.
+    """
+    per_team: dict[str, dict[int, int]] = {}
+    teams = set(team_by_name.values())
+    for team in teams:
+        per_team[team] = {}
+
+    for slots in lineups:
+        counts: dict[str, int] = {}
+        for s in slots:
+            if s["slot"] == "P":
+                continue
+            team = team_by_name.get(s["normalized_name"])
+            if team:
+                counts[team] = counts.get(team, 0) + 1
+        for team in teams:
+            k = counts.get(team, 0)
+            per_team[team][k] = per_team[team].get(k, 0) + 1
+    return per_team
 
 
 def _looks_like_zip(raw: bytes) -> bool:
@@ -73,7 +161,7 @@ def parse_contest_standings(text: str) -> dict[str, list[dict[str, Any]]]:
             return None
 
     rank_i, entry_id_i = idx("Rank"), idx("EntryId")
-    entry_name_i, points_i = idx("EntryName"), idx("Points")
+    entry_name_i, points_i, lineup_i = idx("EntryName"), idx("Points"), idx("Lineup")
     player_i, pos_i = idx("Player"), idx("Roster Position")
     pct_i, fpts_i = idx("%Drafted"), idx("FPTS")
 
@@ -100,6 +188,12 @@ def parse_contest_standings(text: str) -> dict[str, list[dict[str, Any]]]:
                     "entry_id": cell(row, entry_id_i),
                     "entry_name": cell(row, entry_name_i),
                     "points": points,
+                    # The full roster this entry actually used. None when
+                    # the column is absent or doesn't parse to a legal
+                    # lineup -- callers that need joint lineup structure
+                    # (stack sizes, duplication) must skip those rather
+                    # than treat a partial roster as real.
+                    "lineup": parse_lineup(cell(row, lineup_i)),
                 }
             )
 

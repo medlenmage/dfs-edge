@@ -5518,6 +5518,85 @@ async def main() -> int:
     check("parse_contest_standings returns empty results for a completely empty file rather than crashing",
           contest_results.parse_contest_standings("") == {"entries": [], "player_pool": []}, "")
 
+    print("\nContest standings: the Lineup column (the field's joint structure)")
+
+    # A real, complete DK Classic MLB lineup cell, in DK's own slot
+    # order, including a name carrying a suffix ("Jr.") and one with a
+    # two-word surname -- both of which a naive split would mangle.
+    real_lineup = (
+        "1B Pete Alonso 2B Jazz Chisholm Jr. 3B Isaac Paredes C Yainer Diaz "
+        "OF Yordan Alvarez OF Daulton Varsho OF Leody Taveras "
+        "P George Kirby P Gage Jump SS Jeremy Pena"
+    )
+    slots = contest_results.parse_lineup(real_lineup)
+    check("parse_lineup splits a real DK lineup cell into all 10 roster slots",
+          slots is not None and len(slots) == 10, str(slots))
+    check("parse_lineup keeps a multi-token name with a suffix intact rather than truncating it",
+          any(s["name"] == "Jazz Chisholm Jr." for s in slots), str(slots))
+    check("parse_lineup pairs each name with its own real roster slot",
+          [s["slot"] for s in slots] == ["1B", "2B", "3B", "C", "OF", "OF", "OF", "P", "P", "SS"],
+          str([s["slot"] for s in slots]))
+    check("parse_lineup normalizes names the same way the rest of the app does",
+          slots[0]["normalized_name"] == player_match.normalize_name("Pete Alonso"), str(slots[0]))
+
+    # A mis-parse must produce nothing, never a partial roster -- a
+    # wrong lineup archived as fact is worse than a skipped one.
+    check("parse_lineup rejects a lineup missing a slot rather than returning a partial roster",
+          contest_results.parse_lineup("1B Pete Alonso 2B Jazz Chisholm Jr.") is None, "")
+    check("parse_lineup rejects a cell with a slot token but no name after it",
+          contest_results.parse_lineup(real_lineup.replace("SS Jeremy Pena", "SS ")) is None, "")
+    check("parse_lineup returns None for an empty or whitespace-only cell",
+          contest_results.parse_lineup("") is None and contest_results.parse_lineup("   ") is None, "")
+    check("parse_contest_standings attaches a parsed lineup to each entry, and None where it "
+          "isn't a legal roster (this fixture's rows are deliberately short)",
+          [e["lineup"] for e in parsed_standings["entries"]] == [None, None],
+          str([e["lineup"] for e in parsed_standings["entries"]]))
+
+    # Real stack distribution: three entries, one of which is a genuine
+    # 4-man CLE stack, one a 2-man, one with none at all.
+    team_by_name = {
+        player_match.normalize_name(n): t
+        for n, t in [
+            ("Jose Ramirez", "CLE"), ("Steven Kwan", "CLE"),
+            ("Josh Naylor", "CLE"), ("Bo Naylor", "CLE"),
+            ("Mookie Betts", "LAD"), ("Freddie Freeman", "LAD"),
+            ("Will Smith", "LAD"), ("Teoscar Hernandez", "LAD"),
+        ]
+    }
+
+    def _lu(names):
+        slots_order = ["1B", "2B", "3B", "C", "OF", "OF", "OF", "SS"]
+        out = [{"slot": s, "name": n, "normalized_name": player_match.normalize_name(n)}
+               for s, n in zip(slots_order, names)]
+        # Two pitchers, deliberately given real hitter team names to
+        # prove pitchers are excluded from stack counting.
+        out += [{"slot": "P", "name": "Jose Ramirez", "normalized_name": player_match.normalize_name("Jose Ramirez")}] * 2
+        return out
+
+    dist = contest_results.stack_distribution(
+        [
+            _lu(["Jose Ramirez", "Steven Kwan", "Josh Naylor", "Bo Naylor",
+                 "Mookie Betts", "X One", "X Two", "X Three"]),
+            _lu(["Jose Ramirez", "Steven Kwan", "X A", "X B", "X C", "X D", "X E", "X F"]),
+            _lu(["Mookie Betts", "Freddie Freeman", "Will Smith", "Teoscar Hernandez",
+                 "X G", "X H", "X I", "X J"]),
+        ],
+        team_by_name,
+    )
+    check("stack_distribution counts a real 4-man stack at exactly size 4",
+          dist["CLE"].get(4) == 1, str(dist["CLE"]))
+    check("stack_distribution counts the 2-man stack separately from the 4-man one",
+          dist["CLE"].get(2) == 1, str(dist["CLE"]))
+    check("stack_distribution puts the entry with none of that team's bats in the size-0 bucket",
+          dist["CLE"].get(0) == 1, str(dist["CLE"]))
+    check("stack_distribution excludes rostered PITCHERS from a team's stack count -- a starting "
+          "pitcher is not part of that team's offensive stack",
+          sum(dist["CLE"].values()) == 3 and max(dist["CLE"]) == 4, str(dist["CLE"]))
+    check("stack_distribution counts a second team on the same entries independently",
+          dist["LAD"].get(4) == 1 and dist["LAD"].get(1) == 1, str(dist["LAD"]))
+    check("every team's counts sum to the field size, so the result reads as a real distribution",
+          all(sum(sizes.values()) == 3 for sizes in dist.values()), str(dist))
+
     check("find_my_entry finds the right entry by exact EntryId",
           contest_results.find_my_entry(parsed_standings["entries"], entry_id="5002")["rank"] == 2,
           str(contest_results.find_my_entry(parsed_standings["entries"], entry_id="5002")))
