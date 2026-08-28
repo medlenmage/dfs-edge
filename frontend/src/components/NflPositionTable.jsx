@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ScoreMeter } from './ScoreMeter'
+import { SalaryRangeFilter, salaryBounds, withinSalaryRange } from './SalaryRangeFilter'
 
 const DRIVER_LABELS = {
   implied_total: 'Vegas total',
@@ -40,6 +41,8 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
   const [sortKey, setSortKey] = useState('score')
   const [sortDir, setSortDir] = useState('desc')
   const [search, setSearch] = useState('')
+  const [minSalary, setMinSalary] = useState('')
+  const [maxSalary, setMaxSalary] = useState('')
   const [showGames, setShowGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
 
@@ -74,6 +77,16 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
       return next
     })
   }
+
+  // A salary range means something different at every position -- a
+  // $6,000 floor is mid-range for a QB and impossible for a DST -- so
+  // switching sub-tabs clears it rather than silently showing an empty
+  // table under a bound carried over from a differently-priced group.
+  const positionsKey = positions.join(',')
+  useEffect(() => {
+    setMinSalary('')
+    setMaxSalary('')
+  }, [positionsKey])
 
   const [rows, hiddenCount] = useMemo(() => {
     const wanted = new Set(positions)
@@ -135,6 +148,7 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
     const list = rows.filter(
       (r) =>
         (!slateGames.length || includedGames.has(r.game_pk)) &&
+        withinSalaryRange(r.salary, minSalary, maxSalary) &&
         (!q || r.name?.toLowerCase().includes(q) || r.team?.toLowerCase().includes(q)),
     )
     const dir = sortDir === 'asc' ? 1 : -1
@@ -148,7 +162,9 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
       return (av - bv) * dir
     })
     return list.slice(0, limit)
-  }, [rows, sortKey, sortDir, search, limit, includedGames, slateGames])
+  }, [rows, sortKey, sortDir, search, minSalary, maxSalary, limit, includedGames, slateGames])
+
+  const bounds = useMemo(() => salaryBounds(rows), [rows])
 
   function toggleSort(key) {
     if (key === sortKey) {
@@ -191,6 +207,13 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           style={{ minWidth: 220 }}
+        />
+        <SalaryRangeFilter
+          min={minSalary}
+          max={maxSalary}
+          onMinChange={setMinSalary}
+          onMaxChange={setMaxSalary}
+          bounds={bounds}
         />
         <span className="dim" style={{ fontSize: 13 }}>
           {filtered.length} of {rows.length} players
