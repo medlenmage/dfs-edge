@@ -2,7 +2,20 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { NflContestGeneratorPanel } from './NflContestGeneratorPanel'
 import { NflLineupsPanel } from './NflLineupsPanel'
+import { NflPositionTable } from './NflPositionTable'
 import { NflStackTable } from './NflStackTable'
+
+// Sub-tabs within the Players tab. FLEX isn't a real player position --
+// it's DK's own roster-slot concept (any RB/WR/TE) -- so it's just the
+// union of those three positions, no new data needed.
+const PLAYER_SUB_TABS = [
+  { id: 'QB', label: 'QB', positions: ['QB'] },
+  { id: 'RB', label: 'RB', positions: ['RB'] },
+  { id: 'WR', label: 'WR', positions: ['WR'] },
+  { id: 'TE', label: 'TE', positions: ['TE'] },
+  { id: 'FLEX', label: 'FLEX', positions: ['RB', 'WR', 'TE'] },
+  { id: 'DST', label: 'DST', positions: ['DST'] },
+]
 
 function currentNflSeason() {
   const d = new Date()
@@ -93,6 +106,7 @@ export function NflPanel() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [tab, setTab] = useState('matchups')
+  const [playerSubTab, setPlayerSubTab] = useState('QB')
   const [salaryMsg, setSalaryMsg] = useState(null)
   const [projectionMsg, setProjectionMsg] = useState(null)
   const [rotowireLoading, setRotowireLoading] = useState(false)
@@ -254,6 +268,9 @@ export function NflPanel() {
             <button className={`tab ${tab === 'stacks' ? 'active' : ''}`} onClick={() => setTab('stacks')}>
               Stacks
             </button>
+            <button className={`tab ${tab === 'players' ? 'active' : ''}`} onClick={() => setTab('players')}>
+              Players
+            </button>
             <button className={`tab ${tab === 'lineups' ? 'active' : ''}`} onClick={() => setTab('lineups')}>
               Lineups
             </button>
@@ -264,6 +281,25 @@ export function NflPanel() {
 
           {tab === 'matchups' && <NflMatchups slate={slate} />}
           {tab === 'stacks' && <NflStackTable season={slate.season} week={slate.week} />}
+          {tab === 'players' && (
+            <>
+              <div className="tabs" style={{ marginBottom: 14 }}>
+                {PLAYER_SUB_TABS.map((t) => (
+                  <button
+                    key={t.id}
+                    className={`tab ${playerSubTab === t.id ? 'active' : ''}`}
+                    onClick={() => setPlayerSubTab(t.id)}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <NflPositionTable
+                slate={slate}
+                positions={PLAYER_SUB_TABS.find((t) => t.id === playerSubTab).positions}
+              />
+            </>
+          )}
           {tab === 'lineups' && <NflLineupsPanel season={slate.season} week={slate.week} slate={slate} />}
           {tab === 'contest' && <NflContestGeneratorPanel season={slate.season} week={slate.week} />}
         </>
