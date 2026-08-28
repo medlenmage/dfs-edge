@@ -9,6 +9,20 @@ const DRIVER_LABELS = {
   pace: 'pace',
 }
 
+// A real DK NFL salary CSV carries every rostered player, most of whom
+// are deep-bench names nobody can roster meaningfully -- a real week 1
+// pool has WRs at 0.05 and 1.9 projected points sitting alongside the
+// actual starters. Nothing in the slate data flags "starter" (no depth
+// chart exists in any free source this app reads), so the real,
+// available proxy is production: a genuine starter has either a real
+// projection or a real DK season average, and a bench player has
+// neither. Taking the max of the two means the table still fills in
+// before RotoWire projections are uploaded (DK's own AvgPointsPerGame
+// carries it) and stays correct for a rookie with no DK history but a
+// real projection.
+const MIN_RELEVANT_FPTS = 3
+
+
 /**
  * Every player at one or more DFS positions, ranked by real matchup
  * score -- the NFL sibling of HitterTable.jsx/PitcherTable.jsx (MLB).
@@ -61,15 +75,25 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
     })
   }
 
-  const rows = useMemo(() => {
+  const [rows, hiddenCount] = useMemo(() => {
     const wanted = new Set(positions)
     const out = []
+    let hidden = 0
     for (const g of slate?.games || []) {
       for (const side of ['home', 'away']) {
         const team = g[side]
         const opp = g[side === 'home' ? 'away' : 'home']
         for (const p of team.players || []) {
           if (!wanted.has(p.position)) continue
+          // Every team has exactly one DST and it's always rosterable,
+          // so it's a starter by definition -- never filtered out.
+          if (p.position !== 'DST') {
+            const best = Math.max(p.projection?.fpts ?? 0, p.avg_points ?? 0)
+            if (best < MIN_RELEVANT_FPTS) {
+              hidden += 1
+              continue
+            }
+          }
           const comps = p.edge?.components || {}
           out.push({
             id: p.dk_id || `${g.game_id}-${side}-${p.name}`,
@@ -94,7 +118,7 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
         }
       }
     }
-    return out
+    return [out, hidden]
   }, [slate, positions])
 
   const filtered = useMemo(() => {
@@ -129,8 +153,17 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
   if (!rows.length) {
     return (
       <div className="notice">
-        No {positions.join('/')} data for this week yet -- upload a salary CSV (and ideally
-        RotoWire projections) first.
+        {hiddenCount > 0 ? (
+          <>
+            No {positions.join('/')} on this slate projects for {MIN_RELEVANT_FPTS}+ points
+            ({hiddenCount} bench players hidden) -- upload RotoWire projections for a real read.
+          </>
+        ) : (
+          <>
+            No {positions.join('/')} data for this week yet -- upload a salary CSV (and ideally
+            RotoWire projections) first.
+          </>
+        )}
       </div>
     )
   }
@@ -152,6 +185,7 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
         />
         <span className="dim" style={{ fontSize: 13 }}>
           {filtered.length} of {rows.length} players
+          {hiddenCount > 0 && ` · ${hiddenCount} bench hidden (under ${MIN_RELEVANT_FPTS} pts)`}
         </span>
       </div>
 
