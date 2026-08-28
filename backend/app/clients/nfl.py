@@ -29,6 +29,7 @@ from app.cache import cached
 from app.clients.http import get_text
 from app.config import get_settings
 from app.services import nfl_dk_points
+from app.services.player_match import normalize_name, normalize_team
 
 GAMES_URL = "https://github.com/nflverse/nflverse-data/releases/download/schedules/games.csv"
 # The "player_stats" release this used to point at was deprecated by
@@ -301,6 +302,66 @@ async def get_player_game_log(
     """
     grouped = await get_grouped_season_stats(season, force=force)
     return grouped.get(player_id, [])
+
+
+async def get_player_id_lookup(season: int, *, force: bool = False) -> dict[str, Any]:
+    """
+    Resolve a DFS-export player (name + team) to nflverse's own GSIS
+    player_id, the key every game log here is filed under.
+
+    This exists because DraftKings identifies players by its own numeric
+    id ("1043"), nflverse by GSIS id ("00-0034796"), and nothing in
+    either dataset bridges them -- so anything reading a real game log
+    for a slate player has to match on name.
+
+    Returns `{"by_team_name": {"TEAM|name": id}, "by_name": {name: id}}`,
+    both keyed by player_match-normalized strings (the team-and-name key
+    is a joined string rather than a tuple because this whole structure
+    is cached as JSON). `by_name` deliberately omits any name shared by
+    two different players anywhere in the league, so a fallback lookup
+    can never silently pair the wrong one.
+
+    The by-name fallback carries real weight for NFL specifically: a
+    player's team in the season being played routinely differs from the
+    team his prior-season log is filed under, so a team-only match would
+    drop exactly the players who changed teams in the offseason.
+    """
+    settings = get_settings()
+
+    async def _load() -> dict[str, Any]:
+        grouped = await get_grouped_season_stats(season, force=force)
+        by_team_name: dict[str, str] = {}
+        name_owners: dict[str, set[str]] = {}
+        for pid, rows in grouped.items():
+            if not rows:
+                continue
+            name = normalize_name(rows[-1].get("player_name") or "")
+            if not name:
+                continue
+            name_owners.setdefault(name, set()).add(pid)
+            # Every team a player appeared for this season, not just his
+            # last one -- a midseason trade otherwise makes him
+            # unmatchable under the team he actually starts the next
+            # season with.
+            for row in rows:
+                team = normalize_team(row.get("team") or "")
+                if team:
+                    by_team_name[f"{team}|{name}"] = pid
+        by_name = {name: next(iter(pids)) for name, pids in name_owners.items() if len(pids) == 1}
+        return {"by_team_name": by_team_name, "by_name": by_name}
+
+    return await cached(f"nfl:player_id_lookup:{season}", settings.ttl_stats * 4, _load, force=force)
+
+
+def resolve_player_id(lookup: dict[str, Any], name: str, team: str) -> str | None:
+    """This player's nflverse id from get_player_id_lookup()'s maps, or
+    None when he has no prior-season history at all (a real rookie) or
+    shares a name with another player league-wide."""
+    name_norm = normalize_name(name)
+    if not name_norm:
+        return None
+    pid = lookup["by_team_name"].get(f"{normalize_team(team)}|{name_norm}")
+    return pid if pid is not None else lookup["by_name"].get(name_norm)
 
 
 async def get_prior_season_context(season: int = PRIOR_SEASON) -> dict[str, Any]:

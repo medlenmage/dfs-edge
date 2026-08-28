@@ -24,6 +24,7 @@ from app.services import (  # noqa: E402
     nfl_contest,
     nfl_correlations,
     nfl_dk_points,
+    nfl_inhouse_projections,
     nfl_optimizer,
     nfl_scoring,
     nfl_slate,
@@ -1095,6 +1096,140 @@ def main() -> int:
     check("_fantasylabs_has_line is False for a real matched row whose fields haven't posted yet -- "
           "the exact real bug this guards against (matched != has a real line)",
           nfl_slate._fantasylabs_has_line(empty_but_matched_row) is False, "")
+
+    print("\nNFL in-house projections + ownership (nfl_inhouse_projections.py)")
+
+    # --- matchup multiplier -------------------------------------------
+    check("composite_from_score maps a neutral 50 to exactly 1.00x",
+          nfl_scoring.composite_from_score(50.0) == 1.0, "")
+    check("composite_from_score is symmetric and bounded at both extremes",
+          (nfl_scoring.composite_from_score(100.0), nfl_scoring.composite_from_score(0.0)) == (1.45, 0.55),
+          (nfl_scoring.composite_from_score(100.0), nfl_scoring.composite_from_score(0.0)))
+    check("score_player carries a composite alongside its 0-100 score",
+          "composite" in nfl_scoring.score_player(
+              "WR", implied_total=22.0, is_home=True, spread=None, favored=False),
+          "")
+
+    # --- nflverse id resolution (the real bug this unblocked) ----------
+    id_lookup = {
+        "by_team_name": {"KC|patrick mahomes": "00-0033873", "DET|jared goff": "00-0033106"},
+        "by_name": {"patrick mahomes": "00-0033873", "jared goff": "00-0033106"},
+    }
+    check("resolve_player_id matches a player on the team his log is filed under",
+          nfl.resolve_player_id(id_lookup, "Patrick Mahomes", "KC") == "00-0033873", "")
+    check("resolve_player_id still finds a player who changed teams in the offseason -- "
+          "the real NFL case a team-only match would silently drop",
+          nfl.resolve_player_id(id_lookup, "Jared Goff", "LV") == "00-0033106", "")
+    check("resolve_player_id returns None for a player with no prior-season history at all (a rookie)",
+          nfl.resolve_player_id(id_lookup, "Some Rookie", "KC") is None, "")
+
+    # --- ownership: DK's 900% structure --------------------------------
+    def _own_pool(entries):
+        return [
+            {"dk_id": e[0], "position": e[1], "team": e[2], "salary": e[3],
+             "fpts": e[4], "implied_total": e[5]}
+            for e in entries
+        ]
+
+    # Two full teams' worth of realistic players, enough per group that
+    # every position's softmax has something real to distribute.
+    # Group sizes matter here: with only a handful of players a group's
+    # own average share is already above the ownership ceiling, so the
+    # cap correctly declines to apply and every assertion about it
+    # becomes vacuous. These counts keep each group's average well under
+    # the cap, the way a real multi-game slate does.
+    own_entries = []
+    for i in range(8):
+        own_entries.append((f"qb{i}", "QB", "AAA" if i % 2 else "BBB", 7000 - i * 300, 22.0 - i * 2.0, 26.0 - i))
+    for i in range(14):
+        own_entries.append((f"rb{i}", "RB", "AAA" if i % 2 else "BBB", 7500 - i * 300, 18.0 - i * 1.0, 26.0 - i * 0.6))
+    for i in range(24):
+        own_entries.append((f"wr{i}", "WR", "AAA" if i % 2 else "BBB", 8000 - i * 200, 20.0 - i * 0.7, 26.0 - i * 0.4))
+    for i in range(10):
+        own_entries.append((f"te{i}", "TE", "AAA" if i % 2 else "BBB", 5000 - i * 200, 12.0 - i * 1.0, 26.0 - i * 0.8))
+    for i in range(8):
+        own_entries.append((f"dst{i}", "DST", "AAA" if i % 2 else "BBB", 3400 - i * 150, 9.0 - i * 0.7, 26.0 - i))
+
+    own = nfl_inhouse_projections.project_ownership(_own_pool(own_entries))
+    group_sums = {}
+    for e in own_entries:
+        group_sums[e[1]] = group_sums.get(e[1], 0.0) + own[e[0]]
+
+    check("ownership honors DK Classic NFL's 9 roster slots -- every group sums to its own share, "
+          "and the whole slate to 900%",
+          all(abs(group_sums[pos] - nfl_inhouse_projections.SLOT_TARGETS[pos] * 100) < 0.5
+              for pos in group_sums) and abs(sum(group_sums.values()) - 900) < 1.0,
+          {k: round(v, 1) for k, v in sorted(group_sums.items())})
+    check("FLEX's single roster slot is distributed across RB/WR/TE rather than modelled as its own "
+          "position -- the shares sum to exactly one slot",
+          abs(sum(nfl_inhouse_projections._FLEX_SHARE.values()) - 1.0) < 1e-9,
+          nfl_inhouse_projections._FLEX_SHARE)
+    check("no player exceeds the real observed ownership ceiling",
+          max(own.values()) <= nfl_inhouse_projections._MAX_PLAYER_OWNERSHIP + 1e-6, max(own.values()))
+
+    # --- the cap redistributes rather than discarding -------------------
+    capped = nfl_inhouse_projections._apply_ownership_cap([80.0, 10.0, 6.0, 4.0], 40.0)
+    check("_apply_ownership_cap redistributes the excess instead of dropping it -- the group total is "
+          "preserved exactly",
+          abs(sum(capped) - 100.0) < 1e-6 and max(capped) <= 40.0 + 1e-9, capped)
+
+    # --- QB-stack correlation, the NFL-specific field behavior ----------
+    # Same WR in both pools; only his own QB's appeal changes. A chalky
+    # QB should pull his pass-catchers UP (the field stacks toward him),
+    # the opposite direction from MLB's opposing-pitcher penalty.
+    def _wr_own_with_qb(qb_salary, qb_fpts):
+        entries = list(own_entries)
+        entries = [e for e in entries if not (e[1] == "QB" and e[2] == "AAA")]
+        entries.append(("qb_aaa", "QB", "AAA", qb_salary, qb_fpts, 26.0))
+        return nfl_inhouse_projections.project_ownership(_own_pool(entries))
+
+    chalky = _wr_own_with_qb(6000, 26.0)
+    mediocre = _wr_own_with_qb(6000, 8.0)
+    check("a chalky QB pulls his own team's WRs UP (the field stacks toward him) -- the NFL counterpart "
+          "to MLB's opposing-pitcher-chalk penalty, and in the opposite direction",
+          chalky["wr3"] > mediocre["wr3"], (chalky["wr3"], mediocre["wr3"]))
+    check("the QB-stack boost does not touch a team's RBs -- they aren't part of the stack the field "
+          "is actually building",
+          chalky["rb3"] <= mediocre["rb3"] + 1e-9, (chalky["rb3"], mediocre["rb3"]))
+
+    stack_off = nfl_inhouse_projections._QB_STACK_WEIGHT
+    try:
+        nfl_inhouse_projections._QB_STACK_WEIGHT = 0.0
+        neutral_chalky = _wr_own_with_qb(6000, 26.0)
+        neutral_mediocre = _wr_own_with_qb(6000, 8.0)
+        check("with the stack weight zeroed, a WR's ownership no longer moves with his QB's -- proving "
+              "the boost is what's driving it, not a side effect",
+              abs(neutral_chalky["wr3"] - neutral_mediocre["wr3"]) < 1e-6,
+              (neutral_chalky["wr3"], neutral_mediocre["wr3"]))
+    finally:
+        nfl_inhouse_projections._QB_STACK_WEIGHT = stack_off
+
+    # --- the survivorship-bias fix (a real bug found in live output) ----
+    # A min-priced player the model has no history for must NOT outrank a
+    # real stud. Before the replacement-level prior, six $3,000 bench WRs
+    # with 0.0 projections each modelled above Ja'Marr Chase, because the
+    # position pool's MEAN (a starter's average game) divided by a
+    # min salary was the best points-per-dollar in the group.
+    bench_entries = list(own_entries) + [
+        ("bench_wr", "WR", "BBB", 3000, 2.2, 26.0),  # replacement-level projection
+    ]
+    bench_own = nfl_inhouse_projections.project_ownership(_own_pool(bench_entries))
+    check("a min-priced player projected at replacement level does not outrank a real stud at the same "
+          "position -- the exact live bug the replacement-level prior fixes",
+          bench_own["bench_wr"] < bench_own["wr0"], (bench_own["bench_wr"], bench_own["wr0"]))
+
+    check("_pool_prior reads the position pool's replacement level, NOT its survivorship-biased mean",
+          nfl_inhouse_projections._pool_prior([0.0, 1.0, 2.0, 3.0, 40.0]) == 1.0,
+          nfl_inhouse_projections._pool_prior([0.0, 1.0, 2.0, 3.0, 40.0]))
+    check("_pool_prior returns None for an empty pool rather than guessing",
+          nfl_inhouse_projections._pool_prior([]) is None, "")
+
+    # --- projection arithmetic ------------------------------------------
+    check("project_fpts scales a baseline rate by the matchup multiplier in both directions",
+          (nfl_inhouse_projections.project_fpts(10.0, 1.45),
+           nfl_inhouse_projections.project_fpts(10.0, 0.55)) == (14.5, 5.5),
+          (nfl_inhouse_projections.project_fpts(10.0, 1.45),
+           nfl_inhouse_projections.project_fpts(10.0, 0.55)))
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")

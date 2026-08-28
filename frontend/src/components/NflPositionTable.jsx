@@ -114,12 +114,21 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
             value: p.value ?? null,
             fpts: p.projection?.fpts ?? null,
             ownershipPct: p.projection?.ownership_pct ?? null,
+            inhouseFpts: p.projection?.inhouse_fpts ?? null,
+            inhouseOwnershipPct: p.projection?.inhouse_ownership_pct ?? null,
+            inhouseCeiling: p.projection?.inhouse_ceiling ?? null,
+            leverageScore: p.projection?.leverage_score ?? null,
           })
         }
       }
     }
     return [out, hidden]
   }, [slate, positions])
+
+  // The in-house columns only appear once they've actually been
+  // computed for this week, so a plain slate load isn't cluttered with
+  // a block of empty cells.
+  const hasInhouse = useMemo(() => rows.some((r) => r.inhouseFpts != null), [rows])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -241,6 +250,19 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
               <th className="num sortable" onClick={() => toggleSort('ownershipPct')}>
                 Own%{sortKey === 'ownershipPct' ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
               </th>
+              {hasInhouse && (
+                <>
+                  <th className="num sortable" onClick={() => toggleSort('inhouseFpts')} title="This app's own projection: real prior-season production scaled by today's matchup">
+                    In-house{sortKey === 'inhouseFpts' ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
+                  </th>
+                  <th className="num sortable" onClick={() => toggleSort('inhouseOwnershipPct')} title="This app's own modelled ownership%">
+                    In-house own%{sortKey === 'inhouseOwnershipPct' ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
+                  </th>
+                  <th className="num sortable" onClick={() => toggleSort('leverageScore')} title="Ceiling minus modelled ownership -- real upside the field is under-rostering">
+                    Leverage{sortKey === 'leverageScore' ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
+                  </th>
+                </>
+              )}
               <th>Biggest factor</th>
             </tr>
           </thead>
@@ -274,6 +296,22 @@ export function NflPositionTable({ slate, positions, limit = 100 }) {
                 </td>
                 <td className="num">{r.fpts != null ? r.fpts.toFixed(1) : '—'}</td>
                 <td className="num">{r.ownershipPct != null ? `${r.ownershipPct.toFixed(1)}%` : '—'}</td>
+                {hasInhouse && (
+                  <>
+                    <td className="num">
+                      {r.inhouseFpts != null ? r.inhouseFpts.toFixed(1) : '—'}
+                      {r.inhouseCeiling != null && (
+                        <div className="sub-line">{r.inhouseCeiling.toFixed(1)} ceil</div>
+                      )}
+                    </td>
+                    <td className="num">
+                      {r.inhouseOwnershipPct != null ? `${r.inhouseOwnershipPct.toFixed(1)}%` : '—'}
+                    </td>
+                    <td className="num">
+                      {r.leverageScore != null ? r.leverageScore.toFixed(1) : '—'}
+                    </td>
+                  </>
+                )}
                 <td className="sub-line">{DRIVER_LABELS[r.driver] || r.driver || '—'}</td>
               </tr>
             ))}

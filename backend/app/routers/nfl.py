@@ -38,10 +38,16 @@ async def get_slate(
     season: int | None = Query(None, description="e.g. 2026 -- defaults to the current NFL season"),
     week: int | None = Query(None, description="1-18 -- defaults to the current week"),
     force: bool = Query(False, description="Bypass the FantasyLabs vegas-line cache and pull a fresh read"),
+    include_inhouse: bool = Query(
+        False,
+        description="Also compute this app's own in-house FPTS/ownership/leverage projections (a real game-log read per player)",
+    ),
 ) -> dict[str, Any]:
     """The week's slate: games, Vegas-implied context, weather, and (once uploaded) every rostered player."""
     resolved_season, resolved_week = await _resolve_season_week(season, week)
-    return await nfl_slate.build_slate(resolved_season, resolved_week, force_refresh=force)
+    return await nfl_slate.build_slate(
+        resolved_season, resolved_week, force_refresh=force, include_inhouse=include_inhouse
+    )
 
 
 @router.get("/stacks")

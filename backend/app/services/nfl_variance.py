@@ -112,7 +112,7 @@ def position_pool(position: str, season: int) -> list[float]:
 
 
 async def player_outcome_pool(
-    player_id: str, position: str, season: int, *, seed: int | None = None
+    player_id: str | None, position: str, season: int, *, seed: int | None = None
 ) -> list[float]:
     """
     A POOL_SIZE-length bootstrap resampling pool of DK-point outcomes
@@ -121,6 +121,13 @@ async def player_outcome_pool(
     in the shared same-position pool for thin samples; a player with a
     full season's worth of games draws almost entirely from his own
     real history. See dst_outcome_pool() for the DST equivalent.
+
+    `player_id` is nflverse's own GSIS id (see
+    clients/nfl.resolve_player_id()), NOT a DraftKings id. None means
+    this player has no prior-season history at all -- a rookie, or
+    someone who missed the whole season -- and draws entirely from the
+    shared same-position pool, which is exactly what the thin-sample
+    blend below would do for him anyway.
     """
     settings = get_settings()
     pos = (position or "").strip().upper()
@@ -129,6 +136,10 @@ async def player_outcome_pool(
         # tagged "FB") falls back to the broadest skill-position pool
         # rather than refusing to simulate at all.
         pos = "WR"
+
+    if not player_id:
+        pool = position_pool(pos, season)
+        return pool[:POOL_SIZE] if pool else [0.0]
 
     async def _load() -> list[float]:
         game_log = await nfl.get_player_game_log(player_id, season)
@@ -225,15 +236,22 @@ async def player_pools_for_entries(
     """
     positions: dict[str, str] = {}
     teams: dict[str, str] = {}
+    nflverse_ids: dict[str, str | None] = {}
     for entry in entries:
         for p in _flatten_lineup(entry):
             positions.setdefault(p["id"], p["position"])
             teams.setdefault(p["id"], p["team"])
+            nflverse_ids.setdefault(p["id"], p.get("nflverse_id"))
 
     async def _pool_for(pid: str) -> list[float]:
         if positions[pid] == "DST":
             return await dst_outcome_pool(teams[pid], season)
-        return await player_outcome_pool(pid, positions[pid], season)
+        # Game logs are keyed by nflverse's GSIS id, never DraftKings'
+        # own id -- passing the DK id straight through would match
+        # nothing and silently hand every player the same-position
+        # fallback pool. None here is a real rookie/no-history case,
+        # which player_outcome_pool() already handles as intended.
+        return await player_outcome_pool(nflverse_ids.get(pid), positions[pid], season)
 
     ids = list(positions)
     pools = await asyncio.gather(*(_pool_for(pid) for pid in ids))

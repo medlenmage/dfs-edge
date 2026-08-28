@@ -81,6 +81,7 @@ def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
                 pool.append(
                     {
                         "id": p["dk_id"],
+                        "nflverse_id": p.get("nflverse_id"),
                         "name": p["name"],
                         "team": team["abbrev"],
                         "opponent": opponent,
@@ -182,6 +183,7 @@ def _solve_one(
                 slots_out[slot].append(
                     {
                         "id": p["id"],
+                        "nflverse_id": p.get("nflverse_id"),
                         "name": p["name"],
                         "team": p["team"],
                         "opponent": p["opponent"],

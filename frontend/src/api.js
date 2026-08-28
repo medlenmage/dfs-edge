@@ -391,10 +391,11 @@ export const api = {
       }),
     }),
 
-  nflSlate: (season, week) => {
+  nflSlate: (season, week, { inhouse = false } = {}) => {
     const params = new URLSearchParams()
     if (season) params.set('season', season)
     if (week) params.set('week', week)
+    if (inhouse) params.set('include_inhouse', 'true')
     const qs = params.toString()
     return request(`/api/nfl/slate${qs ? `?${qs}` : ''}`)
   },

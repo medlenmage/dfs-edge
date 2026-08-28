@@ -110,14 +110,19 @@ export function NflPanel() {
   const [salaryMsg, setSalaryMsg] = useState(null)
   const [projectionMsg, setProjectionMsg] = useState(null)
   const [rotowireLoading, setRotowireLoading] = useState(false)
+  const [inhouseLoading, setInhouseLoading] = useState(false)
   const salaryInputRef = useRef(null)
   const projectionInputRef = useRef(null)
 
-  async function load(overrideSeason, overrideWeek) {
+  async function load(overrideSeason, overrideWeek, { inhouse = false } = {}) {
     setLoading(true)
     setError(null)
     try {
-      const data = await api.nflSlate(overrideSeason ?? (season || null), overrideWeek ?? (week || null))
+      const data = await api.nflSlate(
+        overrideSeason ?? (season || null),
+        overrideWeek ?? (week || null),
+        { inhouse },
+      )
       setSlate(data)
       setSeason(String(data.season))
       setWeek(String(data.week))
@@ -171,6 +176,19 @@ export function NflPanel() {
       setProjectionMsg(`RotoWire refresh failed: ${err.message}`)
     } finally {
       setRotowireLoading(false)
+    }
+  }
+
+  // Opt-in for the same reason MLB's is: computing these reads a real
+  // game log for every player on the slate, which a plain refresh
+  // shouldn't silently pay for.
+  async function loadInhouse() {
+    if (!slate) return
+    setInhouseLoading(true)
+    try {
+      await load(slate.season, slate.week, { inhouse: true })
+    } finally {
+      setInhouseLoading(false)
     }
   }
 
@@ -233,6 +251,13 @@ export function NflPanel() {
           title="Pull RotoWire's own live optimizer player pool directly -- salary, position, opponent, FPTS, and rostership% -- with no manual CSV download/upload. Always bypasses the cache for genuinely live data. Doesn't touch DK salaries -- RotoWire's NFL export has no DK numeric player id, so a real DK salary CSV is still needed separately."
         >
           {rotowireLoading ? 'Loading…' : 'Refresh from RotoWire'}
+        </button>
+        <button
+          onClick={loadInhouse}
+          disabled={inhouseLoading || !slate}
+          title="Compute this app's own in-house FPTS, ownership%, ceiling and leverage for this week, from real prior-season game logs scaled by each player's matchup. Shown alongside RotoWire's numbers, not instead of them. Reads a real game log per player, so the first run takes a moment."
+        >
+          {inhouseLoading ? 'Computing…' : 'Load in-house projections'}
         </button>
       </div>
 
