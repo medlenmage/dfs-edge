@@ -81,8 +81,31 @@ PACE_SENSITIVITY = 40.0
 PACE_MAX_ADJUSTMENT = 4.0
 
 
+# How far the 0-100 matchup score is allowed to swing a projection when
+# read as a multiplier. A perfect 100 lands at 1.45x, a 0 at 0.55x, and
+# a neutral 50 at exactly 1.00x. Deliberately a documented linear map,
+# not a fitted one: there is no archive of real NFL projection-vs-actual
+# results in this app to fit against yet, so a transparent, statable
+# transform beats a number that merely looks calibrated. The magnitude
+# is set so a genuinely elite spot moves a projection meaningfully
+# without letting matchup alone outweigh a player's own established
+# production -- the same "a real edge, not the whole story" framing the
+# component sensitivities above already use.
+COMPOSITE_SENSITIVITY = 0.45
+
+
 def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, value))
+
+
+def composite_from_score(score: float) -> float:
+    """
+    The 0-100 matchup score re-expressed as a multiplier centered at
+    1.00 -- the shape a projection can multiply a baseline rate by.
+    Mirrors the role MLB's `scoring.combine()` composite plays for
+    services/inhouse_projections.py.
+    """
+    return round(1.0 + (score - 50.0) / 50.0 * COMPOSITE_SENSITIVITY, 3)
 
 
 def team_environment_score(implied_total: float | None, *, is_home: bool) -> dict[str, Any]:
@@ -248,8 +271,10 @@ def score_player(
     nonzero = [kv for kv in named if kv[1] > 0]
     top_driver = max(nonzero, key=lambda kv: kv[1])[0] if nonzero else "implied_total"
 
+    score = round(_clamp(total), 1)
     return {
-        "score": round(_clamp(total), 1),
+        "score": score,
+        "composite": composite_from_score(score),
         "components": components,
         "top_driver": top_driver,
     }

@@ -25,7 +25,13 @@ from zoneinfo import ZoneInfo
 
 from app.clients import fantasylabs, nfl, weather as weather_client
 from app.data import nfl_stadiums
-from app.services import nfl_scoring, player_match, projections, salaries
+from app.services import (
+    nfl_inhouse_projections,
+    nfl_scoring,
+    player_match,
+    projections,
+    salaries,
+)
 
 __all__ = ["build_slate", "week_key"]
 
@@ -93,6 +99,7 @@ def _team_players(
     wind_mph: float | None,
     precip_chance_pct: float | None,
     prior_season: dict[str, Any],
+    id_lookup: dict[str, Any],
 ) -> list[dict[str, Any]]:
     team_norm = player_match.normalize_team(team)
     defense_vs_position = prior_season.get("defense_vs_position") or {}
@@ -134,6 +141,11 @@ def _team_players(
         players.append(
             {
                 "dk_id": row.get("dk_id") or None,
+                # nflverse's own id for this player, the key every real
+                # game log is filed under -- None for a rookie or anyone
+                # with no prior-season history, which callers treat as
+                # "no own history, lean on the position pool."
+                "nflverse_id": nfl.resolve_player_id(id_lookup, row["name"], row["team"]),
                 "name": row["name"],
                 "team": team,
                 "position": row["position"],
@@ -154,6 +166,7 @@ async def _build_game(
     projection_lookup: dict[tuple[str, str], dict[str, Any]],
     prior_season: dict[str, Any],
     fantasylabs_lines: list[dict[str, Any]],
+    id_lookup: dict[str, Any],
 ) -> dict[str, Any]:
     home, away = game["home_team"], game["away_team"]
 
@@ -197,14 +210,14 @@ async def _build_game(
         home, away, salary_rows, projection_lookup,
         implied_total=implied["home"], is_home=True, spread=spread,
         favored=home_favored, wind_mph=wind_mph, precip_chance_pct=precip_pct,
-        prior_season=prior_season,
+        prior_season=prior_season, id_lookup=id_lookup,
     )
     away_favored = None if home_favored is None else not home_favored
     away_players = _team_players(
         away, home, salary_rows, projection_lookup,
         implied_total=implied["away"], is_home=False, spread=spread,
         favored=away_favored, wind_mph=wind_mph, precip_chance_pct=precip_pct,
-        prior_season=prior_season,
+        prior_season=prior_season, id_lookup=id_lookup,
     )
 
     return {
@@ -232,7 +245,82 @@ async def _build_game(
     }
 
 
-async def build_slate(season: int, week: int, *, force_refresh: bool = False) -> dict[str, Any]:
+async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: int) -> None:
+    """
+    Adds projection["inhouse_fpts"], then ["inhouse_ownership_pct"]
+    wherever a real DK salary is also loaded (ownership is meaningless
+    without a salary-capped contest to be owned in), then
+    ["inhouse_ceiling"]/["leverage_score"] (real upside minus the
+    ownership the field is giving it). Mutates in place, additive
+    alongside whatever RotoWire projection is already there.
+
+    Baselines come from the PRIOR completed season -- the same static
+    prior nfl_scoring.py's defense/pace components already lean on, and
+    for the same stated reason: there's no current-season sample until
+    real games are played.
+    """
+    all_players: list[dict[str, Any]] = []
+    for g in out_games:
+        for side in ("home", "away"):
+            all_players.extend(
+                p for p in (g[side]["players"] or []) if p.get("dk_id") and p.get("edge")
+            )
+    if not all_players:
+        return
+
+    inhouse = await nfl_inhouse_projections.inhouse_fpts_batch(all_players, nfl.PRIOR_SEASON)
+    if not inhouse:
+        return
+
+    ownership_pool: list[dict[str, Any]] = []
+    for g in out_games:
+        for side in ("home", "away"):
+            implied_total = g[side]["implied_total"]
+            for p in g[side]["players"] or []:
+                fpts = inhouse.get(p.get("dk_id"))
+                if fpts is None or p.get("salary") is None:
+                    continue
+                ownership_pool.append(
+                    {
+                        "dk_id": p["dk_id"],
+                        "position": p["position"],
+                        "team": g[side]["abbrev"],
+                        "salary": p["salary"],
+                        "fpts": fpts,
+                        "implied_total": implied_total,
+                    }
+                )
+
+    ownership = nfl_inhouse_projections.project_ownership(ownership_pool)
+    ceilings = await nfl_inhouse_projections.player_ceilings(all_players, nfl.PRIOR_SEASON)
+
+    for g in out_games:
+        for side in ("home", "away"):
+            for p in g[side]["players"] or []:
+                dk_id = p.get("dk_id")
+                if dk_id is None:
+                    continue
+                fpts = inhouse.get(dk_id)
+                if fpts is not None:
+                    p["projection"] = {**(p["projection"] or {}), "inhouse_fpts": fpts}
+                own_pct = ownership.get(dk_id)
+                if own_pct is not None:
+                    p["projection"] = {
+                        **(p["projection"] or {}),
+                        "inhouse_ownership_pct": own_pct,
+                    }
+                ceiling = ceilings.get(dk_id)
+                if ceiling is not None and own_pct is not None:
+                    p["projection"] = {
+                        **(p["projection"] or {}),
+                        "inhouse_ceiling": round(ceiling, 2),
+                        "leverage_score": round(ceiling - own_pct, 2),
+                    }
+
+
+async def build_slate(
+    season: int, week: int, *, force_refresh: bool = False, include_inhouse: bool = False
+) -> dict[str, Any]:
     games = await nfl.get_schedule(season, week=week)
     if not games:
         return {
@@ -247,6 +335,10 @@ async def build_slate(season: int, week: int, *, force_refresh: bool = False) ->
     projection_rows = projections.load(key)
     projection_lookup = projections.build_lookup(projection_rows)
     prior_season = await nfl.get_prior_season_context()
+    # Reads the same already-cached prior-season stats get_prior_season_
+    # context() just pulled, so this costs a single extra pass, not a
+    # second fetch.
+    id_lookup = await nfl.get_player_id_lookup(nfl.PRIOR_SEASON)
 
     # Any single real game date from this week works -- FantasyLabs
     # returns the whole week's slate regardless of which of that
@@ -258,14 +350,23 @@ async def build_slate(season: int, week: int, *, force_refresh: bool = False) ->
 
     built = await asyncio.gather(
         *[
-            _build_game(g, salary_rows, projection_lookup, prior_season, fantasylabs_lines)
+            _build_game(g, salary_rows, projection_lookup, prior_season, fantasylabs_lines, id_lookup)
             for g in games
         ]
     )
+
+    out_games = list(built)
+
+    # Opt-in for the same reason MLB's is: computing these means a real
+    # game-log read for every player on the slate. Cheap once cached,
+    # but the first call pays for it, so a plain dashboard refresh
+    # shouldn't silently carry that cost.
+    if include_inhouse:
+        await _attach_inhouse_projections(out_games, season)
 
     return {
         "season": season,
         "week": week,
         "generated_at": datetime.utcnow().isoformat() + "Z",
-        "games": list(built),
+        "games": out_games,
     }
