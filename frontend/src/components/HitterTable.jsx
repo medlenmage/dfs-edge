@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ScoreMeter } from './ScoreMeter'
+import { SalaryRangeFilter, salaryBounds, withinSalaryRange } from './SalaryRangeFilter'
 import { localTime } from '../format'
 
 const COLUMNS = [
@@ -23,14 +24,6 @@ const COLUMNS = [
   { key: 'why', label: 'Biggest factor', sortable: false },
 ]
 
-// DK roster-slot positions, in Classic MLB order. A player's real DK
-// salary position (when a salary CSV is loaded -- e.g. "1B/3B" for a
-// multi-eligible player) wins; otherwise falls back to a normalized
-// read of the MLB bio position (which splits the outfield into
-// LF/CF/RF and has no DH slot at all), since that's all that's known
-// before a salary file exists.
-const POSITIONS = ['C', '1B', '2B', '3B', 'SS', 'OF', 'DH']
-
 function canonicalPosition(dkSalaryPosition, bioPosition) {
   if (dkSalaryPosition) return dkSalaryPosition.split('/')[0].trim()
   if (bioPosition === 'LF' || bioPosition === 'CF' || bioPosition === 'RF') return 'OF'
@@ -53,12 +46,22 @@ const DRIVER_LABELS = {
   home_road: 'home/road split',
 }
 
-export function HitterTable({ slate, limit = 50 }) {
+/**
+ * Every hitter at one or more DK roster-slot positions, ranked.
+ *
+ * `positions` is an array of DK slot codes, or null/undefined for
+ * every hitter -- the same prop shape NflPositionTable.jsx uses, so
+ * one component serves each position sub-tab. The sub-tab bar itself
+ * lives in the parent (App.jsx), matching how NflPanel.jsx owns the
+ * NFL Players sub-tabs.
+ */
+export function HitterTable({ slate, positions, limit = 50 }) {
   const [sortKey, setSortKey] = useState('score')
   const [sortDir, setSortDir] = useState('desc')
   const [minScore, setMinScore] = useState(0)
   const [search, setSearch] = useState('')
-  const [positionFilter, setPositionFilter] = useState('')
+  const [minSalary, setMinSalary] = useState('')
+  const [maxSalary, setMaxSalary] = useState('')
   const [showGames, setShowGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
 
@@ -101,13 +104,24 @@ export function HitterTable({ slate, limit = 50 }) {
     })
   }
 
+  // A salary range means something different at every position, so
+  // switching sub-tabs clears it rather than silently showing an empty
+  // table under a bound carried over from a differently-priced group.
+  const positionsKey = positions?.join(',') || 'ALL'
+  useEffect(() => {
+    setMinSalary('')
+    setMaxSalary('')
+  }, [positionsKey])
+
   const rows = useMemo(() => {
+    const wanted = positions?.length ? new Set(positions) : null
     const out = []
     for (const g of slate?.games || []) {
       for (const side of ['home', 'away']) {
         const team = g[side]
         const opp = g[side === 'home' ? 'away' : 'home']
         for (const h of team.hitters || []) {
+          if (wanted && !wanted.has(canonicalPosition(h.salary?.position, h.position))) continue
           out.push({
             id: h.id,
             game_pk: g.game_pk,
@@ -147,7 +161,7 @@ export function HitterTable({ slate, limit = 50 }) {
       }
     }
     return out
-  }, [slate])
+  }, [slate, positions])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -155,7 +169,7 @@ export function HitterTable({ slate, limit = 50 }) {
       (r) =>
         (!slateGames.length || includedGames.has(r.game_pk)) &&
         r.score >= minScore &&
-        (!positionFilter || r.dkPosition === positionFilter) &&
+        withinSalaryRange(r.salary, minSalary, maxSalary) &&
         (!q ||
           r.name?.toLowerCase().includes(q) ||
           r.team?.toLowerCase().includes(q)),
@@ -171,7 +185,9 @@ export function HitterTable({ slate, limit = 50 }) {
       return (av - bv) * dir
     })
     return list.slice(0, limit)
-  }, [rows, sortKey, sortDir, minScore, positionFilter, search, limit, includedGames, slateGames])
+  }, [rows, sortKey, sortDir, minScore, minSalary, maxSalary, search, limit, includedGames, slateGames])
+
+  const bounds = useMemo(() => salaryBounds(rows), [rows])
 
   function toggleSort(key) {
     if (key === sortKey) {
@@ -183,12 +199,18 @@ export function HitterTable({ slate, limit = 50 }) {
   }
 
   if (!rows.length) {
-    return <div className="notice">No hitter data for this date yet.</div>
+    return (
+      <div className="notice">
+        {positions?.length
+          ? `No ${positions.join('/')} hitters on this slate yet -- a DK salary CSV gives each hitter his real roster-slot position.`
+          : 'No hitter data for this date yet.'}
+      </div>
+    )
   }
 
   return (
     <>
-      <div className="controls" style={{ marginBottom: 12 }}>
+      <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
         {slateGames.length > 0 && (
           <button onClick={() => setShowGames((s) => !s)}>
             {showGames ? 'Hide games' : 'Games'} ({includedGames.size} of {slateGames.length})
@@ -201,17 +223,13 @@ export function HitterTable({ slate, limit = 50 }) {
           onChange={(e) => setSearch(e.target.value)}
           style={{ minWidth: 220 }}
         />
-        <label className="dim" style={{ fontSize: 13 }}>
-          Position{' '}
-          <select value={positionFilter} onChange={(e) => setPositionFilter(e.target.value)}>
-            <option value="">All</option>
-            {POSITIONS.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
-        </label>
+        <SalaryRangeFilter
+          min={minSalary}
+          max={maxSalary}
+          onMinChange={setMinSalary}
+          onMaxChange={setMaxSalary}
+          bounds={bounds}
+        />
         <label className="dim" style={{ fontSize: 13 }}>
           Min score{' '}
           <select

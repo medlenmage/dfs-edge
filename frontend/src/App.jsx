@@ -24,6 +24,25 @@ const TABS = [
   { id: 'ai', label: 'AI analysis' },
 ]
 
+// DK Classic MLB roster-slot positions, in DK's own order, as sub-tabs
+// under Hitters -- the same nested-tab shape NflPanel.jsx uses for the
+// NFL Players tab. A hitter's real DK salary position wins when a
+// salary CSV is loaded (the first slot of a multi-eligible string like
+// "1B/3B"); before that, HitterTable falls back to a normalized read
+// of his MLB bio position, which splits the outfield into LF/CF/RF and
+// has no DH slot at all. "All" keeps the unsegmented view the position
+// dropdown this replaced offered.
+const HITTER_SUB_TABS = [
+  { id: 'ALL', label: 'All', positions: null },
+  { id: 'C', label: 'C', positions: ['C'] },
+  { id: '1B', label: '1B', positions: ['1B'] },
+  { id: '2B', label: '2B', positions: ['2B'] },
+  { id: '3B', label: '3B', positions: ['3B'] },
+  { id: 'SS', label: 'SS', positions: ['SS'] },
+  { id: 'OF', label: 'OF', positions: ['OF'] },
+  { id: 'DH', label: 'DH', positions: ['DH'] },
+]
+
 function today() {
   // Local date, not UTC -- otherwise the slate flips over at 7pm Central.
   const d = new Date()
@@ -35,6 +54,7 @@ export default function App() {
   const [sport, setSport] = useState('mlb')
   const [date, setDate] = useState(today())
   const [tab, setTab] = useState('stacks')
+  const [hitterSubTab, setHitterSubTab] = useState('ALL')
   const [slate, setSlate] = useState(null)
   const [health, setHealth] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -347,7 +367,22 @@ export default function App() {
             <h2>Every hitter, ranked</h2>
             <span className="hint">click a column heading to re-sort</span>
           </div>
-          <HitterTable slate={slate} limit={80} />
+          <div className="tabs" style={{ marginBottom: 14 }}>
+            {HITTER_SUB_TABS.map((t) => (
+              <button
+                key={t.id}
+                className={`tab ${hitterSubTab === t.id ? 'active' : ''}`}
+                onClick={() => setHitterSubTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <HitterTable
+            slate={slate}
+            positions={HITTER_SUB_TABS.find((t) => t.id === hitterSubTab).positions}
+            limit={80}
+          />
           <div style={{ marginTop: 10 }}>
             <ScoreLegend />
           </div>
