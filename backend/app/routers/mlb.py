@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date as date_cls
-from typing import Any, Awaitable, Callable
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile
@@ -357,40 +357,25 @@ async def upload_projections(
     return result
 
 
-async def _refresh_rotowire_projections(
-    get_slate: Callable[..., Awaitable[dict[str, Any]]], *, force: bool
+# One scraped slate's rows, cached under its OWN slate id so switching
+# between windows the same scrape already pulled costs nothing. The
+# day-keyed store (projections.store) still holds exactly one ACTIVE
+# slate, since everything downstream reads by date.
+_ROTOWIRE_SLATE_TTL = 900
+
+
+def _rotowire_slate_key(slate_id: Any) -> str:
+    return f"rotowire:slate-rows:{slate_id}"
+
+
+async def _activate_rotowire_slate(
+    day: str, rows: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """
-    Shared body for all three RotoWire refresh endpoints below --
-    identical in every way except which of clients/rotowire.py's slate
-    pickers (get_current_slate / get_early_slate / get_afternoon_slate)
-    supplies the slate.
-
-    Always stores under THAT slate's own real date (RotoWire's, not
-    whatever date this app's UI currently has selected) -- the
-    response's `date` field tells the caller which one, since it can
-    differ from what's currently showing. Storing is day-keyed, same as
-    a manual CSV upload -- loading a different slate for the same day
-    (the main "All" slate vs. the "Early"/"Afternoon" slate) replaces
-    whichever one was loaded before, the same way uploading a new CSV
-    would. This app has no notion of "two slates loaded for the same
-    day at once" -- pick whichever one you're actually building for.
-    """
-    try:
-        slate = await get_slate(force=force)
-        rows = await rotowire.get_slate_players(slate["slateID"], force=force)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Couldn't reach RotoWire: {exc}") from exc
-    if not rows:
-        raise HTTPException(
-            status_code=400,
-            detail="No players found in RotoWire's live slate -- it may not be posted yet.",
-        )
-
-    day = slate["startDateOnly"]
+    """Make one already-scraped slate the active one for its date --
+    the same day-keyed store a manual CSV upload writes to."""
     projections.store(day, rows)
     asyncio.create_task(history_db.archive_slate_projections(day, rows))
-    result = {"date": day, "players_loaded": len(rows)}
+    result: dict[str, Any] = {"date": day, "players_loaded": len(rows)}
 
     existing_salaries = salaries.load(day)
     if existing_salaries:
@@ -408,12 +393,15 @@ async def _refresh_rotowire_projections(
         if derived:
             salaries.store(day, derived)
             result["salaries_derived"] = len(derived)
-
     return result
 
 
 @router.post("/projections/refresh-rotowire")
 async def refresh_rotowire_projections(
+    slate_name: str | None = Body(
+        None, embed=True,
+        description="Which scraped window to make ACTIVE (e.g. 'Late Night'). Defaults to the main 'All' slate, or the first one found if there's no main slate today.",
+    ),
     refresh: bool = Body(
         False, embed=True,
         description="Bypass the cache and re-pull live from RotoWire -- use close to lock for newly confirmed lineups",
@@ -421,47 +409,87 @@ async def refresh_rotowire_projections(
 ) -> dict[str, Any]:
     """
     Pull RotoWire's own live optimizer player pool directly from their
-    site (clients/rotowire.py) instead of a manual CSV download/upload
-    -- their main "All" Classic slate. See POST /projections/refresh-
-    rotowire-early or -afternoon for the early- or afternoon-games-only
-    slates instead.
-    """
-    return await _refresh_rotowire_projections(rotowire.get_current_slate, force=refresh)
+    site (clients/rotowire.py) instead of a manual CSV download/upload.
 
+    Scrapes EVERY Classic slate window RotoWire has live right now --
+    All, Early, Afternoon, Turbo, Night, Late Night -- in one call.
+    Which windows exist genuinely varies by day (a real 2026-08-29 list
+    carried no Early slate at all), so a missing one is skipped rather
+    than treated as a failure, and a window that errors on its own is
+    reported alongside the ones that worked instead of taking the whole
+    refresh down with it.
 
-@router.post("/projections/refresh-rotowire-early")
-async def refresh_rotowire_early_projections(
-    refresh: bool = Body(
-        False, embed=True,
-        description="Bypass the cache and re-pull live from RotoWire -- use close to lock for newly confirmed lineups",
-    ),
-) -> dict[str, Any]:
-    """
-    Same as POST /projections/refresh-rotowire, but for RotoWire's own
-    "Early" Classic slate (the early-games-only slate real DK "Early
-    Only" GPPs are built around) instead of their main "All" slate.
-    Fails with a clear 502 if RotoWire has no Early slate live right
-    now -- most days without any early-window games at all.
-    """
-    return await _refresh_rotowire_projections(rotowire.get_early_slate, force=refresh)
+    All six windows come from a single slate-list response, so scraping
+    everything costs the same one fetch as scraping one. Each window's
+    rows are cached under its own slate id, so switching which one is
+    active afterwards needs no new network call at all.
 
+    Exactly one slate is ACTIVE per date, because everything downstream
+    (mlb_slate, the optimizer, the contest generator) reads projections
+    by date. `slate_name` picks which; the response lists every window
+    found so the caller can offer the choice.
+    """
+    try:
+        slates = await rotowire.get_live_classic_slates(force=refresh)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Couldn't reach RotoWire: {exc}") from exc
 
-@router.post("/projections/refresh-rotowire-afternoon")
-async def refresh_rotowire_afternoon_projections(
-    refresh: bool = Body(
-        False, embed=True,
-        description="Bypass the cache and re-pull live from RotoWire -- use close to lock for newly confirmed lineups",
-    ),
-) -> dict[str, Any]:
-    """
-    Same as POST /projections/refresh-rotowire, but for RotoWire's own
-    "Afternoon" Classic slate (the afternoon-window slate real DK
-    "Afternoon Only" GPPs are built around) instead of their main "All"
-    slate. Fails with a clear 502 if RotoWire has no Afternoon slate
-    live right now -- most days without a dedicated afternoon-window
-    slate at all.
-    """
-    return await _refresh_rotowire_projections(rotowire.get_afternoon_slate, force=refresh)
+    found: list[dict[str, Any]] = []
+    rows_by_window: dict[str, list[dict[str, Any]]] = {}
+    for slate in slates:
+        window = slate["windowName"]
+        entry: dict[str, Any] = {
+            "slate_name": window,
+            "slate_id": slate.get("slateID"),
+            "date": slate.get("startDateOnly"),
+        }
+        try:
+            rows = await rotowire.get_slate_players(slate["slateID"], force=refresh)
+        except Exception as exc:  # noqa: BLE001
+            # One window failing is not the whole refresh failing -- say
+            # so and keep going, which is the entire point of looping.
+            entry["error"] = str(exc)
+            found.append(entry)
+            continue
+        if not rows:
+            entry["error"] = "no players posted yet"
+            found.append(entry)
+            continue
+        rows_by_window[window] = rows
+        cache.put(_rotowire_slate_key(slate["slateID"]), rows, _ROTOWIRE_SLATE_TTL)
+        entry["players"] = len(rows)
+        # Teams, not games -- a RotoWire player row carries its own team
+        # but no opponent, so a game count would be a guess. This is the
+        # real number, and it's what makes the windows distinguishable
+        # at a glance (a Late Night slate is a handful of teams).
+        entry["teams"] = len({r["team"] for r in rows if r.get("team")})
+        found.append(entry)
+
+    if not rows_by_window:
+        raise HTTPException(
+            status_code=400,
+            detail="RotoWire has slates listed but no players posted in any of them yet.",
+        )
+
+    # Which one becomes active: the requested window, else the main
+    # slate, else whichever did come back (some days there's no "All").
+    active = slate_name if slate_name in rows_by_window else None
+    if active is None:
+        active = (
+            rotowire.MAIN_SLATE_NAME
+            if rotowire.MAIN_SLATE_NAME in rows_by_window
+            else next(iter(rows_by_window))
+        )
+    active_slate = next(s for s in slates if s["windowName"] == active)
+
+    result = await _activate_rotowire_slate(active_slate["startDateOnly"], rows_by_window[active])
+    result["active_slate"] = active
+    result["slates"] = found
+    if slate_name and slate_name != active:
+        result["note"] = (
+            f"'{slate_name}' has no players posted right now -- loaded '{active}' instead."
+        )
+    return result
 
 
 @router.get("/projections")

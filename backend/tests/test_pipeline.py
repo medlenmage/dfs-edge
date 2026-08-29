@@ -959,58 +959,78 @@ async def main() -> int:
             },
         ]
     }
-    rw_slate = rotowire._pick_classic_slate(rw_slate_list_fixture)
-    check("_pick_classic_slate picks the main default Classic slate, not the Early, Afternoon, "
-          "Turbo, or Showdown ones",
+    rw_slate = rotowire.pick_classic_slate(rw_slate_list_fixture, "All")
+    check("pick_classic_slate picks the main default Classic slate by its defaultSlate FLAG, "
+          "not by name -- the Early, Afternoon, Turbo and Showdown ones are all excluded",
           rw_slate["slateID"] == 26987, str(rw_slate))
-    check("_pick_classic_slate's slate carries the real slate date this app should trust as the "
-          "day these projections belong to",
+    check("the picked slate carries the real slate date this app should trust as the day these "
+          "projections belong to",
           rw_slate["startDateOnly"] == "2026-08-21", str(rw_slate))
 
-    try:
-        rotowire._pick_classic_slate({"slates": []})
-        check("_pick_classic_slate raises a clear ApiError with no live Classic slate at all", False, "")
-    except rotowire.ApiError:
-        check("_pick_classic_slate raises a clear ApiError with no live Classic slate at all", True, "")
+    check("pick_classic_slate picks a NAMED window (Early) rather than the default one",
+          rotowire.pick_classic_slate(rw_slate_list_fixture, "Early")["slateID"] == 26988, "")
+    check("pick_classic_slate picks the Afternoon window specifically",
+          rotowire.pick_classic_slate(rw_slate_list_fixture, "Afternoon")["slateID"] == 26990, "")
 
-    rw_early_slate = rotowire._pick_early_classic_slate(rw_slate_list_fixture)
-    check("_pick_early_classic_slate picks the 'Early' Classic slate specifically, not the "
-          "default 'All', Turbo, or Showdown ones",
-          rw_early_slate["slateID"] == 26988, str(rw_early_slate))
-    check("_pick_early_classic_slate's slate also carries the real slate date",
-          rw_early_slate["startDateOnly"] == "2026-08-21", str(rw_early_slate))
+    # A missing window is the NORMAL case, not a failure -- most days
+    # don't run every window, and a real 2026-08-29 slate list carried
+    # no Early slate at all. Returning None is what lets the caller
+    # skip it and carry on scraping the rest.
+    check("pick_classic_slate returns None (not an error) for a window that isn't live today -- "
+          "a missing window is normal, and the loop just moves on",
+          rotowire.pick_classic_slate(rw_slate_list_fixture, "Late Night") is None, "")
+    check("pick_classic_slate returns None for a Classic window when the payload is empty",
+          rotowire.pick_classic_slate({"slates": []}, "All") is None, "")
+    check("pick_classic_slate never returns a Showdown slate for a Classic window name",
+          rotowire.pick_classic_slate(rw_slate_list_fixture, "ATL @ MIL") is None, "")
 
-    try:
-        # A real, common day -- an "All" slate but no separate "Early"
-        # one at all (most days without an early-window game).
-        rotowire._pick_early_classic_slate(
-            {"slates": [s for s in rw_slate_list_fixture["slates"] if s["slateName"] != "Early"]}
-        )
-        check("_pick_early_classic_slate raises a clear ApiError when no 'Early' slate is live "
-              "today, even though other Classic slates exist", False, "")
-    except rotowire.ApiError:
-        check("_pick_early_classic_slate raises a clear ApiError when no 'Early' slate is live "
-              "today, even though other Classic slates exist", True, "")
+    live_windows = rotowire.pick_live_classic_slates(rw_slate_list_fixture)
+    check("pick_live_classic_slates returns every Classic window that exists, skipping the ones "
+          "that don't and excluding Showdown entirely",
+          [w["windowName"] for w in live_windows] == ["All", "Early", "Afternoon", "Turbo"],
+          str([w["windowName"] for w in live_windows]))
+    check("...each tagged with the window name it matched, so the caller can label it",
+          all("windowName" in w for w in live_windows), "")
 
-    rw_afternoon_slate = rotowire._pick_afternoon_classic_slate(rw_slate_list_fixture)
-    check("_pick_afternoon_classic_slate picks the 'Afternoon' Classic slate specifically, not "
-          "the default 'All', Early, Turbo, or Showdown ones",
-          rw_afternoon_slate["slateID"] == 26990, str(rw_afternoon_slate))
-    check("_pick_afternoon_classic_slate's slate also carries the real slate date",
-          rw_afternoon_slate["startDateOnly"] == "2026-08-21", str(rw_afternoon_slate))
+    # The default slate also carries a real slateName ("All"), so a
+    # naive loop would return it twice -- once by flag, once by name.
+    check("the same slate is never returned twice under two window labels",
+          len({w["slateID"] for w in live_windows}) == len(live_windows),
+          str([w["slateID"] for w in live_windows]))
 
-    try:
-        # A real, common day -- an "All" slate but no separate
-        # "Afternoon" one at all (most days without a dedicated
-        # afternoon-window slate).
-        rotowire._pick_afternoon_classic_slate(
-            {"slates": [s for s in rw_slate_list_fixture["slates"] if s["slateName"] != "Afternoon"]}
-        )
-        check("_pick_afternoon_classic_slate raises a clear ApiError when no 'Afternoon' slate is "
-              "live today, even though other Classic slates exist", False, "")
-    except rotowire.ApiError:
-        check("_pick_afternoon_classic_slate raises a clear ApiError when no 'Afternoon' slate is "
-              "live today, even though other Classic slates exist", True, "")
+    # A real day with no main slate at all still yields its other
+    # windows rather than coming back empty.
+    no_default = {"slates": [
+        {**s, "defaultSlate": False} for s in rw_slate_list_fixture["slates"]
+        if s["slateName"] != "All"
+    ]}
+    check("a day with no default 'All' slate still returns the windows that DO exist",
+          [w["windowName"] for w in rotowire.pick_live_classic_slates(no_default)]
+          == ["Early", "Afternoon", "Turbo"],
+          str([w["windowName"] for w in rotowire.pick_live_classic_slates(no_default)]))
+
+    check("pick_live_classic_slates returns an empty list, not an error, when nothing is live",
+          rotowire.pick_live_classic_slates({"slates": []}) == [], "")
+
+    # Late Night is a real window confirmed live on RotoWire's own
+    # slate list (2026-08-29 carried All/Turbo/Afternoon/Night/Late
+    # Night) -- prove it's actually reachable, not just listed.
+    late_night_fixture = {"slates": rw_slate_list_fixture["slates"] + [
+        {
+            "slateID": 27138, "contestType": "Classic", "slateName": "Late Night",
+            "startDateOnly": "2026-08-21", "defaultSlate": False,
+        },
+        {
+            "slateID": 27132, "contestType": "Classic", "slateName": "Night",
+            "startDateOnly": "2026-08-21", "defaultSlate": False,
+        },
+    ]}
+    check("pick_classic_slate finds the real 'Late Night' window",
+          rotowire.pick_classic_slate(late_night_fixture, "Late Night")["slateID"] == 27138, "")
+    check("every window including Night and Late Night comes back in the order they actually run",
+          [w["windowName"] for w in rotowire.pick_live_classic_slates(late_night_fixture)]
+          == ["All", "Early", "Afternoon", "Turbo", "Night", "Late Night"],
+          str([w["windowName"] for w in rotowire.pick_live_classic_slates(late_night_fixture)]))
 
     rw_players_fixture = [
         {
