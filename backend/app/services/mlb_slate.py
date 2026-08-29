@@ -956,16 +956,33 @@ async def _projected_starter(
     salaries.py and projections.py already use elsewhere, just pointed
     at a roster lookup instead of a projections lookup.
 
-    Matches against the ACTIVE roster plus the injured list (confirmed
+    Matches against the active roster, the 40-MAN roster, and the
+    injured list -- all three, because MLB doesn't move a player onto
+    the active roster until his transaction actually posts, which
+    routinely lands close to first pitch.
+
+    Each of the three catches a real case the others miss. The injured
+    list covers a starter coming off the 60-day IL that day (confirmed
     with the user: RotoWire listing an injured pitcher as a team's top
-    projected starter typically means he's being activated that same
-    day to make the start, not that RotoWire's data is stale) -- a
-    projected starter still coming off the 60-day IL that day wouldn't
-    resolve against the active roster alone, since MLB doesn't add him
-    back to it until the actual activation transaction posts, which can
-    land close to first pitch. Returns None with no projections file
-    loaded, no pitcher-position row for this team, or no match on
-    either roster.
+    projected starter typically means he's being activated to make the
+    start, not that RotoWire's data is stale) -- and he specifically
+    won't be on the 40-man, since a 60-day IL stint removes him from
+    it. The 40-man covers the opposite case, a minor-league call-up
+    getting a spot start: real and measured -- on 2026-08-29 RotoWire
+    had Matt Wilkinson as SF's starter, and he sat on the Giants'
+    49-man 40-man roster while their active roster held 26 without
+    him, so the at-bat engine refused the whole slate over one
+    unresolvable pitcher.
+
+    Deliberately NOT the "fullSeason" roster, which would also match
+    anyone who appeared for the club at any point this year -- that
+    widens the fuzzy-name surface for no gain (SF's own fullSeason list
+    carries both a "Matt Wilkinson" and a "Wilkin Ramos"). The 40-man
+    is exactly the set of players who can legally be called up and
+    start today.
+
+    Returns None with no projections file loaded, no pitcher-position
+    row for this team, or no match on any of the three rosters.
     """
     if not team_id or not projection_lookup:
         return None
@@ -978,10 +995,14 @@ async def _projected_starter(
         return None
     best = max(candidates, key=lambda row: row.get("fpts") or 0)
 
-    active_ids, injuries = await asyncio.gather(
-        mlb.get_active_roster(team_id, season), mlb.get_team_injuries(team_id, season)
+    active_ids, forty_man_ids, injuries = await asyncio.gather(
+        mlb.get_active_roster(team_id, season),
+        mlb.get_40man_roster(team_id, season),
+        mlb.get_team_injuries(team_id, season),
     )
-    roster_ids = list({*active_ids, *(inj["id"] for inj in injuries if inj.get("id"))})
+    roster_ids = list(
+        {*active_ids, *forty_man_ids, *(inj["id"] for inj in injuries if inj.get("id"))}
+    )
     if not roster_ids:
         return None
     bios = await mlb.get_people(roster_ids)
