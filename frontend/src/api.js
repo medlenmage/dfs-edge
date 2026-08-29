@@ -62,27 +62,17 @@ export const api = {
 
   uploadProjections: (date, file) => uploadFile(`/api/mlb/projections?date=${date}`, file),
 
-  refreshRotowireProjections: ({ refresh = false } = {}) =>
+  // Scrapes EVERY Classic slate window RotoWire has live right now
+  // (All / Early / Afternoon / Turbo / Night / Late Night) in one
+  // call -- they all come from a single slate-list response, so it
+  // costs the same as fetching one. Windows that don't exist today are
+  // skipped rather than treated as failures. `slateName` picks which
+  // of them becomes the ACTIVE one for the date; switching afterwards
+  // is served from cache and needs no new network call.
+  refreshRotowireProjections: ({ refresh = false, slateName = null } = {}) =>
     request('/api/mlb/projections/refresh-rotowire', {
       method: 'POST',
-      body: JSON.stringify({ refresh }),
-    }),
-
-  // Same as refreshRotowireProjections, but RotoWire's own "Early"
-  // Classic slate (early-games-only) instead of their main "All" slate.
-  refreshRotowireEarlyProjections: ({ refresh = false } = {}) =>
-    request('/api/mlb/projections/refresh-rotowire-early', {
-      method: 'POST',
-      body: JSON.stringify({ refresh }),
-    }),
-
-  // Same as refreshRotowireProjections, but RotoWire's own "Afternoon"
-  // Classic slate (afternoon-window games only) instead of their main
-  // "All" slate.
-  refreshRotowireAfternoonProjections: ({ refresh = false } = {}) =>
-    request('/api/mlb/projections/refresh-rotowire-afternoon', {
-      method: 'POST',
-      body: JSON.stringify({ refresh }),
+      body: JSON.stringify({ refresh, slate_name: slateName }),
     }),
 
   dkSlates: (date, { refresh = false } = {}) =>

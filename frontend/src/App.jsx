@@ -64,8 +64,10 @@ export default function App() {
   )
   const [projectionMsg, setProjectionMsg] = useState(null)
   const [rotowireLoading, setRotowireLoading] = useState(false)
-  const [rotowireEarlyLoading, setRotowireEarlyLoading] = useState(false)
-  const [rotowireAfternoonLoading, setRotowireAfternoonLoading] = useState(false)
+  // Every Classic slate window the last RotoWire scrape actually found,
+  // and which one is currently active for this date.
+  const [rotowireSlates, setRotowireSlates] = useState([])
+  const [activeRotowireSlate, setActiveRotowireSlate] = useState(null)
   const projectionInputRef = useRef(null)
   // Which FPTS/ownership numbers feed the optimizer and contest
   // generator -- independent of whether the tables have fetched the
@@ -142,18 +144,29 @@ export default function App() {
   const handleProjectionUpload = makeUploadHandler(api.uploadProjections, setProjectionMsg, 'projections')
 
   // Pulls RotoWire's own live optimizer player pool directly -- no
-  // manual CSV download/upload. Always stored under THAT slate's own
-  // real date (RotoWire's, not whatever date is currently selected
-  // here), so if it differs, switch the date picker to match and
-  // reload -- otherwise a successful refresh would silently not show
-  // up anywhere. Shared by both the main "All" slate and the "Early"
-  // slate variants below -- identical flow, just a different API call
-  // and loading flag.
-  async function refreshFromRotowireVariant(apiFn, setLoading, label) {
-    setLoading(true)
-    setProjectionMsg(`Pulling live ${label} projections from RotoWire…`)
+  // manual CSV download/upload. One call scrapes EVERY Classic slate
+  // window RotoWire has live (All / Early / Afternoon / Turbo / Night /
+  // Late Night); windows that don't exist today are skipped rather than
+  // treated as failures. Always stored under THAT slate's own real date
+  // (RotoWire's, not whatever date is currently selected here), so if it
+  // differs, switch the date picker to match and reload -- otherwise a
+  // successful refresh would silently not show up anywhere.
+  //
+  // `slateName` picks which scraped window becomes ACTIVE. Switching is
+  // cheap: the backend already cached every window's rows, so it needs
+  // no new network call.
+  async function refreshFromRotowire(slateName = null) {
+    setRotowireLoading(true)
+    setProjectionMsg(
+      slateName
+        ? `Switching to RotoWire's ${slateName} slate…`
+        : 'Scraping every live RotoWire slate…',
+    )
     try {
-      const result = await apiFn({ refresh: true })
+      const result = await api.refreshRotowireProjections({ refresh: !slateName, slateName })
+      setRotowireSlates(result.slates || [])
+      setActiveRotowireSlate(result.active_slate || null)
+
       const derived = result.salaries_derived
         ? ` (salaries pulled from the same data for ${result.salaries_derived} of them)`
         : ''
@@ -162,7 +175,18 @@ export default function App() {
             .slice(0, 5)
             .join(', ')}${result.unmatched.length > 5 ? ', …' : ''})`
         : ''
-      setProjectionMsg(`Loaded ${result.players_loaded} live ${label} RotoWire projections for ${result.date}${derived}${unmatched}`)
+      const others = (result.slates || []).filter((s) => s.players && s.slate_name !== result.active_slate)
+      const alsoFound = others.length
+        ? ` Also scraped: ${others.map((s) => `${s.slate_name} (${s.players})`).join(', ')}.`
+        : ''
+      const skipped = (result.slates || []).filter((s) => s.error)
+      const skippedMsg = skipped.length
+        ? ` Skipped: ${skipped.map((s) => `${s.slate_name} (${s.error})`).join(', ')}.`
+        : ''
+      setProjectionMsg(
+        `Loaded ${result.players_loaded} live RotoWire projections from the ${result.active_slate} slate for ${result.date}${derived}${unmatched}.${alsoFound}${skippedMsg}` +
+          (result.note ? ` ${result.note}` : ''),
+      )
       if (result.date !== date) {
         setDate(result.date)
       } else {
@@ -171,16 +195,9 @@ export default function App() {
     } catch (err) {
       setProjectionMsg(`RotoWire refresh failed: ${err.message}`)
     } finally {
-      setLoading(false)
+      setRotowireLoading(false)
     }
   }
-
-  const refreshFromRotowire = () =>
-    refreshFromRotowireVariant(api.refreshRotowireProjections, setRotowireLoading, 'main-slate')
-  const refreshFromRotowireEarly = () =>
-    refreshFromRotowireVariant(api.refreshRotowireEarlyProjections, setRotowireEarlyLoading, 'early-slate')
-  const refreshFromRotowireAfternoon = () =>
-    refreshFromRotowireVariant(api.refreshRotowireAfternoonProjections, setRotowireAfternoonLoading, 'afternoon-slate')
 
   function cycleTheme() {
     const next = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'
@@ -234,26 +251,31 @@ export default function App() {
                 Upload projections
               </button>
               <button
-                onClick={refreshFromRotowire}
+                onClick={() => refreshFromRotowire()}
                 disabled={rotowireLoading}
-                title="Pull RotoWire's own live optimizer player pool directly -- salary, position, opponent, projected/confirmed batting order, FPTS, and rostership% -- with no manual CSV download/upload. Always bypasses the cache for genuinely live data (newly confirmed lineups, late scratches). Stored under that slate's own real date, switching the date picker to match if it differs."
+                title="Pull RotoWire's own live optimizer player pool directly -- salary, position, opponent, projected/confirmed batting order, FPTS, and rostership% -- with no manual CSV download/upload. Scrapes EVERY Classic slate window RotoWire has live in one go (All, Early, Afternoon, Turbo, Night, Late Night), skipping any that aren't running today. Always bypasses the cache for genuinely live data (newly confirmed lineups, late scratches). Stored under that slate's own real date, switching the date picker to match if it differs."
               >
                 {rotowireLoading ? 'Loading…' : 'Refresh from RotoWire'}
               </button>
-              <button
-                onClick={refreshFromRotowireEarly}
-                disabled={rotowireEarlyLoading}
-                title="Same as Refresh from RotoWire, but RotoWire's own 'Early' Classic slate (early-games-only, the slate real DK 'Early Only' GPPs are built around) instead of their main 'All' slate. Loading this replaces whichever slate's projections/salaries were loaded for the date before -- this app only ever holds one slate's data per date at a time. Fails clearly if RotoWire has no Early slate live today (most days without any early-window games)."
-              >
-                {rotowireEarlyLoading ? 'Loading…' : 'Refresh from RotoWire (Early)'}
-              </button>
-              <button
-                onClick={refreshFromRotowireAfternoon}
-                disabled={rotowireAfternoonLoading}
-                title="Same as Refresh from RotoWire, but RotoWire's own 'Afternoon' Classic slate (the afternoon-window slate real DK 'Afternoon Only' GPPs are built around) instead of their main 'All' slate. Loading this replaces whichever slate's projections/salaries were loaded for the date before -- this app only ever holds one slate's data per date at a time. Fails clearly if RotoWire has no Afternoon slate live today (most days without a dedicated afternoon-window slate)."
-              >
-                {rotowireAfternoonLoading ? 'Loading…' : 'Refresh from RotoWire (Afternoon)'}
-              </button>
+              {rotowireSlates.filter((s) => s.players).length > 1 && (
+                <label className="dim" style={{ fontSize: 13 }}>
+                  Slate{' '}
+                  <select
+                    value={activeRotowireSlate || ''}
+                    disabled={rotowireLoading}
+                    onChange={(e) => refreshFromRotowire(e.target.value)}
+                    title="Which of the scraped RotoWire windows is active for this date. Everything downstream (tables, optimizer, contest generator) reads one slate per date, so switching replaces the loaded pool -- but the rows are already cached, so it needs no new fetch."
+                  >
+                    {rotowireSlates
+                      .filter((s) => s.players)
+                      .map((s) => (
+                        <option key={s.slate_name} value={s.slate_name}>
+                          {s.slate_name} ({s.players})
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              )}
               <button
                 onClick={loadInhouse}
                 disabled={inhouseLoading}
