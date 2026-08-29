@@ -218,12 +218,17 @@ async def build_slate(
         if salary_rows
         else None
     )
+    in_slate_pks = (
+        _resolve_slate_game_pks(games, detected_slate_pairs)
+        if detected_slate_pairs is not None
+        else None
+    )
 
     built = await asyncio.gather(
         *[
             _build_game(
                 g, season, data, baselines, lines, include_hitters,
-                salary_lookup, projection_lookup, day, detected_slate_pairs,
+                salary_lookup, projection_lookup, day, in_slate_pks,
                 force_refresh=force_refresh,
             )
             for g in games
@@ -407,6 +412,103 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
 # One game
 # --------------------------------------------------------------------------
 
+def _game_pair(game: dict[str, Any]) -> frozenset[str]:
+    teams = game.get("teams") or {}
+    home = ((teams.get("home") or {}).get("team") or {}).get("abbreviation") or ""
+    away = ((teams.get("away") or {}).get("team") or {}).get("abbreviation") or ""
+    return frozenset((away, home))
+
+
+def _game_start_ts(game: dict[str, Any]) -> float | None:
+    """A real game's start as a comparable timestamp, or None if the
+    schedule row has no usable date."""
+    raw = game.get("gameDate")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _resolve_slate_game_pks(
+    games: list[dict[str, Any]], detected_pairs: set[frozenset[str]]
+) -> set[int]:
+    """
+    Which real game_pks the uploaded DK slate actually covers.
+
+    A DK salary export identifies each game only by its matchup string
+    ("BOS@NYY"), and the pool this app builds from RotoWire carries no
+    game time at all -- so on a DOUBLEHEADER day two genuinely
+    different MLB games collapse to one indistinguishable key. Matching
+    on the pair alone therefore marked BOTH games of a doubleheader as
+    in-slate, which is real and wrong: on 2026-08-29 it flagged 14
+    games for a 12-game slate, adding a second BOS@NYY and a second
+    AZ@SF the contest generator then treated as live.
+
+    Every pair that matches exactly one real game is unambiguous, and
+    those games define the slate's own real time window. A doubleheader
+    pair is then resolved to whichever of its games sits CLOSEST to that
+    window -- zero distance for anything inside it -- which on that date
+    correctly keeps BOS@NYY at 17:05 and drops the 23:15 nightcap.
+
+    Closest-to-window rather than strictly-inside-it, because a real
+    slate's doubleheader half often starts just outside the range its
+    other games span: on a night slate anchored at 22:10-23:10, a 22:05
+    first game is five minutes early but obviously the intended one,
+    while a strict window test would reject it and fall back to a 16:05
+    afternoon game six hours away.
+
+    Known limitation, stated rather than hidden: if DK ever puts BOTH
+    halves of a doubleheader in one slate, this keeps only one, because
+    the source data genuinely cannot express the difference. That's the
+    safer direction to be wrong in -- an extra phantom game silently
+    inflates every field-size and ownership calculation downstream,
+    whereas a missing one is visible in the games checklist and can be
+    ticked back on by hand.
+    """
+    by_pair: dict[frozenset[str], list[dict[str, Any]]] = {}
+    for g in games:
+        pair = _game_pair(g)
+        if pair in detected_pairs:
+            by_pair.setdefault(pair, []).append(g)
+
+    resolved: set[int] = set()
+    ambiguous: list[list[dict[str, Any]]] = []
+    anchor_times: list[float] = []
+    for candidates in by_pair.values():
+        if len(candidates) == 1:
+            resolved.add(candidates[0].get("gamePk"))
+            when = _game_start_ts(candidates[0])
+            if when is not None:
+                anchor_times.append(when)
+        else:
+            ambiguous.append(candidates)
+
+    for candidates in ambiguous:
+        timed = [(g, _game_start_ts(g)) for g in candidates]
+        timed = [(g, t) for g, t in timed if t is not None]
+        if not timed:
+            resolved.add(candidates[0].get("gamePk"))
+            continue
+        if anchor_times:
+            earliest, latest = min(anchor_times), max(anchor_times)
+
+            def _distance(t: float) -> float:
+                if t < earliest:
+                    return earliest - t
+                if t > latest:
+                    return t - latest
+                return 0.0
+
+            pick = min(timed, key=lambda gt: (_distance(gt[1]), gt[1]))[0]
+        else:
+            pick = min(timed, key=lambda gt: gt[1])[0]
+        resolved.add(pick.get("gamePk"))
+
+    return resolved
+
+
 async def _build_game(
     game: dict[str, Any],
     season: int,
@@ -417,7 +519,7 @@ async def _build_game(
     salary_lookup: dict[tuple[str, str], dict[str, Any]],
     projection_lookup: dict[tuple[str, str], dict[str, Any]],
     day: str,
-    detected_slate_pairs: set[frozenset[str]] | None,
+    in_slate_pks: set[int] | None,
     *,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
@@ -432,13 +534,12 @@ async def _build_game(
     park = get_park(home_abbrev, venue.get("name"))
     game_time = game.get("gameDate") or ""
 
-    # Whether the uploaded DK salary CSV's slate covers this game --
-    # None when no CSV is loaded yet (nothing to detect against).
-    in_slate = (
-        frozenset((away_abbrev, home_abbrev)) in detected_slate_pairs
-        if detected_slate_pairs is not None
-        else None
-    )
+    # Whether the uploaded DK salary CSV's slate covers this specific
+    # game -- None when no CSV is loaded yet (nothing to detect
+    # against). Resolved per game_pk rather than per matchup, so a
+    # doubleheader doesn't put both of its games in the slate (see
+    # _resolve_slate_game_pks).
+    in_slate = game_pk in in_slate_pks if in_slate_pks is not None else None
 
     # --- Weather ---
     roof_closed = park["roof"] == "dome"
