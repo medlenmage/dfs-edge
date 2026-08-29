@@ -1076,6 +1076,65 @@ async def main() -> int:
 
     salaries.load = fake_salary_load  # restore the default fixture
 
+    # Doubleheaders: a DK export identifies a game only by its matchup
+    # ("BOS@NYY"), and the RotoWire-sourced pool carries no game time at
+    # all, so both halves of a doubleheader collapse to one key. Matching
+    # on the pair alone marked BOTH as in-slate -- real, and wrong: on
+    # 2026-08-29 it flagged 14 games for a 12-game slate.
+    def _dh_game(pk, away, home, when):
+        return {
+            "gamePk": pk, "gameDate": when,
+            "teams": {"home": {"team": {"abbreviation": home}},
+                      "away": {"team": {"abbreviation": away}}},
+        }
+
+    dh_games = [
+        _dh_game(1, "BOS", "NYY", "2026-08-29T17:05:00Z"),   # DH game 1
+        _dh_game(2, "LAD", "DET", "2026-08-29T17:10:00Z"),
+        _dh_game(3, "MIA", "WSH", "2026-08-29T20:10:00Z"),
+        _dh_game(4, "BOS", "NYY", "2026-08-29T23:15:00Z"),   # DH nightcap
+        _dh_game(5, "TEX", "MIL", "2026-08-29T23:15:00Z"),   # not in the slate
+    ]
+    dh_pairs = {frozenset(("BOS", "NYY")), frozenset(("LAD", "DET")), frozenset(("MIA", "WSH"))}
+    resolved = mlb_slate._resolve_slate_game_pks(dh_games, dh_pairs)
+    check("a doubleheader contributes exactly ONE game to the slate, not both -- the real bug "
+          "that put a phantom extra game in the contest generator's field",
+          resolved == {1, 2, 3}, str(sorted(resolved)))
+    check("the doubleheader half kept is the one inside the slate's own time window, not the "
+          "nightcap that falls outside every unambiguous game",
+          1 in resolved and 4 not in resolved, str(sorted(resolved)))
+    check("a game whose matchup isn't in the DK export stays out regardless of doubleheaders",
+          5 not in resolved, str(sorted(resolved)))
+
+    # A late doubleheader whose SECOND game is the one in the window.
+    late_games = [
+        _dh_game(10, "AZ", "SF", "2026-08-29T16:05:00Z"),
+        _dh_game(11, "AZ", "SF", "2026-08-29T22:05:00Z"),
+        _dh_game(12, "KC", "CLE", "2026-08-29T22:10:00Z"),
+        _dh_game(13, "SD", "TB", "2026-08-29T23:10:00Z"),
+    ]
+    late_pairs = {frozenset(("AZ", "SF")), frozenset(("KC", "CLE")), frozenset(("SD", "TB"))}
+    late_resolved = mlb_slate._resolve_slate_game_pks(late_games, late_pairs)
+    check("on a night slate the LATER half of a doubleheader is the one kept -- the window is "
+          "read from the real slate, not assumed to be the earlier game",
+          late_resolved == {11, 12, 13}, str(sorted(late_resolved)))
+
+    # Degenerate inputs must not crash or silently drop the game.
+    no_time = [
+        {"gamePk": 20, "gameDate": None,
+         "teams": {"home": {"team": {"abbreviation": "NYY"}},
+                   "away": {"team": {"abbreviation": "BOS"}}}},
+        {"gamePk": 21, "gameDate": None,
+         "teams": {"home": {"team": {"abbreviation": "NYY"}},
+                   "away": {"team": {"abbreviation": "BOS"}}}},
+    ]
+    no_time_resolved = mlb_slate._resolve_slate_game_pks(no_time, {frozenset(("BOS", "NYY"))})
+    check("a doubleheader with no game times at all still resolves to exactly one game rather "
+          "than crashing or returning both",
+          len(no_time_resolved) == 1, str(no_time_resolved))
+    check("_resolve_slate_game_pks returns an empty set when the export matches no real game",
+          mlb_slate._resolve_slate_game_pks(dh_games, {frozenset(("COL", "ATL"))}) == set(), "")
+
     print("\nLineup watcher (catching scratches between polls)")
     _scratch_poll = {"n": 0}
 
