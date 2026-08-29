@@ -342,8 +342,12 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                             "opponent_pitcher_id": opponent_pitcher_id,
                             # Feeds project_ownership()'s team-stack layer --
                             # MLB hitter ownership is driven team-first, so
-                            # teammates have to be scored together.
-                            "team": g[side]["abbrev"],
+                            # teammates have to be scored together. Optional
+                            # by design: the layer degrades to a neutral
+                            # team score rather than raising, so a game dict
+                            # assembled without an abbrev can still get
+                            # in-house projections attached.
+                            "team": g[side].get("abbrev"),
                         }
                     )
             pitcher = g[side]["probable_pitcher"]

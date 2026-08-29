@@ -293,6 +293,29 @@ export const api = {
       }),
     }),
 
+  lateSwapContestEntries: (
+    batchId,
+    {
+      date = null,
+      mode = 'repair',
+      projectionSource = 'rotowire',
+      includedGamePks = null,
+      swapField = true,
+      resimulate = true,
+    } = {},
+  ) =>
+    request(`/api/mlb/contest-entries/${batchId}/late-swap`, {
+      method: 'POST',
+      body: JSON.stringify({
+        date,
+        mode,
+        projection_source: projectionSource,
+        included_game_pks: includedGamePks,
+        swap_field: swapField,
+        resimulate,
+      }),
+    }),
+
   buildContestEntriesSimulated: (
     date,
     contestType,

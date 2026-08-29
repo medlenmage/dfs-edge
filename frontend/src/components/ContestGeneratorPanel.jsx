@@ -59,6 +59,9 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [targetCount, setTargetCount] = useState('')
   const [globalMaxExposure, setGlobalMaxExposure] = useState('')
   const [reshaping, setReshaping] = useState(false)
+  const [swapping, setSwapping] = useState(false)
+  const [swapMode, setSwapMode] = useState('repair')
+  const [swapResult, setSwapResult] = useState(null)
 
   // Filters -- post-hoc, surgical include/exclude by stack team, a
   // specific player combo, or a named stack shape. Runs BEFORE the
@@ -291,6 +294,41 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
       setState({ status: 'error', message: err.message })
     } finally {
       setReshaping(false)
+    }
+  }
+
+  // Late swap: repair this batch against the CURRENT slate. Runs off
+  // whatever batch is showing (reshaped or not) rather than the
+  // original, since a swap is about right now, not about undoing
+  // earlier shaping.
+  async function lateSwap() {
+    if (!state.batch_id) return
+    setSwapping(true)
+    setSwapResult(null)
+    try {
+      const result = await api.lateSwapContestEntries(state.batch_id, {
+        date,
+        mode: swapMode,
+        projectionSource,
+        includedGamePks: includedGames.size ? [...includedGames] : null,
+      })
+      setState((prev) => ({
+        ...prev,
+        batch_id: result.batch_id,
+        exposure: result.exposure,
+        sample_entries: result.sample_entries,
+        results: result.results,
+        // The server computes this over the whole batch (only 200
+        // entries ship as a preview) and in whichever of the two real
+        // summary shapes matches this batch -- keep the previous one if
+        // nothing moved and there's nothing new to describe.
+        summary: Object.keys(result.summary || {}).length ? result.summary : prev.summary,
+      }))
+      setSwapResult(result)
+    } catch (err) {
+      setSwapResult({ error: err.message })
+    } finally {
+      setSwapping(false)
     }
   }
 
@@ -774,6 +812,81 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             >
               <button>Download full batch (CSV)</button>
             </a>
+          </div>
+
+          {/* Late swap. DK locks each roster spot at that player's OWN
+              game start, so a slate spanning several hours of first
+              pitches leaves real editing time after the contest has
+              begun -- and neither DK nor FanDuel auto-replaces a
+              scratched or postponed player, so an entry still holding
+              one just scores zero there. */}
+          <div className="card" style={{ marginBottom: 14 }}>
+            <div className="controls" style={{ flexWrap: 'wrap' }}>
+              <strong style={{ fontSize: 13 }}>Late swap</strong>
+              <label className="dim" style={{ fontSize: 13 }}>
+                Mode{' '}
+                <select value={swapMode} onChange={(e) => setSwapMode(e.target.value)}>
+                  <option value="repair">Repair (scratched / postponed only)</option>
+                  <option value="refresh">Refresh (also drop big projection falls)</option>
+                </select>
+              </label>
+              <button className="primary" onClick={lateSwap} disabled={swapping}>
+                {swapping ? 'Swapping…' : 'Late swap this batch'}
+              </button>
+              <span className="dim" style={{ fontSize: 12 }}>
+                only replaces players whose game hasn’t started
+              </span>
+            </div>
+
+            {swapResult?.error && (
+              <div className="notice error" style={{ marginTop: 8 }}>{swapResult.error}</div>
+            )}
+
+            {swapResult && !swapResult.error && (
+              <div className="sub-line" style={{ marginTop: 8 }}>
+                {swapResult.total_swaps === 0 ? (
+                  <>
+                    Nothing to swap — no rostered player is scratched or in a postponed game
+                    {swapResult.open_game_count === 0
+                      ? ', and every game has already locked.'
+                      : ` across the ${swapResult.open_game_count} game${swapResult.open_game_count === 1 ? '' : 's'} still open.`}
+                  </>
+                ) : (
+                  <>
+                    Made <strong>{swapResult.total_swaps.toLocaleString()}</strong> swap
+                    {swapResult.total_swaps === 1 ? '' : 's'} across{' '}
+                    <strong>{swapResult.entries_changed.toLocaleString()}</strong> entr
+                    {swapResult.entries_changed === 1 ? 'y' : 'ies'}
+                    {swapResult.replaced_players?.length > 0 && (
+                      <>
+                        {' '}— out:{' '}
+                        {swapResult.replaced_players
+                          .slice(0, 5)
+                          .map((p) => `${p.name} (${p.entry_count})`)
+                          .join(', ')}
+                      </>
+                    )}
+                    .{swapResult.resimulated ? ' Re-simulated against the swapped field.' : ''}
+                  </>
+                )}
+                {swapResult.stranded_players?.length > 0 && (
+                  <div className="badge risk" style={{ marginTop: 6 }}>
+                    {swapResult.stranded_players
+                      .map((p) => `${p.name} (${p.entry_count})`)
+                      .join(', ')}{' '}
+                    — dead but already locked, can’t be swapped
+                  </div>
+                )}
+                {swapResult.unfillable_players?.length > 0 && (
+                  <div className="badge risk" style={{ marginTop: 6 }}>
+                    {swapResult.unfillable_players
+                      .map((p) => `${p.name} (${p.entry_count})`)
+                      .join(', ')}{' '}
+                    — no affordable legal replacement available
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="card" style={{ marginBottom: 14 }}>

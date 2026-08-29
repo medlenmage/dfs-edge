@@ -19,6 +19,7 @@ from app.services import (
     contest_results,
     dk_entries,
     dk_entry_manager,
+    late_swap as late_swap_service,
     lineup_export,
     mlb_slate,
     optimizer,
@@ -792,10 +793,19 @@ async def build_contest_entries(
 
     full_entries = result.pop("entries")
     full_results = result["results"]  # keep the full list cached...
+    # Field and contest are cached alongside so a later late swap can
+    # re-rank against the SAME opponent field; popped off the response
+    # since the frontend has no use for thousands of opponent lineups.
+    full_field = result.pop("field", [])
     batch_id = uuid4().hex
     cache.put(
         f"contest_batch:{batch_id}",
-        {"entries": full_entries, "results": full_results},
+        {
+            "entries": full_entries,
+            "results": full_results,
+            "field": full_field,
+            "contest": result.get("contest"),
+        },
         _CONTEST_BATCH_TTL,
     )
 
@@ -910,10 +920,20 @@ async def build_contest_entries_simulated(
 
     full_entries = result.pop("entries")
     full_results = result["results"]
+    # The field and contest are cached alongside the entries purely so a
+    # later late swap can re-rank against the SAME opponent field rather
+    # than resampling a different one -- they're popped off the response
+    # since the frontend has no use for thousands of opponent lineups.
+    full_field = result.pop("field", [])
     batch_id = uuid4().hex
     cache.put(
         f"contest_batch:{batch_id}",
-        {"entries": full_entries, "results": full_results},
+        {
+            "entries": full_entries,
+            "results": full_results,
+            "field": full_field,
+            "contest": result.get("contest"),
+        },
         _CONTEST_BATCH_TTL,
     )
 
@@ -921,6 +941,155 @@ async def build_contest_entries_simulated(
     result["results"] = full_results[:200]
     result["sample_entries"] = full_entries[:200]
     return {"date": day, **result}
+
+
+@router.post("/contest-entries/{batch_id}/late-swap")
+async def late_swap_contest_entries(
+    batch_id: str,
+    date: str | None = Body(None, embed=True),
+    mode: str = Body(
+        "repair",
+        embed=True,
+        description="'repair' swaps only DEAD players (scratched, or in a postponed game); "
+        "'refresh' also swaps anyone whose projection has fallen materially since the batch was built",
+    ),
+    projection_source: str = Body("rotowire", embed=True),
+    included_game_pks: list[int] | None = Body(None, embed=True),
+    swap_field: bool = Body(
+        True,
+        embed=True,
+        description="Also late-swap the simulated OPPONENT field before re-ranking. On by default "
+        "because leaving the field holding scratched players while your own entries get repaired "
+        "overstates your ROI -- the real field swaps too",
+    ),
+    resimulate: bool = Body(
+        True, embed=True, description="Re-run the Monte Carlo against the swapped entries and field"
+    ),
+    season: int | None = Body(None, embed=True),
+) -> dict[str, Any]:
+    """
+    Late-swap a whole already-built batch against the CURRENT slate.
+
+    DraftKings locks each roster spot at that player's own game start,
+    so a slate spanning several hours of first pitches leaves real
+    editing time after the contest has begun -- and neither DK nor
+    FanDuel auto-replaces a scratched or postponed player, so an entry
+    still holding one just scores zero there.
+
+    This repairs rather than re-optimizes: only spots that genuinely
+    need swapping AND are still legally swappable get touched, so a
+    deliberately diverse batch doesn't collapse toward the same handful
+    of best available players (which would spike duplication in exactly
+    the way a large-field GPP punishes hardest). See
+    services/late_swap.py for the full reasoning.
+
+    Caches the swapped batch under its OWN new batch_id, same as the
+    reshape endpoint, so the original stays intact and the existing CSV
+    download works on the result unchanged.
+    """
+    cached = cache.get(f"contest_batch:{batch_id}")
+    if not cached:
+        raise HTTPException(
+            status_code=404,
+            detail="That batch has expired or doesn't exist -- generate a new one and try again.",
+        )
+
+    day = date or _today()
+    resolved_season = season or date_cls.fromisoformat(day).year
+    slate = await mlb_slate.build_slate(day, include_hitters=True)
+    try:
+        pool = optimizer.build_player_pool(
+            slate,
+            included_game_pks=set(included_game_pks) if included_game_pks is not None else None,
+            projection_source=projection_source,
+        )
+    except optimizer.OptimizerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    slot_order: list[str] = []
+    for slot, count in optimizer.SLOT_REQUIREMENTS.items():
+        slot_order.extend([slot] * count)
+
+    try:
+        swapped = late_swap_service.swap_batch(
+            cached["entries"], slate, pool,
+            slot_order=slot_order, salary_cap=optimizer.SALARY_CAP, mode=mode, seed=0,
+        )
+    except late_swap_service.LateSwapError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    entries = swapped.pop("entries")
+    # stack_type/stack are a property of which teams ended up rostered,
+    # so a swap can genuinely change them -- re-derive rather than
+    # carrying the pre-swap label forward as if nothing moved.
+    for entry in entries:
+        entry["stack_type"], entry["stack"] = lineup_export.stack_info(entry)
+
+    results = cached["results"]
+    field = cached.get("field") or []
+    if swap_field and field:
+        field_swapped = late_swap_service.swap_batch(
+            field, slate, pool,
+            slot_order=slot_order, salary_cap=optimizer.SALARY_CAP, mode=mode, seed=1,
+        )
+        field = field_swapped["entries"]
+        swapped["field_entries_changed"] = field_swapped["entries_changed"]
+
+    # The cached results describe the PRE-swap entries, so once anything
+    # has moved they're stale by definition -- re-evaluate rather than
+    # hand back numbers that no longer refer to these lineups. A
+    # simulated re-run when asked for and possible; otherwise the same
+    # fast deterministic ranking the batch was originally built with.
+    # Whether this batch was BUILT with Monte Carlo on. A batch built in
+    # the fast deterministic mode stays deterministic through a swap:
+    # silently upgrading it would change what every number on screen
+    # means, and cost a full simulation the user never asked for.
+    was_simulated = bool(cached["results"]) and "roi_pct" in cached["results"][0]
+
+    swapped["resimulated"] = False
+    if swapped["total_swaps"] and cached.get("contest") and field:
+        if resimulate and was_simulated:
+            try:
+                rerun = await contest.evaluate_batch_simulated(
+                    entries, field, cached["contest"],
+                    season=resolved_season, num_trials=_SIM_TRIALS,
+                    slate=slate, included_game_pks=included_game_pks,
+                )
+                results = rerun["results"]
+                swapped["resimulated"] = True
+            except contest.ContestError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        else:
+            results = contest.evaluate_batch(entries, field, cached["contest"])["results"]
+    elif swapped["total_swaps"]:
+        # Nothing to re-rank against (an older batch cached before the
+        # field was kept). Say so rather than showing stale numbers.
+        results = []
+
+    new_batch_id = uuid4().hex
+    cache.put(
+        f"contest_batch:{new_batch_id}",
+        {
+            "entries": entries,
+            "results": results,
+            "field": field,
+            "contest": cached.get("contest"),
+        },
+        _CONTEST_BATCH_TTL,
+    )
+
+    return {
+        "date": day,
+        "batch_id": new_batch_id,
+        **swapped,
+        "exposure": contest.field_exposure(entries),
+        # Computed over the WHOLE batch here -- only the first 200
+        # entries ship as a preview, so the frontend can't derive this
+        # correctly for a bigger batch.
+        "summary": contest.batch_summary(entries, results, cached.get("contest") or {}),
+        "sample_entries": entries[:200],
+        "results": results[:200],
+    }
 
 
 @router.get("/contest-entries/{batch_id}/csv")
