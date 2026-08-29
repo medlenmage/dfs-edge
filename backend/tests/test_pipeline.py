@@ -359,6 +359,11 @@ def patch() -> None:
     mlb.get_schedule = fake_schedule
     mlb.get_people = fake_people
     mlb.get_active_roster = fake_roster
+    # The 40-man is a real superset of the active roster (a call-up
+    # isn't moved onto the active roster until his transaction posts),
+    # so the default fake mirrors it -- individual tests override this
+    # to exercise the call-up case specifically.
+    mlb.get_40man_roster = fake_roster
     mlb.get_league_splits = fake_splits
     mlb.get_league_season = fake_season
     mlb.get_recent_form = fake_recent
@@ -638,11 +643,19 @@ async def main() -> int:
     async def fake_roster_projstarter(team_id, season):
         return [70001, 70002] if team_id == 900 else []
 
+    async def fake_40man_projstarter(team_id, season):
+        # A real 40-man superset: the active pair above plus a call-up
+        # whose transaction hasn't posted, so he's on the 40-man but not
+        # the active roster. Deliberately does NOT include the 60-day-IL
+        # arm, which a real 60-day stint removes from the 40-man.
+        return [70001, 70002, 70004] if team_id == 900 else []
+
     async def fake_people_projstarter(ids):
         return {
             70001: {"id": 70001, "name": "Ace Starter", "throws": "R"},
             70002: {"id": 70002, "name": "Middle Reliever", "throws": "L"},
             70003: {"id": 70003, "name": "Coming Off IL", "throws": "R"},
+            70004: {"id": 70004, "name": "Called Up Arm", "throws": "L"},
         }
 
     async def fake_injuries_projstarter(team_id, season):
@@ -652,9 +665,11 @@ async def main() -> int:
         return [{"id": 70003, "name": "Coming Off IL", "status_code": "D60"}] if team_id == 900 else []
 
     original_get_active_roster = mlb.get_active_roster
+    original_get_40man_roster = mlb.get_40man_roster
     original_get_people_2 = mlb.get_people
     original_get_injuries_projstarter = mlb.get_team_injuries
     mlb.get_active_roster = fake_roster_projstarter
+    mlb.get_40man_roster = fake_40man_projstarter
     mlb.get_people = fake_people_projstarter
     mlb.get_team_injuries = fake_injuries_projstarter
 
@@ -710,7 +725,37 @@ async def main() -> int:
           "injured-list fallback rather than returning None",
           il_resolved == {"id": 70003, "name": "Coming Off IL"}, str(il_resolved))
 
+    # A minor-league call-up getting a spot start: on the 40-man, not on
+    # the active roster, because MLB doesn't move him across until the
+    # transaction posts -- which routinely lands close to first pitch.
+    # Real and measured: on 2026-08-29 RotoWire had Matt Wilkinson as
+    # SF's starter while the Giants' active roster held 26 without him
+    # and their 40-man held 49 with him, and the at-bat engine refused
+    # the entire slate over that one unresolvable pitcher.
+    callup_lookup = projections.build_lookup(
+        [
+            projection_row("Called Up Arm", "LAD", 21.0, 24.0, lineup_spot=None),
+            projection_row("Ace Starter", "LAD", 18.5, 20.0, lineup_spot=None),
+        ]
+    )
+    for row in callup_lookup.values():
+        row["position"] = "P"
+    callup_resolved = await mlb_slate._projected_starter(900, "LAD", 2026, callup_lookup)
+    check("_projected_starter resolves a call-up starter who's on the 40-man but not the active "
+          "roster -- the real case that blocked the at-bat engine on a whole slate",
+          callup_resolved == {"id": 70004, "name": "Called Up Arm"}, str(callup_resolved))
+
+    check("the injured-list path still works alongside the 40-man one -- a 60-day-IL arm is "
+          "removed from the 40-man, so only the injury fallback can find him",
+          (await mlb_slate._projected_starter(900, "LAD", 2026, il_activation_lookup))
+          == {"id": 70003, "name": "Coming Off IL"}, "")
+
+    check("_projected_starter still returns None for a name on none of the three rosters, rather "
+          "than widening far enough to guess",
+          await mlb_slate._projected_starter(900, "LAD", 2026, unmatched_lookup) is None)
+
     mlb.get_active_roster = original_get_active_roster
+    mlb.get_40man_roster = original_get_40man_roster
     mlb.get_people = original_get_people_2
     mlb.get_team_injuries = original_get_injuries_projstarter
 

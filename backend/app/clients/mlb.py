@@ -134,25 +134,43 @@ async def get_people(person_ids: list[int]) -> dict[int, dict[str, Any]]:
     return out
 
 
-async def get_active_roster(team_id: int, season: int) -> list[int]:
-    """Player ids on a team's active roster."""
+async def _roster_ids(team_id: int, season: int, roster_type: str, cache_key: str) -> list[int]:
     settings = get_settings()
 
     async def _load() -> Any:
         return await get_json(
             f"{BASE}/teams/{team_id}/roster",
-            params={"rosterType": "active", "season": season},
+            params={"rosterType": roster_type, "season": season},
             source="MLB Stats API",
         )
 
-    payload = await cached(
-        f"mlb:roster:{team_id}:{season}", settings.ttl_stats, _load
-    )
+    payload = await cached(cache_key, settings.ttl_stats, _load)
     return [
         (entry.get("person") or {}).get("id")
         for entry in payload.get("roster") or []
         if (entry.get("person") or {}).get("id")
     ]
+
+
+async def get_active_roster(team_id: int, season: int) -> list[int]:
+    """Player ids on a team's active roster."""
+    return await _roster_ids(team_id, season, "active", f"mlb:roster:{team_id}:{season}")
+
+
+async def get_40man_roster(team_id: int, season: int) -> list[int]:
+    """
+    Player ids on a team's 40-man roster -- everyone who can legally be
+    called up and start today, which is a real superset of the 26-man
+    active roster.
+
+    Needed because MLB doesn't move a player onto the ACTIVE roster
+    until his call-up transaction actually posts, which routinely lands
+    close to first pitch. A pitcher RotoWire already lists as today's
+    projected starter can therefore be a real, legitimate starter who
+    simply isn't on the active roster yet -- same reasoning that
+    already makes the injured list worth checking.
+    """
+    return await _roster_ids(team_id, season, "40Man", f"mlb:roster40:{team_id}:{season}")
 
 
 
