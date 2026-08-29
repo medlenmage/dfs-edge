@@ -30,6 +30,7 @@ from app.services import (  # noqa: E402
     dk_entries,
     dk_entry_manager,
     inhouse_projections,
+    late_swap,
     lineup_export,
     lineup_watch,
     mlb_dk_points,
@@ -6452,6 +6453,210 @@ async def main() -> int:
     check("leverage_score is exactly ceiling minus ownership%",
           lev_proj.get("leverage_score") == round(lev_proj["inhouse_ceiling"] - lev_proj["inhouse_ownership_pct"], 2),
           str(lev_proj))
+
+    print("\nLate swap for a whole batch (late_swap.py)")
+
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    LS_NOW = _dt(2026, 8, 14, 20, 0, tzinfo=_tz.utc)
+    LS_SLOTS = ["P", "P", "C", "1B", "2B", "3B", "SS", "OF", "OF", "OF"]
+
+    def ls_slate(*, scratched=(), postponed_pk=None):
+        """Two games: 901 already started (locked), 902 still to come."""
+        def side(abbrev, hitters, pitcher):
+            return {
+                "abbrev": abbrev,
+                "hitters": hitters,
+                "probable_pitcher": pitcher,
+                "scratches": [
+                    {"player_id": pid, "name": f"P{pid}", "team": abbrev}
+                    for pid in scratched
+                    if any(h["id"] == pid for h in hitters) or (pitcher or {}).get("id") == pid
+                ],
+            }
+
+        def bat(pid):
+            return {"id": pid, "name": f"P{pid}"}
+
+        return {
+            "games": [
+                {
+                    "game_pk": 901,
+                    "game_time_utc": "2026-08-14T18:00:00Z",   # before LS_NOW -> LOCKED
+                    "status": "In Progress",
+                    "home": side("AAA", [bat(i) for i in range(101, 112)], {"id": 191}),
+                    "away": side("BBB", [bat(i) for i in range(121, 132)], {"id": 192}),
+                },
+                {
+                    "game_pk": 902,
+                    "game_time_utc": "2026-08-14T23:00:00Z",   # after LS_NOW -> OPEN
+                    "status": "Postponed" if postponed_pk == 902 else "Scheduled",
+                    "home": side("CCC", [bat(i) for i in range(201, 212)], {"id": 291}),
+                    "away": side("DDD", [bat(i) for i in range(221, 232)], {"id": 292}),
+                },
+            ]
+        }
+
+    def ls_pool(slate):
+        """A pool entry per player, priced so every swap stays affordable."""
+        pool = []
+        for g in slate["games"]:
+            for s in ("home", "away"):
+                t = g[s]
+                for h in t["hitters"]:
+                    pool.append({
+                        "id": h["id"], "name": h["name"], "team": t["abbrev"],
+                        "game_pk": g["game_pk"], "salary": 3000,
+                        "projected_fpts": 8.0 + (h["id"] % 7),
+                        "ownership_pct": 5.0, "dk_id": str(h["id"]),
+                        "slots": ["C", "1B", "2B", "3B", "SS", "OF"],
+                    })
+                p = t["probable_pitcher"]
+                pool.append({
+                    "id": p["id"], "name": f"P{p['id']}", "team": t["abbrev"],
+                    "game_pk": g["game_pk"], "salary": 8000,
+                    "projected_fpts": 18.0, "ownership_pct": 10.0,
+                    "dk_id": str(p["id"]), "slots": ["P"],
+                })
+        return pool
+
+    def ls_entry(ids, pool):
+        by_id = {p["id"]: p for p in pool}
+        players = [{
+            "id": i, "name": by_id[i]["name"], "team": by_id[i]["team"],
+            "salary": by_id[i]["salary"], "projected_fpts": by_id[i]["projected_fpts"],
+            "ownership_pct": by_id[i]["ownership_pct"], "dk_id": by_id[i]["dk_id"],
+            "game_pk": by_id[i]["game_pk"],
+        } for i in ids]
+        return {
+            "players": players,
+            "salary_used": sum(p["salary"] for p in players),
+            "projected_points": round(sum(p["projected_fpts"] for p in players), 2),
+            "total_ownership_pct": round(sum(p["ownership_pct"] for p in players), 1),
+            "duplication_risk": -30.0,
+            "player_ids": frozenset(ids),
+        }
+
+    base_slate = ls_slate()
+    base_pool = ls_pool(base_slate)
+    lock_state = late_swap.slate_lock_state(base_slate, now=LS_NOW)
+    check("slate_lock_state locks a game that has already started and leaves a later one open",
+          lock_state["locked_game_pks"] == {901} and lock_state["open_game_pks"] == {902},
+          str(lock_state["locked_game_pks"]) + " / " + str(lock_state["open_game_pks"]))
+
+    no_time_state = late_swap.slate_lock_state(
+        {"games": [{"game_pk": 903, "game_time_utc": None, "status": "Scheduled"}]}, now=LS_NOW
+    )
+    check("a game with no usable start time is treated as LOCKED rather than assumed swappable "
+          "-- touching a spot DK may already consider locked is the worse error",
+          no_time_state["locked_game_pks"] == {903}, str(no_time_state))
+
+    # A lineup with 5 bats from the OPEN game (one of them scratched)
+    # and the rest from the locked one.
+    open_ids = [201, 202, 203, 204, 205]
+    locked_ids = [101, 102, 103]
+    entry_ids = [191, 291] + locked_ids + open_ids
+    scratched_slate = ls_slate(scratched=(201,))
+    scratched_pool = [p for p in ls_pool(scratched_slate) if p["id"] != 201]
+    entry = ls_entry(entry_ids, base_pool)
+
+    swapped = late_swap.swap_batch(
+        [entry], scratched_slate, scratched_pool,
+        slot_order=LS_SLOTS, salary_cap=50000, now=LS_NOW, seed=7,
+    )
+    new_ids = [p["id"] for p in swapped["entries"][0]["players"]]
+    check("a scratched player in an OPEN game gets swapped out",
+          201 not in new_ids, str(new_ids))
+    check("the swap replaces him in place, keeping the roster exactly 10 players",
+          len(new_ids) == 10, str(new_ids))
+    check("every other player in the entry is left exactly as built -- a repair touches only "
+          "what needs it, rather than re-optimizing the whole lineup",
+          [i for i in new_ids if i != 201] and set(entry_ids) - set(new_ids) == {201},
+          str(sorted(set(entry_ids) - set(new_ids))))
+    check("the swapped-in replacement comes from a game that hasn't started",
+          all(p["game_pk"] == 902 for p in swapped["entries"][0]["players"] if p["id"] not in entry_ids),
+          str(new_ids))
+    check("the entry's salary total is recomputed after the swap",
+          swapped["entries"][0]["salary_used"]
+          == sum(p["salary"] for p in swapped["entries"][0]["players"]), "")
+    check("the summary reports the swap it actually made",
+          swapped["entries_changed"] == 1 and swapped["total_swaps"] == 1, str(swapped["total_swaps"]))
+
+    # The SAME player scratched, but sitting in the already-locked game:
+    # a real DK entry can't be touched there either.
+    locked_scratch_slate = ls_slate(scratched=(101,))
+    locked_scratch_pool = [p for p in ls_pool(locked_scratch_slate) if p["id"] != 101]
+    locked_swapped = late_swap.swap_batch(
+        [ls_entry(entry_ids, base_pool)], locked_scratch_slate, locked_scratch_pool,
+        slot_order=LS_SLOTS, salary_cap=50000, now=LS_NOW, seed=7,
+    )
+    check("a scratched player whose game ALREADY STARTED is left alone -- a real DK entry can't "
+          "be edited there, so 'fixing' it would be fiction",
+          101 in [p["id"] for p in locked_swapped["entries"][0]["players"]], "")
+    check("...and he's reported as stranded rather than silently ignored",
+          [r["player_id"] for r in locked_swapped["stranded_players"]] == [101],
+          str(locked_swapped["stranded_players"]))
+
+    # A postponed game kills everyone in it.
+    pp_slate = ls_slate(postponed_pk=902)
+    pp_state = late_swap.slate_lock_state(pp_slate, now=LS_NOW)
+    check("every player in a postponed game is treated as dead, not just the scratched ones",
+          all(pid in pp_state["dead_player_ids"] for pid in (201, 202, 291)),
+          str(len(pp_state["dead_player_ids"])))
+
+    # Diversity: the same scratch across many entries must NOT all
+    # resolve to one identical replacement, or a single scratch becomes
+    # a mass duplication event.
+    many = [ls_entry(entry_ids, base_pool) for _ in range(40)]
+    many_swapped = late_swap.swap_batch(
+        many, scratched_slate, scratched_pool,
+        slot_order=LS_SLOTS, salary_cap=50000, now=LS_NOW, seed=7,
+    )
+    replacements = {
+        next(p["id"] for p in e["players"] if p["id"] not in entry_ids)
+        for e in many_swapped["entries"]
+    }
+    check("the same scratch across 40 entries resolves to several DIFFERENT replacements -- "
+          "always taking the single best would turn one scratch into a mass duplication event",
+          len(replacements) > 1, f"{len(replacements)} distinct replacements: {sorted(replacements)}")
+
+    try:
+        late_swap.swap_batch(
+            [entry], base_slate, base_pool, slot_order=LS_SLOTS,
+            salary_cap=50000, mode="nonsense",
+        )
+        check("swap_batch rejects an unknown mode rather than silently defaulting", False)
+    except late_swap.LateSwapError:
+        check("swap_batch rejects an unknown mode rather than silently defaulting", True)
+
+    unchanged = late_swap.swap_batch(
+        [ls_entry(entry_ids, base_pool)], base_slate, base_pool,
+        slot_order=LS_SLOTS, salary_cap=50000, now=LS_NOW, seed=7,
+    )
+    check("with nothing dead, repair mode changes nothing at all",
+          unchanged["entries_changed"] == 0 and unchanged["total_swaps"] == 0, str(unchanged["total_swaps"]))
+
+    # refresh mode: a player nobody scratched, whose projection has
+    # simply collapsed since the entry was built.
+    demoted_pool = [
+        {**p, "projected_fpts": 1.0} if p["id"] == 205 else p for p in ls_pool(base_slate)
+    ]
+    refreshed = late_swap.swap_batch(
+        [ls_entry(entry_ids, base_pool)], base_slate, demoted_pool,
+        slot_order=LS_SLOTS, salary_cap=50000, mode="refresh", now=LS_NOW, seed=7,
+    )
+    check("refresh mode swaps a player whose projection has collapsed since the entry was built "
+          "(the real 'confirmed batting 8th after being projected leadoff' case)",
+          205 not in [p["id"] for p in refreshed["entries"][0]["players"]],
+          str([p["id"] for p in refreshed["entries"][0]["players"]]))
+    repair_only = late_swap.swap_batch(
+        [ls_entry(entry_ids, base_pool)], base_slate, demoted_pool,
+        slot_order=LS_SLOTS, salary_cap=50000, mode="repair", now=LS_NOW, seed=7,
+    )
+    check("...and repair mode deliberately leaves that same demoted player alone -- he's worse, "
+          "not dead",
+          205 in [p["id"] for p in repair_only["entries"][0]["players"]], "")
 
     print("\nJSON serialisation")
     import json

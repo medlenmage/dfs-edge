@@ -654,6 +654,13 @@ def _sample_one_lineup(
                 # dk_entry_manager.py's real-CSV export -- empty string
                 # when no DK salary file is loaded (optimizer.build_player_pool()).
                 "dk_id": p.get("dk_id") or "",
+                # Which real game this player is in -- late_swap.py
+                # needs it to tell a locked roster spot from a still-
+                # swappable one, and a scratched player can vanish
+                # from the current pool entirely, so it has to be
+                # captured here at build time rather than looked up
+                # from the live slate later.
+                "game_pk": p.get("game_pk"),
             }
             for p in picks
         ],
@@ -813,6 +820,13 @@ def build_chalk_lineup(
                 # dk_entry_manager.py's real-CSV export -- empty string
                 # when no DK salary file is loaded (optimizer.build_player_pool()).
                 "dk_id": p.get("dk_id") or "",
+                # Which real game this player is in -- late_swap.py
+                # needs it to tell a locked roster spot from a still-
+                # swappable one, and a scratched player can vanish
+                # from the current pool entirely, so it has to be
+                # captured here at build time rather than looked up
+                # from the live slate later.
+                "game_pk": p.get("game_pk"),
             }
             for p in picks
         ],
@@ -1404,6 +1418,79 @@ def evaluate_field(
     }
 
 
+def batch_summary(
+    entries: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    contest: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    The batch-level summary block, in whichever of the two real shapes
+    matches these results -- simulated (cash probability / ROI, keyed by
+    `roi_pct` being present) or deterministic (cashing count / estimated
+    payout).
+
+    Exists so a late swap can hand back a summary describing the entries
+    it actually produced. It has to be computed here rather than in the
+    frontend: the API only ever ships the first 200 entries as a
+    preview, so a batch-wide average taken from that sample would be
+    quietly wrong for any batch bigger than that.
+    """
+    n = len(entries)
+    if not n or not results:
+        return {}
+    entry_fee = contest.get("entry_fee") or 0
+    total_cost = round(n * entry_fee, 2)
+    points = [e["projected_points"] for e in entries]
+
+    def avg(key: str, rows: list[dict[str, Any]], digits: int) -> float:
+        return round(sum(r[key] for r in rows) / len(rows), digits)
+
+    if "roi_pct" in results[0]:
+        total_expected = round(sum(r["expected_payout"] for r in results), 2)
+        return {
+            "avg_cash_probability_pct": avg("cash_probability_pct", results, 1),
+            "avg_first_place_pct": avg("first_place_pct", results, 2),
+            "avg_top_1pct_pct": avg("top_1pct_pct", results, 2),
+            "avg_top_10pct_pct": avg("top_10pct_pct", results, 2),
+            "avg_roi_pct": avg("roi_pct", results, 1),
+            "total_entry_cost": total_cost,
+            "total_expected_payout": total_expected,
+            "estimated_net_profit": round(total_expected - total_cost, 2),
+            "avg_duplication_risk": round(sum(e["duplication_risk"] for e in entries) / n, 3),
+        }
+
+    cashing = [r for r in results if r.get("in_the_money")]
+    total_payout = round(sum(r["estimated_payout"] for r in results), 2)
+    return {
+        "cashing_count": len(cashing),
+        "cashing_pct": round(100 * len(cashing) / n, 1),
+        "total_entry_cost": total_cost,
+        "total_estimated_payout": total_payout,
+        "estimated_net_profit": round(total_payout - total_cost, 2),
+        "avg_roi_pct": round((total_payout / total_cost - 1) * 100, 1) if total_cost else 0.0,
+        "avg_salary_used": round(sum(e["salary_used"] for e in entries) / n),
+        "avg_projected_points": round(sum(points) / n, 2),
+        "min_projected_points": min(points),
+        "max_projected_points": max(points),
+        "avg_total_ownership_pct": round(sum(e["total_ownership_pct"] for e in entries) / n, 1),
+        "avg_duplication_risk": round(sum(e["duplication_risk"] for e in entries) / n, 3),
+    }
+
+
+def evaluate_batch(
+    entries: list[dict[str, Any]],
+    field: list[dict[str, Any]],
+    contest: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Public entry point for the batch-vs-field ranking below -- used to
+    re-rank a batch whose entries have changed since it was built (a
+    late swap), where the originally-cached results no longer describe
+    the lineups they came with.
+    """
+    return _evaluate_batch_against_field(entries, field, contest)
+
+
 def _evaluate_batch_against_field(
     entries: list[dict[str, Any]],
     field: list[dict[str, Any]],
@@ -1967,6 +2054,11 @@ def build_contest_entries(
             contest["payout_pct"], evaluation["prize_pool"], contest["entry_fee"], evaluation["field_size"]
         ),
         "exposure": field_exposure(entries, top_n=20),
+        # The sampled opponent field this batch was ranked against --
+        # carried out so a later late swap can re-rank against the SAME
+        # field (swapping it too) rather than resampling a different
+        # one, which would make the before/after comparison meaningless.
+        "field": field,
         "field_sharpness": field_sharpness,
         # Full batch, deliberately not capped here -- routers/mlb.py
         # decides how much of this goes into the JSON response (the
@@ -2079,6 +2171,9 @@ async def build_contest_entries_simulated(
             first_place_pct=first_place_pct,
             engine=engine, slate=slate, included_game_pks=included_game_pks,
         )
+        # Self-play ranks the batch against ITSELF, so there's no
+        # separate opponent field to carry forward.
+        field = []
     else:
         contest, entries, field = _build_entries_and_field(
             slate,
@@ -2168,6 +2263,13 @@ async def build_contest_entries_simulated(
         ),
         "exposure": field_exposure(entries, top_n=20, results=evaluation["results"]),
         "entries": entries,
+        # The simulated opponent field this batch was ranked against.
+        # Carried out so a later late swap can re-rank against the SAME
+        # field (swapping it too, since the real field late-swaps as
+        # well) instead of resampling a different one, which would make
+        # the before/after comparison meaningless. Empty under
+        # self_play, where the batch is ranked against itself.
+        "field": field,
         "results": evaluation["results"],
         "self_play": self_play,
         "engine": engine,
