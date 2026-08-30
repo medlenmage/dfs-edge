@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { NflContestGeneratorPanel } from './NflContestGeneratorPanel'
+import { NflContestSimulatorPanel } from './NflContestSimulatorPanel'
 import { NflLineupsPanel } from './NflLineupsPanel'
 import { NflPositionTable } from './NflPositionTable'
 import { NflStackTable } from './NflStackTable'
@@ -107,6 +108,11 @@ export function NflPanel() {
   const [error, setError] = useState(null)
   const [tab, setTab] = useState('matchups')
   const [playerSubTab, setPlayerSubTab] = useState('QB')
+  // The contest the generator last built, handed to the Simulator tab.
+  // Lives here rather than inside either panel because it's the one
+  // thing the two of them share: the generator produces it, the
+  // simulator prices it, and neither owns the other.
+  const [contestBatch, setContestBatch] = useState(null)
   const [salaryMsg, setSalaryMsg] = useState(null)
   const [projectionMsg, setProjectionMsg] = useState(null)
   const [rotowireLoading, setRotowireLoading] = useState(false)
@@ -302,6 +308,9 @@ export function NflPanel() {
             <button className={`tab ${tab === 'contest' ? 'active' : ''}`} onClick={() => setTab('contest')}>
               Contest Generator
             </button>
+            <button className={`tab ${tab === 'simulator' ? 'active' : ''}`} onClick={() => setTab('simulator')}>
+              Simulator
+            </button>
           </div>
 
           {tab === 'matchups' && <NflMatchups slate={slate} />}
@@ -326,7 +335,22 @@ export function NflPanel() {
             </>
           )}
           {tab === 'lineups' && <NflLineupsPanel season={slate.season} week={slate.week} slate={slate} />}
-          {tab === 'contest' && <NflContestGeneratorPanel season={slate.season} week={slate.week} />}
+          {tab === 'contest' && (
+            <NflContestGeneratorPanel
+              season={slate.season}
+              week={slate.week}
+              onSimulate={(built) => {
+                setContestBatch(built)
+                setTab('simulator')
+              }}
+            />
+          )}
+          {tab === 'simulator' && (
+            <NflContestSimulatorPanel
+              batch={contestBatch}
+              onOpenGenerator={() => setTab('contest')}
+            />
+          )}
         </>
       )}
     </div>

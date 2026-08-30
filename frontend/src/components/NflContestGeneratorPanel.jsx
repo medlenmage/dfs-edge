@@ -2,18 +2,26 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 
 /**
- * NFL contest generator + Monte Carlo simulator -- the NFL sibling of
- * ContestGeneratorPanel.jsx (MLB). Scoped to what nfl_contest.py
- * actually supports: contest type, entries to build, allow duplicates,
- * self-play, field sharpness, min/max salary, max exposure, field size,
- * percent-to-first, and a full-batch CSV download. No post-hoc reshape
- * yet -- see nfl_contest.py's own module docstring for the full list of
- * what wasn't ported from the MLB version and why.
+ * The NFL contest generator: builds a whole DraftKings Classic NFL
+ * contest -- lineups, and nothing else. The NFL sibling of
+ * ContestGeneratorPanel.jsx (MLB), split the same way and for the same
+ * reason: building lineups and pricing them are different questions,
+ * and the inputs that answer the second one (entry cost, payout curve)
+ * have nothing to do with how the lineups get built, so they live in
+ * the Simulator tab instead.
  *
- * Every entry is built toward a real, weighted NFL stack archetype
- * (also nfl_contest.py's own module docstring) -- not a control here,
- * it's baked into generation. STACK_LABELS below is just how those
- * archetype codes are shown in the entries table.
+ * No salary, exposure or duplicate knobs either: every entry is built
+ * toward spending the cap (nfl_contest._SALARY_PACING_STRENGTH) because
+ * unspent salary is unspent projected points, and duplicates are always
+ * allowed because a real contest field contains them.
+ *
+ * Contest size is ONE control, not two -- this builds a CONTEST, so the
+ * field size and the number of entries in it are the same number,
+ * picked from the real sizes the selected contest type comes in.
+ *
+ * Every entry is built toward a real, weighted NFL stack archetype (see
+ * nfl_contest.py's module docstring) -- not a control here, it's baked
+ * into generation. STACK_LABELS is just how those codes are displayed.
  */
 const STACK_LABELS = {
   qb_naked: 'QB (naked)',
@@ -21,6 +29,7 @@ const STACK_LABELS = {
   qb_2: 'QB+2',
   qb_3: 'QB+3',
   rb_dst: 'RB+DST',
+  none: 'no stack',
 }
 
 // e.g. "DAL(primary), WSH + GB(secondary)" -- primary_team/secondary_teams
@@ -35,50 +44,46 @@ function stackTeamsLabel(entry) {
   return parts.join(', ')
 }
 
-export function NflContestGeneratorPanel({ season, week }) {
+export function NflContestGeneratorPanel({ season, week, onSimulate }) {
   const [contestTypes, setContestTypes] = useState({})
   const [contestType, setContestType] = useState('gpp_small')
-  const [numLineups, setNumLineups] = useState(20)
-  const [allowDuplicates, setAllowDuplicates] = useState(false)
-  const [selfPlay, setSelfPlay] = useState(false)
-  const [fieldSharpness, setFieldSharpness] = useState('marquee')
-  const [fieldSizeOverride, setFieldSizeOverride] = useState('')
-  const [maxExposure, setMaxExposure] = useState('')
-  // Defaults to $47,000, matching MLB's own panel and the backend's
-  // nfl_optimizer.DEFAULT_MIN_SALARY -- a lineup leaving thousands
-  // unspent is leaving real projected points on the table. Clear the
-  // box to disable the floor entirely.
-  const [minSalary, setMinSalary] = useState('47000')
-  const [maxSalary, setMaxSalary] = useState('')
-  const [firstPlacePct, setFirstPlacePct] = useState('')
+  const [contestSize, setContestSize] = useState(500)
   const [state, setState] = useState({ status: 'idle' })
+  // Bumped by Re-roll. At 0, identical settings reproduce the identical
+  // contest -- the backend derives a deterministic seed from them, so
+  // the table no longer reshuffles on every click for no reason.
+  const [reroll, setReroll] = useState(0)
 
   useEffect(() => {
     api.nflContestTypes().then((r) => setContestTypes(r.contest_types)).catch(() => {})
   }, [])
 
   const preset = contestTypes[contestType]
+  const sizes = preset?.sizes || []
 
-  async function run() {
+  // Every contest type comes in its own set of real sizes, so switching
+  // type has to land on one this type actually offers.
+  useEffect(() => {
+    if (!sizes.length) return
+    if (!sizes.includes(contestSize)) setContestSize(preset.field_size ?? sizes[sizes.length - 1])
+  }, [contestType, contestTypes])
+
+  async function run(rerollOverride = null) {
     setState({ status: 'loading' })
     try {
-      const result = await api.nflBuildContestEntriesSimulated(season, week, {
+      const result = await api.nflBuildContestEntries(season, week, {
         contestType,
-        numLineups,
-        maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
-        fieldSize: fieldSizeOverride.trim() ? Number(fieldSizeOverride) : null,
-        minSalary: minSalary.trim() ? Number(minSalary) : 0,
-        maxSalary: maxSalary.trim() ? Number(maxSalary) : 50000,
-        allowDuplicates,
-        selfPlay,
-        fieldSharpness,
-        firstPlacePct: firstPlacePct.trim() ? Number(firstPlacePct) : null,
+        contestSize,
+        reroll: rerollOverride ?? reroll,
       })
       setState({ status: 'ready', ...result })
     } catch (err) {
       setState({ status: 'error', message: err.message })
     }
   }
+
+  const sizeLabel = (n) => (n >= 1000 && n % 1000 === 0 ? `${n / 1000}K` : n.toLocaleString())
+  const sampled = state.status === 'ready' && state.num_entries_built < state.field_size
 
   return (
     <div className="card">
@@ -93,116 +98,45 @@ export function NflContestGeneratorPanel({ season, week }) {
             ))}
           </select>
         </label>
-        <label className="dim" style={{ fontSize: 13 }}>
-          Entries to build{' '}
-          <input
-            type="number"
-            min="1"
-            max="10000"
-            value={numLineups}
-            onChange={(e) => setNumLineups(Math.max(1, Number(e.target.value) || 1))}
-            style={{ width: 80 }}
-          />
-        </label>
-        <label className="dim" style={{ fontSize: 13 }}>
-          Field size{' '}
-          <input
-            type="number"
-            min="1"
-            max="200000"
-            placeholder={preset ? String(preset.field_size) : '—'}
-            value={fieldSizeOverride}
-            onChange={(e) => setFieldSizeOverride(e.target.value)}
-            style={{ width: 90 }}
-          />
-        </label>
-        <label className="dim" style={{ fontSize: 13 }}>
-          Field sharpness{' '}
-          <select value={fieldSharpness} onChange={(e) => setFieldSharpness(e.target.value)} disabled={selfPlay}>
-            <option value="low">Low</option>
-            <option value="marquee">Marquee</option>
-            <option value="high">High</option>
-          </select>
-        </label>
         <label
           className="dim"
           style={{ fontSize: 13 }}
-          title="Override the contest's own percent-to-first (share of the prize pool 1st place wins) for this simulated run. A lower value flattens the payout curve -- more spread across the paid ranks, less concentrated at 1st -- which changes every entry's simulated ROI. Defaults to the contest preset's own value."
+          title="How big the contest is -- and therefore how many lineups get built. One number, not two: this builds a contest, so the field size and the number of entries in it are the same thing. The options are the real sizes this contest type actually comes in."
         >
-          % to first{' '}
-          <select value={firstPlacePct} onChange={(e) => setFirstPlacePct(e.target.value)}>
-            <option value="">preset default</option>
-            {[5, 10, 15, 20, 25, 30, 35].map((n) => (
+          Contest size{' '}
+          <select value={contestSize} onChange={(e) => setContestSize(Number(e.target.value))}>
+            {sizes.map((n) => (
               <option key={n} value={n}>
-                {n}%
+                {sizeLabel(n)}
               </option>
             ))}
           </select>
         </label>
-        <label className="dim" style={{ fontSize: 13 }}>
-          Max exposure{' '}
-          <input
-            type="number"
-            min="1"
-            max="100"
-            placeholder="none"
-            value={maxExposure}
-            onChange={(e) => setMaxExposure(e.target.value)}
-            style={{ width: 55 }}
-          />
-          %
-        </label>
-        <label className="dim" style={{ fontSize: 13 }}>
-          Min salary{' '}
-          <input
-            type="number"
-            min="0"
-            max="50000"
-            step="500"
-            placeholder="—"
-            value={minSalary}
-            onChange={(e) => setMinSalary(e.target.value)}
-            style={{ width: 80 }}
-          />
-        </label>
-        <label className="dim" style={{ fontSize: 13 }}>
-          Max salary{' '}
-          <input
-            type="number"
-            min="0"
-            max="50000"
-            step="500"
-            placeholder="50000"
-            value={maxSalary}
-            onChange={(e) => setMaxSalary(e.target.value)}
-            style={{ width: 80 }}
-          />
-        </label>
-        <label className="dim" style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}>
-          <input type="checkbox" checked={allowDuplicates} onChange={(e) => setAllowDuplicates(e.target.checked)} />
-          Allow dupes
-        </label>
-        <label
-          className="dim"
-          style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 4 }}
-          title="Rank this batch against ITSELF instead of a separately-sampled public field."
-        >
-          <input type="checkbox" checked={selfPlay} onChange={(e) => setSelfPlay(e.target.checked)} />
-          Self play
-        </label>
-        <button className="primary" onClick={run} disabled={state.status === 'loading'}>
-          {state.status === 'loading' ? 'Simulating…' : `Build ${numLineups} entries`}
+        <button className="primary" onClick={() => run()} disabled={state.status === 'loading'}>
+          {state.status === 'loading' ? 'Building…' : `Build ${sizeLabel(contestSize)} contest`}
         </button>
+        {state.status === 'ready' && (
+          <button
+            onClick={() => {
+              const next = reroll + 1
+              setReroll(next)
+              run(next)
+            }}
+            title="Identical settings always reproduce the identical contest (a deterministic seed), so results are stable click to click. Re-roll draws a genuinely new one for the same settings."
+          >
+            Re-roll
+          </button>
+        )}
       </div>
 
       {state.status === 'idle' && (
         <p style={{ marginTop: 0, color: 'var(--text-secondary)' }}>
-          Builds a batch of your own entries (randomized construction weighted toward
-          projected points, distinct by default) and runs a real Monte Carlo simulation
-          against real 2025 player/DST outcome pools -- cash probability and expected
-          payout are genuine simulated probabilities, not a single projected-points
-          estimate. Requires both a DK salary CSV and RotoWire projections loaded for the
-          week.
+          Builds an entire DraftKings Classic NFL contest in one shot — every lineup
+          individually strong (weighted heavily toward projected points, and toward actually
+          spending the salary cap), across the real NFL GPP stack archetypes, duplicates
+          included the way a real field produces them. No economics here: once it&apos;s built,
+          send it to the Simulator for cash probability, payouts and ROI. Requires both a DK
+          salary CSV and RotoWire projections loaded for the week.
         </p>
       )}
 
@@ -217,7 +151,7 @@ export function NflContestGeneratorPanel({ season, week }) {
       {state.status === 'error' && (
         <>
           <div className="notice error">{state.message}</div>
-          <button style={{ marginTop: 12 }} onClick={run}>
+          <button style={{ marginTop: 12 }} onClick={() => run()}>
             Try again
           </button>
         </>
@@ -225,94 +159,82 @@ export function NflContestGeneratorPanel({ season, week }) {
 
       {state.status === 'ready' && (
         <>
-          <div style={{ display: 'flex', gap: 16, marginBottom: 14, flexWrap: 'wrap' }}>
-            <span className="badge">{state.num_entries_built} entries built</span>
-            <span className="badge">{state.field_size.toLocaleString()}-entry field</span>
-            <span className="badge">${state.prize_pool.toLocaleString()} prize pool</span>
-            <span className="badge">{state.summary.avg_cash_probability_pct}% avg cash rate</span>
-            <span className={`badge ${state.summary.avg_roi_pct >= 0 ? 'ok' : ''}`}>
-              {state.summary.avg_roi_pct}% avg ROI
+          {sampled && (
+            <div className="notice" style={{ marginBottom: 12 }}>
+              {state.num_entries_built.toLocaleString()} lineups built for a{' '}
+              {state.field_size.toLocaleString()}-entry contest — building is capped, so this
+              batch stands in for the full field. Every payout, rank and ROI the simulator
+              produces still keys off the real {state.field_size.toLocaleString()}-entry size.
+            </div>
+          )}
+          {state.num_distinct_entries < state.num_entries_built && (
+            <div className="notice" style={{ marginBottom: 12 }}>
+              {state.num_distinct_entries.toLocaleString()} distinct builds +{' '}
+              {(state.num_entries_built - state.num_distinct_entries).toLocaleString()} duplicates
+              — this slate&apos;s pool can&apos;t support {state.num_entries_built.toLocaleString()}{' '}
+              unique lineups, so the contest fills out with duplicates the way a real field does.
+            </div>
+          )}
+
+          <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
+            <span className="badge ok">
+              {state.num_entries_built.toLocaleString()} lineups built
             </span>
-            <span className="badge" title="What a zero-skill random entry should expect from this exact contest">
-              baseline: {state.field_baseline.avg_cash_probability_pct}% cash / {state.field_baseline.avg_roi_pct}% ROI
+            <span className="badge">{state.field_size.toLocaleString()}-entry contest</span>
+            <span className="badge">{state.num_distinct_entries.toLocaleString()} distinct</span>
+            <span
+              className="badge"
+              title="Median salary actually used. Every entry is built toward spending the cap -- there's no floor rejecting cheap builds, the sampler is steered toward salary as it goes."
+            >
+              ${state.summary.median_salary_used.toLocaleString()} median salary
             </span>
+            <span className="badge">
+              ${state.summary.min_salary_used.toLocaleString()}–$
+              {state.summary.max_salary_used.toLocaleString()} range
+            </span>
+            <span className="badge">
+              {state.summary.avg_projected_points.toFixed(1)} avg proj FPTS
+            </span>
+            <span className="badge">
+              {state.summary.avg_total_ownership_pct.toFixed(1)}% avg ownership
+            </span>
+          </div>
+
+          <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
+            <button className="primary" onClick={() => onSimulate?.(state)}>
+              Simulate this contest →
+            </button>
             <a
               href={api.nflContestEntriesCsvUrl(state.batch_id)}
-              title={`Download all ${state.num_entries_built.toLocaleString()} entries as a CSV -- for handing off to an external tool`}
+              title={`Download all ${state.num_entries_built.toLocaleString()} lineups as a CSV`}
             >
-              <button>Download full batch (CSV)</button>
+              <button>Download full contest (CSV)</button>
             </a>
+            <span className="dim" style={{ fontSize: 12 }}>
+              hands this batch to the Simulator tab — entry cost and payout curve are set there
+            </span>
           </div>
 
-          <div className="notice" style={{ marginBottom: 14 }}>{state.note}</div>
-
-          <div className="card table-wrap" style={{ marginBottom: 16 }}>
-            <div className="sub-line" style={{ marginBottom: 8 }}>
-              Entries (top {state.results.length} of {state.num_entries_built.toLocaleString()} -- download
-              the CSV above for the full batch)
-            </div>
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Stack</th>
-                  <th>Teams</th>
-                  <th>Bring-back</th>
-                  <th className="num">Salary</th>
-                  <th className="num">Proj FPTS</th>
-                  <th className="num">Cash%</th>
-                  <th className="num">Exp. payout</th>
-                  <th className="num">ROI%</th>
-                  <th className="num">Sim floor / ceiling</th>
-                </tr>
-              </thead>
-              <tbody>
-                {state.results.map((r, i) => {
-                  const entry = state.sample_entries[i]
-                  return (
-                    <tr key={i}>
-                      <td>{i + 1}</td>
-                      <td className="dim">{STACK_LABELS[entry.primary_stack] || entry.primary_stack || '—'}</td>
-                      <td className="dim">{stackTeamsLabel(entry)}</td>
-                      <td className={entry.has_bringback ? 'ok' : 'dim'}>{entry.has_bringback ? 'Yes' : 'No'}</td>
-                      <td className="num">${entry.salary_used.toLocaleString()}</td>
-                      <td className="num">{entry.projected_points.toFixed(1)}</td>
-                      <td className="num">{r.cash_probability_pct}%</td>
-                      <td className="num">${r.expected_payout.toFixed(2)}</td>
-                      <td className={`num ${r.roi_pct >= 0 ? 'ok' : ''}`}>{r.roi_pct}%</td>
-                      <td className="num">
-                        {r.simulated_points_floor.toFixed(1)} / {r.simulated_points_ceiling.toFixed(1)}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          {state.exposure.length > 0 && (
-            <div className="card table-wrap">
+          {state.stack_shapes?.length > 0 && (
+            <div className="card table-wrap" style={{ marginBottom: 14 }}>
               <div className="sub-line" style={{ marginBottom: 8 }}>
-                Exposure across {state.num_entries_built} entries
+                Stack archetypes in this contest — the real NFL GPP constructions, in the
+                proportions a real field builds them
               </div>
               <table>
                 <thead>
                   <tr>
-                    <th>Player</th>
-                    <th>Team</th>
-                    <th className="num">Count</th>
-                    <th className="num">Exposure</th>
-                    <th className="num">Avg ROI%</th>
+                    <th>Archetype</th>
+                    <th className="num">Lineups</th>
+                    <th className="num">Share</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {state.exposure.map((e) => (
-                    <tr key={e.id}>
-                      <td>{e.name}</td>
-                      <td className="dim">{e.team}</td>
-                      <td className="num">{e.count}</td>
-                      <td className="num">{e.pct}%</td>
-                      <td className={`num ${e.avg_roi_pct >= 0 ? 'ok' : ''}`}>{e.avg_roi_pct}%</td>
+                  {state.stack_shapes.map((s) => (
+                    <tr key={s.shape}>
+                      <td>{STACK_LABELS[s.shape] || s.shape}</td>
+                      <td className="num">{s.count.toLocaleString()}</td>
+                      <td className="num">{s.pct}%</td>
                     </tr>
                   ))}
                 </tbody>
@@ -320,9 +242,78 @@ export function NflContestGeneratorPanel({ season, week }) {
             </div>
           )}
 
-          <button style={{ marginTop: 12 }} onClick={run}>
-            Regenerate
-          </button>
+          {state.exposure?.length > 0 && (
+            <div className="card table-wrap" style={{ marginBottom: 14 }}>
+              <div className="sub-line" style={{ marginBottom: 8 }}>
+                Exposure across the contest
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Player</th>
+                    <th>Team</th>
+                    <th className="num">Lineups</th>
+                    <th className="num">Exposure</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.exposure.map((e) => (
+                    <tr key={e.id}>
+                      <td>{e.name}</td>
+                      <td className="dim">{e.team}</td>
+                      <td className="num">{e.count.toLocaleString()}</td>
+                      <td className="num">{e.pct}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {state.sample_entries?.length > 0 && (
+            <div className="card table-wrap" style={{ marginBottom: 14 }}>
+              <div className="sub-line" style={{ marginBottom: 8 }}>
+                Sample lineups — showing {state.sample_entries.length} of{' '}
+                {state.num_entries_built.toLocaleString()}
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th className="num">#</th>
+                    <th>Stack</th>
+                    <th>Teams</th>
+                    <th>Bring-back</th>
+                    <th className="num">Salary</th>
+                    <th className="num">Proj FPTS</th>
+                    <th className="num">Own%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.sample_entries.map((e, i) => (
+                    <tr key={i}>
+                      <td className="num">{i + 1}</td>
+                      <td className="dim">
+                        {STACK_LABELS[e.primary_stack] || e.primary_stack || '—'}
+                      </td>
+                      <td className="dim">{stackTeamsLabel(e)}</td>
+                      <td className={e.has_bringback ? 'ok' : 'dim'}>
+                        {e.has_bringback ? 'Yes' : 'No'}
+                      </td>
+                      <td className="num">${e.salary_used.toLocaleString()}</td>
+                      <td className="num">{e.projected_points.toFixed(1)}</td>
+                      <td className="num">{e.total_ownership_pct.toFixed(1)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="dim" style={{ fontSize: 12, marginBottom: 12 }}>
+            {state.note}
+          </div>
+
+          <button onClick={() => run()}>Rebuild</button>
         </>
       )}
     </div>
