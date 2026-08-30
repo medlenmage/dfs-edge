@@ -6104,20 +6104,67 @@ async def main() -> int:
     check("project_fpts is an exact baseline x composite multiply",
           hot_fpts == round(baseline_flat * hot_composite, 2), str(hot_fpts))
 
-    # The actual "same average, different matchup multiplier -> different
-    # inhouse_fpts" claim the plan is built on, driven through
-    # inhouse_fpts_batch() -- the real entry point mlb_slate.py calls.
+    # The actual "same average, different MATCHUP -> different
+    # inhouse_fpts" claim, driven through inhouse_fpts_batch() -- the
+    # real entry point mlb_slate.py calls. Since the v3 rework the
+    # multiplier is built from the TODAY-SPECIFIC components only
+    # (Vegas total, opposing pitcher, park, ...), never from talent
+    # terms the baseline already contains -- so the fixture differs in
+    # a matchup component, not in the display composite.
+    def _matchup_edge(team_total_value):
+        return {"composite": 1.0, "components": {
+            "team_total": {"value": team_total_value},
+            "pitcher": {"value": 1.0},
+        }}
     same_average_players = [
-        {"id": 80001, "position": "OF", "edge": {"composite": hot_composite}},
-        {"id": 80002, "position": "OF", "edge": {"composite": cold_composite}},
+        {"id": 80001, "position": "OF", "edge": _matchup_edge(1.30)},
+        {"id": 80002, "position": "OF", "edge": _matchup_edge(0.80)},
     ]
     batch = await inhouse_projections.inhouse_fpts_batch(same_average_players, INHOUSE_SEASON)
-    check("two players with an identical season average but different edge.composite "
-          "get genuinely different inhouse_fpts",
+    check("two players with an identical season average but a genuinely different MATCHUP "
+          "(Vegas team total) get different inhouse_fpts",
           batch[80001] != batch[80002] and batch[80001] > batch[80002], str(batch))
-    check("inhouse_fpts_batch's values match project_fpts(baseline, composite) directly",
-          batch[80001] == hot_fpts and batch[80002] == cold_fpts,
-          str((batch, hot_fpts, cold_fpts)))
+    check("inhouse_fpts_batch matches project_fpts(baseline, calibrated(projection_multiplier)) "
+          "directly -- the fitted-scale matchup multiplier, not the display composite",
+          batch[80001] == inhouse_projections.project_fpts(
+              baseline_flat,
+              inhouse_projections.calibrated(
+                  inhouse_projections.projection_multiplier(_matchup_edge(1.30)["components"])
+              ),
+          ),
+          str(batch))
+
+    # A player with NO matchup components at all gets a neutral 1.0
+    # multiplier -- the old code would have applied his display
+    # composite here, re-counting talent his baseline already contains.
+    composite_only = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80001, "position": "OF", "edge": {"composite": 1.30}}], INHOUSE_SEASON
+    )
+    check("a hitter with only a display composite (no matchup components) projects at exactly "
+          "his baseline -- talent is never double-counted through the multiplier any more",
+          composite_only[80001] == baseline_flat, str(composite_only))
+
+    check("projection_multiplier re-bases platoon to the player's OWN season line -- a hitter "
+          "whose vs-hand OPS matches his overall OPS gets no platoon push either way",
+          inhouse_projections.projection_multiplier(
+              {"team_total": {"value": 1.0}}, season_ops=0.800, vs_hand_ops=0.800,
+          ) == 1.0, "")
+    up = inhouse_projections.projection_multiplier(
+        {"team_total": {"value": 1.0}}, season_ops=0.700, vs_hand_ops=0.900)
+    down = inhouse_projections.projection_multiplier(
+        {"team_total": {"value": 1.0}}, season_ops=0.900, vs_hand_ops=0.700)
+    check("a real personal platoon EDGE (vs-hand OPS above his own overall) pushes the "
+          "multiplier up, and a personal platoon weakness pushes it down",
+          up > 1.0 > down, str((up, down)))
+    check("the self-relative platoon ratio is capped the same +/-45% as scoring.py's own "
+          "components, so one thin split can't run away",
+          inhouse_projections.projection_multiplier(
+              {}, season_ops=0.200, vs_hand_ops=1.200,
+          ) <= 1.45, "")
+    check("calibrated() rescales a multiplier's deviation by the fitted k -- the fitted scale "
+          "is a real amplification of the deliberately-tight matchup spread",
+          abs(inhouse_projections.calibrated(1.1) - (1.0 + inhouse_projections._PROJECTION_DAMPING * 0.1)) < 1e-9,
+          str(inhouse_projections.calibrated(1.1)))
 
     # Recent form: a player whose last 15 games differ from his earlier
     # games should land between the two straight averages, not exactly
@@ -6160,23 +6207,41 @@ async def main() -> int:
     # exactly the player's own blended rate regardless of what earlier
     # tests in this section left in the pool.
     inhouse_game_logs[80020] = [_single_rbi_run_game() for _ in range(60)]
-    leadoff_batch = await inhouse_projections.inhouse_fpts_batch(
-        [{"id": 80020, "position": "OF", "edge": {"composite": 1.0}, "batting_order": 1}], INHOUSE_SEASON
+    # The PA factor is RELATIVE to the player's usual (projected) slot
+    # since the v3 rework: the baseline was earned batting in his
+    # normal spot, so it already contains his normal PA volume, and the
+    # old absolute factor handed a permanent leadoff hitter a free +9%
+    # every single day. Only a CHANGE in slot moves the number now.
+    promoted_batch = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80020, "position": "OF", "edge": {"composite": 1.0},
+          "batting_order": 1, "projected_batting_order": 8}], INHOUSE_SEASON
     )
-    ninth_batch = await inhouse_projections.inhouse_fpts_batch(
-        [{"id": 80020, "position": "OF", "edge": {"composite": 1.0}, "batting_order": 9}], INHOUSE_SEASON
+    demoted_batch = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80020, "position": "OF", "edge": {"composite": 1.0},
+          "batting_order": 9, "projected_batting_order": 2}], INHOUSE_SEASON
+    )
+    usual_spot_batch = await inhouse_projections.inhouse_fpts_batch(
+        [{"id": 80020, "position": "OF", "edge": {"composite": 1.0},
+          "batting_order": 1, "projected_batting_order": 1}], INHOUSE_SEASON
     )
     no_order_batch = await inhouse_projections.inhouse_fpts_batch(
         [{"id": 80020, "position": "OF", "edge": {"composite": 1.0}}], INHOUSE_SEASON
     )
-    check("a leadoff (batting_order=1) hitter's inhouse_fpts is scaled up by the PA factor",
-          leadoff_batch[80020] == round(7.0 * 1.09, 2), str(leadoff_batch))
-    check("a 9-hole (batting_order=9) hitter's inhouse_fpts is scaled down by the PA factor",
-          ninth_batch[80020] == round(7.0 * 0.91, 2), str(ninth_batch))
-    check("no confirmed batting order leaves inhouse_fpts unchanged (factor 1.0, matches pre-v2 behavior)",
+    check("a hitter PROMOTED from his projected 8-hole to confirmed leadoff gets a real PA "
+          "boost -- the genuine role-change signal",
+          promoted_batch[80020] == round(7.0 * (1.09 / 0.94), 2), str(promoted_batch))
+    check("a hitter DEMOTED from projected 2nd to confirmed 9th gets a real PA cut",
+          demoted_batch[80020] == round(7.0 * (0.91 / 1.06), 2), str(demoted_batch))
+    check("a permanent leadoff hitter confirmed exactly where he was projected gets NO free "
+          "boost -- his baseline already contains his leadoff PA volume",
+          usual_spot_batch[80020] == 7.0, str(usual_spot_batch))
+    check("no confirmed batting order leaves inhouse_fpts unchanged (factor 1.0)",
           no_order_batch[80020] == 7.0, str(no_order_batch))
-    check("a leadoff hitter genuinely outprojects the same player batting 9th",
-          leadoff_batch[80020] > no_order_batch[80020] > ninth_batch[80020])
+    check("a promotion genuinely outprojects the usual spot, which outprojects a demotion",
+          promoted_batch[80020] > usual_spot_batch[80020] > demoted_batch[80020])
+    check("batting_order_pa_factor is neutral with no projection to compare against -- a "
+          "confirmed slot alone says nothing about whether it is a CHANGE",
+          inhouse_projections.batting_order_pa_factor(1, None) == 1.0, "")
 
     def _pitcher_start(win: int = 0):
         return {
