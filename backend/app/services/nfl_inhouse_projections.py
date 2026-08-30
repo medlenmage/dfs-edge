@@ -62,12 +62,23 @@ from typing import Any
 from app.clients import nfl
 from app.services import nfl_dk_points, nfl_scoring, nfl_variance
 
-# Recent form gets real, bounded weight -- same split MLB's own
-# baseline uses. The window is much shorter here because an NFL season
-# is at most 17 games: 5 is roughly the same *fraction* of a season
-# that MLB's 15-game window is.
-_RECENT_WEIGHT = 0.4
-_RECENT_GAMES = 5
+# Per-game exponential recency decay for the rolling multi-season log
+# below -- the most recent game gets weight 1.0, the one before it
+# 0.93, and so on (a game a full season back carries ~0.3x). Replaces
+# the old flat season-average + 40%-recent-5 blend, whose recency
+# window was mostly noise (the review's point: the last 5 games of a
+# PRIOR season are often Week 17-18 rest games, the worst possible
+# signal) and whose baseline was pinned to the prior season forever --
+# in-season games never updated anyone, and a player who changed teams
+# was projected in his old role all year.
+_GAME_DECAY = 0.93
+
+# The prior season's Week 18 is dropped from every rolling log:
+# clinched teams rest starters and playoff-bound players sit, so it's
+# systematically unrepresentative. Detecting exactly WHICH teams had
+# clinched would need standings data this app doesn't fetch -- dropping
+# the week outright for everyone is the stated approximation.
+_PRIOR_SEASON_DROP_WEEK = 18
 
 # The percentile of the shared same-position pool used as the shrinkage
 # target for a thin-sample or no-history player -- NOT the pool's mean.
@@ -90,11 +101,55 @@ _RECENT_GAMES = 5
 _PRIOR_PERCENTILE = 0.25
 
 
+# Positional FPTS floors for the OWNERSHIP pool (see nfl_slate.py's
+# use): a player projecting below his position's floor isn't someone
+# the field rosters, and letting him into the pool splits the group's
+# fixed softmax total across phantom candidates. Floors from the
+# review's own suggested thresholds; DST has only 32 real candidates
+# and every one is genuinely rosterable, so no floor.
+OWNERSHIP_FPTS_FLOOR: dict[str, float] = {"QB": 8.0, "RB": 4.0, "WR": 4.0, "TE": 3.0}
+
+
 def _pool_prior(pool: list[float]) -> float | None:
     if not pool:
         return None
     ordered = sorted(pool)
     return ordered[round(_PRIOR_PERCENTILE * (len(ordered) - 1))]
+
+
+def _decayed_mean(values: list[float]) -> float:
+    """Recency-weighted mean of a chronological series -- the newest
+    value carries weight 1.0, each step back multiplies by _GAME_DECAY.
+    Once the current season has a handful of real games, they dominate
+    the prior season's on their own, with no hand-set crossover point.
+    """
+    n = len(values)
+    total = weight_sum = 0.0
+    for i, v in enumerate(values):
+        w = _GAME_DECAY ** (n - 1 - i)
+        total += v * w
+        weight_sum += w
+    return total / weight_sum if weight_sum else 0.0
+
+
+async def rolling_game_log(nflverse_id: str, current_season: int) -> list[dict[str, Any]]:
+    """
+    A player's game log spanning the PRIOR season plus the CURRENT
+    season to date, in chronological order -- the rolling window the
+    baseline actually needs, instead of a prior season pinned forever.
+
+    The prior season's Week 18 is dropped (see _PRIOR_SEASON_DROP_WEEK).
+    The current season's file may simply not exist yet (nflverse
+    publishes it once real games are played) -- that's the normal
+    pre-season case, not an error, and it degrades to prior-season-only.
+    """
+    prior = await nfl.get_player_game_log(nflverse_id, current_season - 1)
+    prior = [g for g in prior if g.get("week") != _PRIOR_SEASON_DROP_WEEK]
+    try:
+        current = await nfl.get_player_game_log(nflverse_id, current_season)
+    except Exception:
+        current = []
+    return prior + current
 
 
 async def baseline_dk_points(
@@ -117,7 +172,7 @@ async def baseline_dk_points(
 
     own: list[float] = []
     if nflverse_id:
-        game_log = await nfl.get_player_game_log(nflverse_id, season)
+        game_log = await rolling_game_log(nflverse_id, season)
         own = nfl_variance.own_games(game_log)
         nfl_variance.contribute_to_position_pool(pos, season, own)
 
@@ -126,10 +181,12 @@ async def baseline_dk_points(
     if not own:
         return round(prior, 2) if prior is not None else 0.0
 
-    season_avg = sum(own) / len(own)
-    recent_avg = sum(own[-_RECENT_GAMES:]) / len(own[-_RECENT_GAMES:])
-    blended = (1 - _RECENT_WEIGHT) * season_avg + _RECENT_WEIGHT * recent_avg
+    blended = _decayed_mean(own)
 
+    # Trust from the RAW game count (how much evidence exists), decay
+    # only shapes the estimate itself -- otherwise a full prior season
+    # would count as "half a season" of trust purely because its games
+    # are older.
     trust = min(1.0, len(own) / nfl_variance.MIN_GAMES_FULL_TRUST[pos])
     if prior is None:
         return round(blended, 2)
@@ -148,7 +205,12 @@ async def dst_baseline_dk_points(team: str, season: int) -> float:
     bias that makes the skill-position pool's mean a bad prior. Its mean
     really is the average team-defense game.
     """
-    game_log = await nfl.get_team_game_log(team, season)
+    game_log = await nfl.get_team_game_log(team, season - 1)
+    game_log = [g for g in game_log if g.get("week") != _PRIOR_SEASON_DROP_WEEK]
+    try:
+        game_log += await nfl.get_team_game_log(team, season)
+    except Exception:
+        pass  # current season not published yet -- the normal pre-season case
     own = [nfl_dk_points.dst_game_points(g) for g in game_log]
     nfl_variance.contribute_to_dst_pool(season, own)
 
@@ -158,9 +220,7 @@ async def dst_baseline_dk_points(team: str, season: int) -> float:
     if not own:
         return round(prior, 2) if prior is not None else 0.0
 
-    season_avg = sum(own) / len(own)
-    recent_avg = sum(own[-_RECENT_GAMES:]) / len(own[-_RECENT_GAMES:])
-    blended = (1 - _RECENT_WEIGHT) * season_avg + _RECENT_WEIGHT * recent_avg
+    blended = _decayed_mean(own)
 
     trust = min(1.0, len(own) / nfl_variance.MIN_GAMES_FULL_TRUST["DST"])
     if prior is None:
