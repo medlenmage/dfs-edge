@@ -89,6 +89,8 @@ export function StackTable({ slate }) {
         // single implied_runs field (pre-FantasyLabs slates/tests)
         // when the open/current split isn't available.
         impliedRuns: t.vegas_implied_runs_open ?? t.implied_runs,
+        boomPct: t.stack_boom_pct ?? null,
+        bustPct: t.stack_bust_pct ?? null,
         liveImpliedRuns: t.vegas_implied_runs_current ?? t.implied_runs,
         avgXwoba: avgOf(t.hitters || [], 'xwoba'),
         avgBarrel: avgOf(t.hitters || [], 'barrel_pct'),
@@ -175,6 +177,18 @@ export function StackTable({ slate }) {
             <th className="num" title="Today's live implied run total, from FantasyLabs -- updates as the line moves">
               Live
             </th>
+            <th
+              className="num"
+              title="Chance this team's top-5 stack combines for 1.5x or more of its combined projection -- a real correlated Monte Carlo over the five bats' own game-by-game outcome pools, teammates sharing each trial's team environment exactly as the full simulator correlates them. Needs in-house projections loaded."
+            >
+              Boom%
+            </th>
+            <th
+              className="num"
+              title="Chance this team's top-5 stack combines for HALF its combined projection or less -- the offense-got-shut-down night that kills every lineup built on it. Same correlated Monte Carlo as Boom%. Needs in-house projections loaded."
+            >
+              Bust%
+            </th>
             <th className="num">Contact quality</th>
             <th>Opposing starter</th>
             <th>Park / conditions</th>
@@ -217,6 +231,20 @@ export function StackTable({ slate }) {
                       <> {r.liveImpliedRuns > r.impliedRuns ? '▲' : '▼'}</>
                     )}
                   </span>
+                ) : (
+                  '—'
+                )}
+              </td>
+              <td className="num">
+                {r.boomPct != null ? (
+                  <span className={`badge ${r.boomPct >= 28 ? 'ok' : ''}`}>{r.boomPct}%</span>
+                ) : (
+                  '—'
+                )}
+              </td>
+              <td className="num">
+                {r.bustPct != null ? (
+                  <span className={`badge ${r.bustPct >= 38 ? 'risk' : ''}`}>{r.bustPct}%</span>
                 ) : (
                   '—'
                 )}

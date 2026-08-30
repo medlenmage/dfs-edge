@@ -21,6 +21,8 @@ const COLUMNS = [
   { key: 'inhouseFpts', label: 'In-house FPTS', sortable: true, num: true },
   { key: 'inhouseOwnershipPct', label: 'In-house Own%', sortable: true, num: true },
   { key: 'leverage', label: 'Leverage', sortable: true, num: true },
+  { key: 'boomPct', label: 'Boom%', sortable: true, num: true },
+  { key: 'bustPct', label: 'Bust%', sortable: true, num: true },
   { key: 'why', label: 'Biggest factor', sortable: false },
 ]
 
@@ -154,6 +156,10 @@ export function HitterTable({ slate, positions, limit = 50 }) {
             inhouseFpts: h.projection?.inhouse_fpts ?? null,
             inhouseOwnershipPct: h.projection?.inhouse_ownership_pct ?? null,
             leverage: h.projection?.leverage_score ?? null,
+            boomPct: h.projection?.boom_pct ?? null,
+            boom175Pct: h.projection?.boom_175x_pct ?? null,
+            boom2xPct: h.projection?.boom_2x_pct ?? null,
+            bustPct: h.projection?.bust_pct ?? null,
             confirmed: team.lineup_confirmed,
             platoonDetail: h.edge.components.platoon.detail,
           })
@@ -373,6 +379,30 @@ export function HitterTable({ slate, positions, limit = 50 }) {
                       {r.leverage >= 0 ? '+' : ''}
                       {r.leverage.toFixed(1)}
                     </span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td
+                  className="num"
+                  title={
+                    r.boomPct != null
+                      ? `How often his real games cleared a multiple of today's projection: 1.5x ${r.boomPct}%, 1.75x ${r.boom175Pct}%, 2x ${r.boom2xPct}%.`
+                      : undefined
+                  }
+                >
+                  {r.boomPct != null ? (
+                    <span className={`badge ${r.boomPct >= 20 ? 'ok' : ''}`}>{r.boomPct}%</span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td
+                  className="num"
+                  title={r.bustPct != null ? 'How often his real games were a zero -- the 0-for-4 with nothing night.' : undefined}
+                >
+                  {r.bustPct != null ? (
+                    <span className={`badge ${r.bustPct >= 25 ? 'risk' : ''}`}>{r.bustPct}%</span>
                   ) : (
                     '—'
                   )}
