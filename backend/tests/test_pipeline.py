@@ -760,6 +760,39 @@ async def main() -> int:
     mlb.get_people = original_get_people_2
     mlb.get_team_injuries = original_get_injuries_projstarter
 
+    print("\nRotoWire window auto-match (pick_best_team_match)")
+
+    # The real reported bug: the user had DK's LATE NIGHT slate loaded
+    # (ARI/ATH/BAL/LAA/PHI/SF), clicked Refresh from RotoWire, and got
+    # the "All" window activated -- which doesn't even contain the
+    # late-night-only games, so their slate's projections never loaded.
+    _late = {"AZ", "ATH", "BAL", "LAA", "PHI", "SF"}
+    _windows = {
+        "All": {"NYY", "BOS", "DET", "LAD", "MIN", "CWS", "STL", "PIT", "CHC", "CIN",
+                "TOR", "SEA", "WSH", "MIA", "CLE", "KC", "NYM", "HOU", "TB",
+                "SD", "ATL", "COL", "MIL"},
+        "Night": _late | {"TEX", "MIN"},
+        "Late Night": set(_late),
+    }
+    check("with a Late Night DK slate loaded, the Late Night window wins the auto-match -- "
+          "the exact reported bug this exists to prevent",
+          salaries.pick_best_team_match(_windows, _late) == "Late Night", "")
+    check("full coverage with FEWER extra teams beats full coverage with more -- 'Night' "
+          "contains every late game plus two others, but the exact window's projections are "
+          "the ones that belong to this slate",
+          salaries.pick_best_team_match(
+              {"Night": _windows["Night"], "Late Night": _windows["Late Night"]}, _late)
+          == "Late Night", "")
+    check("a main-slate DK upload auto-matches the All window, so the old default flow is "
+          "unchanged for the common case",
+          salaries.pick_best_team_match(_windows, {"NYY", "BOS", "DET", "LAD"}) == "All", "")
+    check("nothing covering even half the DK slate returns None -- the caller falls back to "
+          "the main window rather than activating projections that mostly miss the games",
+          salaries.pick_best_team_match(
+              {"All": {"NYY", "BOS"}}, {"AZ", "SF", "PHI", "LAA", "BAL", "ATH"}) is None, "")
+    check("no DK slate loaded at all returns None (nothing to match against)",
+          salaries.pick_best_team_match(_windows, set()) is None, "")
+
     print("\nDK slate detection (Game Info column -> which games are in this slate)")
     check("parse_game_info extracts the away@home pair, ignoring date/time",
           salaries.parse_game_info("NYY@BOS 08/16/2026 07:05PM ET") == ("NYY", "BOS"))

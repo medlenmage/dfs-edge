@@ -39,6 +39,7 @@ __all__ = [
     "normalize_name",
     "parse_dk_csv",
     "parse_game_info",
+    "pick_best_team_match",
     "slate_games",
     "store",
     "load",
@@ -205,6 +206,39 @@ def slate_games(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
         away, home = normalize_team(parsed[0]), normalize_team(parsed[1])
         seen.setdefault(frozenset((away, home)), {"away": away, "home": home})
     return list(seen.values())
+
+
+def pick_best_team_match(
+    candidates: dict[str, set[str]], target_teams: set[str]
+) -> str | None:
+    """
+    Which candidate window's team set best matches `target_teams` (the
+    teams in the loaded DK salary slate) -- the pure matcher behind the
+    RotoWire refresh's slate auto-selection.
+
+    Scored by coverage (what fraction of the DK slate's teams the
+    window actually has projections for), tiebroken by FEWEST extra
+    teams -- a "Night" window can fully contain the late-night games
+    plus two earlier ones, and the window that matches the DK slate
+    exactly is the one whose projections belong to it. Returns None
+    when nothing covers even half the DK slate, so the caller can fall
+    back to the main window rather than activating projections that
+    mostly miss the user's actual games.
+    """
+    if not target_teams:
+        return None
+    best_name: str | None = None
+    best_key: tuple[float, int] | None = None
+    for name, teams in candidates.items():
+        coverage = len(teams & target_teams) / len(target_teams)
+        extra = len(teams - target_teams)
+        key = (coverage, -extra)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_name = name
+    if best_key is None or best_key[0] < 0.5:
+        return None
+    return best_name
 
 
 def store(day: str, rows: list[dict[str, Any]]) -> None:
