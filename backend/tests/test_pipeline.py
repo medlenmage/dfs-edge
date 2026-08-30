@@ -7439,6 +7439,92 @@ async def main() -> int:
     except Exception as exc:  # noqa: BLE001
         check("slate serialises to JSON", False, str(exc))
 
+    print("\nAnalysis billing provider (subscription via Claude Code CLI vs API key)")
+    from app.config import get_settings
+    from app.services import analysis as analysis_mod
+
+    _settings = get_settings()
+    _saved = (_settings.analysis_provider, _settings.claude_code_bin, _settings.anthropic_api_key)
+
+    def _reset_provider(provider, bin_path, api_key):
+        _settings.analysis_provider = provider
+        _settings.claude_code_bin = bin_path
+        _settings.anthropic_api_key = api_key
+        analysis_mod.find_claude_code.cache_clear()
+
+    _fake_cli = __file__  # any real existing file stands in for claude.exe
+    try:
+        _reset_provider("auto", _fake_cli, "sk-test")
+        check("auto prefers the subscription-billed Claude Code CLI even when an API key is "
+              "also configured -- paying API dollars on top of a subscription is paying twice",
+              analysis_mod._resolve_provider() == "claude-code", str(analysis_mod._resolve_provider()))
+
+        _reset_provider("auto", "", "sk-test")
+        # No CLI on this test path unless one is genuinely installed; force
+        # the not-found case by pointing at a nonexistent explicit binary.
+        _reset_provider("auto", r"Z:\nope\claude.exe", "sk-test")
+        check("auto falls back to the API key when no CLI is found",
+              analysis_mod._resolve_provider() == "api", str(analysis_mod._resolve_provider()))
+
+        _reset_provider("api", _fake_cli, "sk-test")
+        check("ANALYSIS_PROVIDER=api forces API billing even with a CLI installed",
+              analysis_mod._resolve_provider() == "api", "")
+
+        _reset_provider("api", _fake_cli, "")
+        check("...and yields no provider at all when forced to api with no key",
+              analysis_mod._resolve_provider() is None, "")
+
+        _reset_provider("claude-code", r"Z:\nope\claude.exe", "sk-test")
+        check("ANALYSIS_PROVIDER=claude-code with no CLI yields no provider rather than "
+              "silently spending API dollars the user opted out of",
+              analysis_mod._resolve_provider() is None, "")
+
+        # The critical safety property: the child environment must not
+        # carry the API key, or the CLI would prefer it over the stored
+        # subscription login and silently route back onto API billing.
+        import subprocess as _sp
+        _captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            _captured["env"] = kwargs.get("env")
+            _captured["cmd"] = cmd
+            class R:
+                returncode = 0
+                stdout = json.dumps({
+                    "is_error": False, "result": "ok",
+                    "usage": {"input_tokens": 5, "cache_read_input_tokens": 10,
+                              "cache_creation_input_tokens": 0, "output_tokens": 3},
+                })
+                stderr = ""
+            return R()
+
+        _orig_run = _sp.run
+        _os_mod = analysis_mod.os
+        _orig_environ = _os_mod.environ
+        try:
+            _sp.run = _fake_run
+            analysis_mod.subprocess.run = _fake_run
+            _os_mod.environ = {**_orig_environ, "ANTHROPIC_API_KEY": "sk-leak", "ANTHROPIC_AUTH_TOKEN": "tok-leak"}
+            _result = analysis_mod._run_claude_code(_fake_cli, "prompt", "system", "claude-sonnet-5")
+        finally:
+            _sp.run = _orig_run
+            analysis_mod.subprocess.run = _orig_run
+            _os_mod.environ = _orig_environ
+
+        check("the CLI subprocess env carries NEITHER the API key nor an auth token -- either "
+              "would silently route the run back onto API billing",
+              "ANTHROPIC_API_KEY" not in _captured["env"] and "ANTHROPIC_AUTH_TOKEN" not in _captured["env"], "")
+        check("the CLI is invoked headless with tools disabled and a single turn -- a pure "
+              "completion, not an agent",
+              "-p" in _captured["cmd"] and "--disallowedTools" in _captured["cmd"]
+              and "--max-turns" in _captured["cmd"], str(_captured["cmd"]))
+        check("a subscription-billed run reports zero marginal dollar cost and total input "
+              "tokens including cache reads",
+              _result["estimated_cost_usd"] == 0.0 and _result["billing"] == "subscription"
+              and _result["input_tokens"] == 15 and _result["output_tokens"] == 3, str(_result))
+    finally:
+        _reset_provider(*_saved)
+
     print("\nAnalysis payload")
     from app.services.analysis import _compact_slate
 

@@ -53,6 +53,20 @@ class Settings:
         self.anthropic_model: str = (
             os.getenv("ANTHROPIC_MODEL", "").strip() or "claude-sonnet-5"
         )
+        # Which billing path AI analysis runs on. "claude-code" runs the
+        # locally installed Claude Code CLI headless (claude -p), so the
+        # tokens draw on the user's own Claude SUBSCRIPTION -- the right
+        # default for this single-user, runs-on-your-own-machine app,
+        # where paying API dollars on top of a subscription is just
+        # paying twice. "api" calls the Anthropic API directly with
+        # ANTHROPIC_API_KEY (usage-billed). "auto" (default) prefers the
+        # CLI whenever one is installed and falls back to the API key.
+        self.analysis_provider: str = (
+            os.getenv("ANALYSIS_PROVIDER", "").strip().lower() or "auto"
+        )
+        # Explicit path to the Claude Code executable; when unset,
+        # services/analysis.py discovers the desktop app's bundled CLI.
+        self.claude_code_bin: str = os.getenv("CLAUDE_CODE_BIN", "").strip()
 
         # --- The Odds API ---
         self.odds_api_key: str = os.getenv("ODDS_API_KEY", "").strip()
@@ -113,7 +127,14 @@ class Settings:
     # --- Convenience flags used by the UI to grey out panels ---
     @property
     def has_claude(self) -> bool:
-        return bool(self.anthropic_api_key)
+        # Either billing path makes analysis available: an API key, or a
+        # locally installed Claude Code CLI running on the user's own
+        # subscription (services/analysis.py's find_claude_code()).
+        if self.anthropic_api_key:
+            return True
+        from app.services.analysis import find_claude_code
+
+        return self.analysis_provider != "api" and find_claude_code() is not None
 
     @property
     def has_odds(self) -> bool:

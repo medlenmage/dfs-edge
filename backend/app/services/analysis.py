@@ -27,8 +27,14 @@ window.
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import glob
 import json
 import logging
+import os
+import shutil
+import subprocess
 from typing import Any
 
 from app.cache import cached
@@ -202,21 +208,165 @@ def _compact_slate(slate: dict[str, Any], top_n: int = 9) -> dict[str, Any]:
     return {"date": slate.get("date"), "games": games}
 
 
+# ---------------------------------------------------------------------------
+# Billing path: Claude subscription (Claude Code CLI) vs API key
+# ---------------------------------------------------------------------------
+#
+# This is a single-user app running on its owner's own machine, and its
+# owner already pays for a Claude subscription. Direct Anthropic API
+# calls are always usage-billed on top of that -- a subscription cannot
+# pay for them -- but the locally installed Claude Code CLI runs
+# headless (`claude -p`) on the SAME login/subscription its interactive
+# sessions use. So when a CLI is installed, analysis runs through it and
+# the tokens draw on the subscription's own usage allowance instead of
+# an API bill; the API-key path stays as the fallback and can be forced
+# with ANALYSIS_PROVIDER=api. That trade is only appropriate because
+# this is personal, local, single-user use -- anything hosted or
+# multi-user belongs on API billing.
+
+
+@functools.lru_cache(maxsize=1)
+def find_claude_code() -> str | None:
+    """
+    Locate a Claude Code executable: CLAUDE_CODE_BIN if set, a `claude`
+    on PATH, else the Claude desktop app's bundled runtime (it keeps
+    versioned installs under %APPDATA%/Claude/claude-code/<version>/ --
+    newest version wins). Cached: the answer can't change within one
+    backend process, and has_claude asks on every /api/health.
+    """
+    settings = get_settings()
+    if settings.claude_code_bin:
+        return settings.claude_code_bin if os.path.isfile(settings.claude_code_bin) else None
+    on_path = shutil.which("claude")
+    if on_path:
+        return on_path
+    appdata = os.getenv("APPDATA", "")
+    if appdata:
+        candidates = glob.glob(os.path.join(appdata, "Claude", "claude-code", "*", "claude.exe"))
+        if candidates:
+            # Version-shaped dirs ("2.1.247") sort correctly as int tuples.
+            def _ver(path: str) -> tuple[int, ...]:
+                name = os.path.basename(os.path.dirname(path))
+                try:
+                    return tuple(int(x) for x in name.split("."))
+                except ValueError:
+                    return (0,)
+
+            return max(candidates, key=_ver)
+    return None
+
+
+def _resolve_provider() -> str | None:
+    """"claude-code", "api", or None when neither path is available."""
+    settings = get_settings()
+    if settings.analysis_provider == "api":
+        return "api" if settings.anthropic_api_key else None
+    if settings.analysis_provider == "claude-code":
+        return "claude-code" if find_claude_code() else None
+    # auto: prefer the subscription-billed CLI, fall back to the API key.
+    if find_claude_code():
+        return "claude-code"
+    return "api" if settings.anthropic_api_key else None
+
+
+def _run_claude_code(binary: str, prompt: str, system_prompt: str, model: str) -> dict[str, Any]:
+    """
+    One headless Claude Code run, blocking (callers wrap in a thread).
+
+    The prompt goes over STDIN -- a slate is 60-120KB of JSON, far past
+    Windows' ~32K command-line limit. --disallowedTools strips the
+    harness's file/bash/web tools so this behaves like the pure
+    completion the API path makes: the model reads the data it was
+    given and writes, nothing else.
+
+    ANTHROPIC_API_KEY is stripped from the child environment on
+    purpose -- the CLI prefers an env API key over the stored login
+    when both exist, which would silently route this back onto API
+    billing, the exact thing this path exists to avoid.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    proc = subprocess.run(
+        [
+            binary,
+            "-p",
+            "--output-format", "json",
+            "--model", model,
+            "--system-prompt", system_prompt,
+            "--disallowedTools", "*",
+            "--max-turns", "1",
+        ],
+        input=prompt,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=600,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"claude -p exited {proc.returncode}: {(proc.stderr or proc.stdout or '').strip()[:500]}"
+        )
+    payload = json.loads(proc.stdout)
+    if payload.get("is_error"):
+        raise RuntimeError(f"claude -p reported an error: {str(payload.get('result'))[:500]}")
+    usage = payload.get("usage") or {}
+    return {
+        "text": payload.get("result") or "",
+        "model": model,
+        "provider": "claude-code",
+        "input_tokens": (usage.get("input_tokens") or 0)
+        + (usage.get("cache_read_input_tokens") or 0)
+        + (usage.get("cache_creation_input_tokens") or 0),
+        "output_tokens": usage.get("output_tokens") or 0,
+        # Covered by the subscription -- the CLI's own total_cost_usd is
+        # the list-price equivalent, informational only, so the real
+        # marginal dollar cost of this run is zero.
+        "estimated_cost_usd": 0.0,
+        "billing": "subscription",
+    }
+
+
+async def _call_claude_code(prompt: str, *, max_tokens_hint: int) -> dict[str, Any]:
+    """Async wrapper: run the CLI in a worker thread (safe on Windows
+    regardless of the event-loop flavor uvicorn picked)."""
+    settings = get_settings()
+    binary = find_claude_code()
+    if not binary:
+        raise RuntimeError("No Claude Code CLI found.")
+    return await asyncio.to_thread(
+        _run_claude_code, binary, prompt, SYSTEM_PROMPT, settings.anthropic_model
+    )
+
+
 async def analyse_slate(
     slate: dict[str, Any], *, force: bool = False, question: str | None = None
 ) -> dict[str, Any]:
     """Run the slate past Claude and return the written analysis."""
-    settings = get_settings()
-    if not settings.has_claude:
+    provider = _resolve_provider()
+    if provider is None:
         return {
             "available": False,
-            "reason": "No ANTHROPIC_API_KEY set. Add one to .env to enable AI analysis.",
+            "reason": (
+                "No Claude access configured. Either install/log in to Claude Code "
+                "(analysis then runs on your subscription) or set ANTHROPIC_API_KEY in .env."
+            ),
         }
 
     compact = _compact_slate(slate)
     cache_key = f"analysis:mlb:{slate.get('date')}:{hash(question or '') & 0xFFFF}"
 
     async def _load() -> Any:
+        if provider == "claude-code":
+            prompt = USER_TEMPLATE.format(
+                date=compact.get("date"),
+                data=json.dumps(compact, indent=1, default=str),
+            )
+            if question:
+                prompt += (
+                    f"\n\nThe user also asked specifically: {question}\n"
+                    "Answer that directly at the top, then give the full analysis."
+                )
+            return await _call_claude_code(prompt, max_tokens_hint=4000)
         return await _call_claude(compact, question)
 
     try:
@@ -259,6 +409,7 @@ async def _call_claude(compact: dict[str, Any], question: str | None) -> dict[st
     return {
         "text": text,
         "model": settings.anthropic_model,
+        "provider": "api",
         "input_tokens": message.usage.input_tokens,
         "output_tokens": message.usage.output_tokens,
         "estimated_cost_usd": round(
@@ -272,12 +423,21 @@ async def _call_claude(compact: dict[str, Any], question: str | None) -> dict[st
 async def ask_about_slate(slate: dict[str, Any], question: str) -> dict[str, Any]:
     """Free-form follow-up question about the current slate."""
     settings = get_settings()
-    if not settings.has_claude:
-        return {"available": False, "reason": "No ANTHROPIC_API_KEY set."}
+    provider = _resolve_provider()
+    if provider is None:
+        return {"available": False, "reason": "No Claude access configured (Claude Code login or ANTHROPIC_API_KEY)."}
 
     compact = _compact_slate(slate, top_n=12)
 
     async def _load() -> Any:
+        if provider == "claude-code":
+            prompt = (
+                f"Today's slate data:\n{json.dumps(compact, indent=1, default=str)}"
+                f"\n\nQuestion: {question}\n\n"
+                "Answer using only the data above. Be direct and brief."
+            )
+            return await _call_claude_code(prompt, max_tokens_hint=2000)
+
         from anthropic import AsyncAnthropic
 
         client = AsyncAnthropic(api_key=settings.anthropic_api_key)
@@ -300,7 +460,7 @@ async def ask_about_slate(slate: dict[str, Any], question: str) -> dict[str, Any
         text = "".join(
             b.text for b in message.content if getattr(b, "type", "") == "text"
         )
-        return {"text": text, "model": settings.anthropic_model}
+        return {"text": text, "model": settings.anthropic_model, "provider": "api"}
 
     key = f"analysis:ask:{slate.get('date')}:{abs(hash(question)) & 0xFFFFFF}"
     try:
