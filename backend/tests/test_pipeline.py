@@ -4915,6 +4915,38 @@ async def main() -> int:
     cash_pcts = [r["cash_probability_pct"] for r in sim_batch["results"]]
     check("every entry's simulated cash probability is a valid percentage",
           all(0.0 <= c <= 100.0 for c in cash_pcts), str(cash_pcts))
+
+    check("every simulated result carries a non-negative Monte Carlo standard error for its "
+          "ROI -- the number that tells noise apart from signal in a top-heavy payout",
+          all(r.get("roi_se_pct") is not None and r["roi_se_pct"] >= 0 for r in sim_batch["results"]),
+          str([r.get("roi_se_pct") for r in sim_batch["results"][:5]]))
+
+    check("results come back ranked by top-1% rate (ROI as tiebreak), not raw ROI -- per-lineup "
+          "ROI is dominated by rare first-place hits, so ranking by it ranks luck",
+          all(
+              (a["top_1pct_pct"], a["roi_pct"]) >= (b["top_1pct_pct"], b["roi_pct"])
+              for a, b in zip(sim_batch["results"], sim_batch["results"][1:])
+          ),
+          str([(r["top_1pct_pct"], r["roi_pct"]) for r in sim_batch["results"]]))
+
+    # Determinism: the same seed must reproduce the identical batch --
+    # entries, field AND sim draws -- while a different seed must not.
+    sim_batch_again = await contest.build_contest_entries_simulated(
+        mul_slate, "gpp_small", 10, season=2099, num_trials=300, sample_size=40, seed=31
+    )
+    check("the same seed reproduces the identical batch, bit for bit -- same entries in the "
+          "same order with the same simulated numbers, so the table doesn't reshuffle when "
+          "nothing changed",
+          [frozenset(p["id"] for p in e["players"]) for e in sim_batch["entries"]]
+          == [frozenset(p["id"] for p in e["players"]) for e in sim_batch_again["entries"]]
+          and [r["roi_pct"] for r in sim_batch["results"]]
+          == [r["roi_pct"] for r in sim_batch_again["results"]], "")
+    sim_batch_other = await contest.build_contest_entries_simulated(
+        mul_slate, "gpp_small", 10, season=2099, num_trials=300, sample_size=40, seed=32
+    )
+    check("a different seed produces a genuinely different draw (not a no-op parameter)",
+          [r["roi_pct"] for r in sim_batch["results"]]
+          != [r["roi_pct"] for r in sim_batch_other["results"]], "")
     # Payout is zero-inflated (most trials don't cash) with rare large
     # spikes when they do, so its mean can legitimately sit above the
     # 90th percentile -- p10 <= p90 (percentiles are self-consistent)
@@ -5254,9 +5286,11 @@ async def main() -> int:
           "(no cap tight enough here to prevent filling it)",
           real_reshape["num_kept"] == 5, str(real_reshape["num_kept"]))
 
-    sim_roi_order = [r["roi_pct"] for r in sim_batch["results"]]
-    check("build_contest_entries_simulated returns results sorted by roi_pct, highest first",
-          sim_roi_order == sorted(sim_roi_order, reverse=True), str(sim_roi_order))
+    sim_sort_keys = [(r["top_1pct_pct"], r["roi_pct"]) for r in sim_batch["results"]]
+    check("build_contest_entries_simulated ranks results by top-1% rate (ROI as tiebreak) -- "
+          "per-lineup ROI is dominated by rare first-place hits, so raw-ROI ordering ranks "
+          "this run's luck rather than the build's real spike potential",
+          sim_sort_keys == sorted(sim_sort_keys, reverse=True), str(sim_sort_keys))
     check("build_contest_entries_simulated's entries/results stay index-aligned after sorting "
           "(each result's lineup_index matches its position)",
           [r["lineup_index"] for r in sim_batch["results"]] == list(range(len(sim_batch["results"]))),
@@ -5400,8 +5434,9 @@ async def main() -> int:
           sim_entries_self_play["sample_size"] == sim_entries_self_play["num_entries_built"],
           str((sim_entries_self_play["sample_size"], sim_entries_self_play["num_entries_built"])))
     self_play_roi_order = [r["roi_pct"] for r in sim_entries_self_play["results"]]
-    check("build_contest_entries_simulated(self_play=True) still sorts results by roi_pct, highest first",
-          self_play_roi_order == sorted(self_play_roi_order, reverse=True), str(self_play_roi_order))
+    self_play_keys = [(r["top_1pct_pct"], r["roi_pct"]) for r in sim_entries_self_play["results"]]
+    check("build_contest_entries_simulated(self_play=True) still ranks by top-1% then ROI",
+          self_play_keys == sorted(self_play_keys, reverse=True), str(self_play_keys))
     check("build_contest_entries_simulated(self_play=True)'s cash probabilities are all valid percentages",
           all(0.0 <= r["cash_probability_pct"] <= 100.0 for r in sim_entries_self_play["results"]),
           str([r["cash_probability_pct"] for r in sim_entries_self_play["results"]]))

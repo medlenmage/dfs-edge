@@ -210,6 +210,7 @@ export const api = {
       allowDuplicates = false,
       maxDuplicationRisk = null,
       fieldSharpness = 'marquee',
+      reroll = 0,
     } = {},
   ) =>
     request('/api/mlb/contest-entries', {
@@ -228,6 +229,7 @@ export const api = {
         allow_duplicates: allowDuplicates,
         max_duplication_risk: maxDuplicationRisk,
         field_sharpness: fieldSharpness,
+        reroll,
       }),
     }),
 
@@ -324,6 +326,7 @@ export const api = {
       engine = 'bootstrap',
       fieldSharpness = 'marquee',
       firstPlacePct = null,
+      reroll = 0,
     } = {},
   ) =>
     request('/api/mlb/contest-entries-simulated', {
@@ -345,6 +348,7 @@ export const api = {
         engine,
         field_sharpness: fieldSharpness,
         first_place_pct: firstPlacePct,
+        reroll,
       }),
     }),
 

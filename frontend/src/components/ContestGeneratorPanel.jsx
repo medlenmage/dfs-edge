@@ -60,6 +60,10 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
   const [globalMaxExposure, setGlobalMaxExposure] = useState('')
   const [reshaping, setReshaping] = useState(false)
   const [swapping, setSwapping] = useState(false)
+  // Bumped by the Re-roll button. At 0, identical settings reproduce the
+  // identical batch (the backend derives a deterministic seed from them),
+  // so the table doesn't reshuffle on every click for no reason.
+  const [reroll, setReroll] = useState(0)
   const [swapMode, setSwapMode] = useState('repair')
   const [swapResult, setSwapResult] = useState(null)
 
@@ -174,10 +178,11 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
     })
   }
 
-  async function run() {
+  async function run(rerollOverride = null) {
     setState({ status: 'loading' })
     try {
       const opts = {
+        reroll: rerollOverride ?? reroll,
         projectionSource,
         fieldSize: fieldSizeOverride.trim() ? Number(fieldSizeOverride) : null,
         maxExposurePct: maxExposure.trim() ? Number(maxExposure) : null,
@@ -547,13 +552,26 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
             At-bat-level engine (beta)
           </label>
         )}
-        <button className="primary" onClick={run} disabled={state.status === 'loading'}>
+        <button className="primary" onClick={() => run()} disabled={state.status === 'loading'}>
           {state.status === 'loading'
             ? simulate
               ? 'Simulating…'
               : 'Building…'
             : `${simulate ? 'Simulate' : 'Build'} ${numLineups.toLocaleString()} entries`}
         </button>
+        {state.status === 'ready' && state.mode === 'generate' && (
+          <button
+            onClick={() => {
+              const next = reroll + 1
+              setReroll(next)
+              run(next)
+            }}
+            disabled={state.status === 'loading'}
+            title="Identical settings always reproduce the identical batch (a deterministic seed), so results are stable click to click. Re-roll draws a genuinely new random batch, field, and simulation for the same settings."
+          >
+            Re-roll
+          </button>
+        )}
       </div>
       )}
 
@@ -1335,8 +1353,11 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                           Top 10%
                         </th>
                         <th className="num">Exp. payout</th>
-                        <th className="num" title="(expected payout - entry fee) / entry fee">
-                          ROI %
+                        <th
+                          className="num"
+                          title="(expected payout - entry fee) / entry fee, ± its Monte Carlo standard error. Top-heavy payouts make per-lineup ROI dominated by rare first-place hits, so a value smaller than its own ± is noise (greyed out) -- that's also why rows are ranked by Top 1% rather than ROI."
+                        >
+                          ROI % (±SE)
                         </th>
                       </>
                     ) : (
@@ -1382,9 +1403,27 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
                             <td className="num">
                               {r ? (
                                 <>
-                                  <span className={`badge ${r.roi_pct >= 0 ? 'ok' : 'risk'}`}>
+                                  {/* An ROI smaller than its own standard error is
+                                      indistinguishable from luck in this run's draws --
+                                      show it neutrally instead of coloring it as a real
+                                      win/loss signal. */}
+                                  <span
+                                    className={
+                                      r.roi_se_pct != null && Math.abs(r.roi_pct) < r.roi_se_pct
+                                        ? 'badge'
+                                        : `badge ${r.roi_pct >= 0 ? 'ok' : 'risk'}`
+                                    }
+                                    title={
+                                      r.roi_se_pct != null && Math.abs(r.roi_pct) < r.roi_se_pct
+                                        ? 'Smaller than its own simulation noise -- treat as ~0'
+                                        : undefined
+                                    }
+                                  >
                                     {r.roi_pct >= 0 ? '+' : ''}
                                     {r.roi_pct}%
+                                    {r.roi_se_pct != null && (
+                                      <span className="dim"> ±{r.roi_se_pct}</span>
+                                    )}
                                   </span>
                                   {r.adjusted_roi_pct != null && r.adjusted_roi_pct !== r.roi_pct && (
                                     <div
