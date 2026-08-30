@@ -8,6 +8,7 @@ import { GameGrid } from './components/GameCard'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { LineupsPanel } from './components/LineupsPanel'
 import { ContestGeneratorPanel } from './components/ContestGeneratorPanel'
+import { ContestSimulatorPanel } from './components/ContestSimulatorPanel'
 import { ResultsPanel } from './components/ResultsPanel'
 import { NflPanel } from './components/NflPanel'
 import { ScoreLegend } from './components/ScoreMeter'
@@ -20,6 +21,7 @@ const TABS = [
   { id: 'games', label: 'Games' },
   { id: 'lineups', label: 'Lineups' },
   { id: 'contest', label: 'Contest Generator' },
+  { id: 'simulator', label: 'Simulator' },
   { id: 'results', label: 'Results' },
   { id: 'ai', label: 'AI analysis' },
 ]
@@ -74,6 +76,11 @@ export default function App() {
   // in-house columns yet, since those two endpoints fetch their own
   // in-house-augmented slate server-side when asked.
   const [projSource, setProjSource] = useState('rotowire')
+  // The contest the generator last built, handed to the Simulator tab.
+  // Lives up here rather than inside either panel because it's the one
+  // thing the two of them share: the generator produces it, the
+  // simulator prices it, and neither owns the other.
+  const [contestBatch, setContestBatch] = useState(null)
   const [inhouseLoading, setInhouseLoading] = useState(false)
 
   const load = useCallback(
@@ -448,9 +455,34 @@ export default function App() {
         <section>
           <div className="section-head">
             <h2>Contest generator</h2>
-            <span className="hint">mass multi-entry — up to 10,000 of your own entries per contest</span>
+            <span className="hint">builds a whole contest — lineups only, economics live in the Simulator</span>
           </div>
-          <ContestGeneratorPanel date={date} slate={slate} projectionSource={projSource} />
+          <ContestGeneratorPanel
+            date={date}
+            slate={slate}
+            projectionSource={projSource}
+            onSimulate={(batch) => {
+              setContestBatch(batch)
+              setTab('simulator')
+            }}
+          />
+        </section>
+      )}
+
+      {slate && tab === 'simulator' && (
+        <section>
+          <div className="section-head">
+            <h2>Contest simulator</h2>
+            <span className="hint">
+              prices a contest the generator already built — entry cost and payout curve set here
+            </span>
+          </div>
+          <ContestSimulatorPanel
+            date={date}
+            batch={contestBatch}
+            projectionSource={projSource}
+            onOpenGenerator={() => setTab('contest')}
+          />
         </section>
       )}
 

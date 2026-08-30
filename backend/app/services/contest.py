@@ -105,6 +105,41 @@ MAX_HITTERS_PER_TEAM = 5
 _FPTS_SAMPLING_EXPONENT = 3.0
 _FPTS_FLOOR = 0.1
 
+# How hard a lineup in progress is steered toward SPENDING the cap.
+# The affordability check below has always guarded one direction only
+# (never overspend); nothing ever stopped a random walk drifting cheap,
+# so a real batch came back with entries thousands of dollars under the
+# cap -- money that buys real projected points. At each slot the pick's
+# sampling weight is multiplied by (salary / cheapest_affordable) raised
+# to this strength times a `pressure` term measuring how far behind the
+# cap's own pace the lineup already is (0 = on pace and no reshaping of
+# the weights at all, 1 = can only reach the cap by taking the most
+# expensive option everywhere). A lineup that has already paid up is
+# left alone; one that fell behind pulls itself back.
+#
+# Swept on a real slate against both salary AND projected points -- see
+# scripts/sweep_salary_pacing.py. Strength is a genuine free lunch here
+# rather than a trade-off, because spending the cap generally buys
+# better players: the sweep raised BOTH at once.
+# Swept over 2,000 real entries on a real slate (2026-08-30):
+#
+# strength   median salary   under $47k   avg proj pts   top player exposure
+#    0.0        48,800         24.4%          97.82             26%
+#    4.0        49,700          3.9%          99.95             40%
+#    6.0        49,800          2.1%         100.39             44%   <- chosen
+#    8.0        49,800          0.6%         100.75             50%
+#   10.0        49,900          0.5%         101.17             55%
+#
+# Salary and points climb together, so the real trade-off isn't between
+# them -- it's diversity. Weighting harder toward salary concentrates
+# the whole contest onto the same expensive players, which matters a
+# lot now that the batch IS the field rather than a handful of entries
+# in someone else's. 6.0 more than halves the under-cap tail versus
+# 4.0 while keeping the chalkiest player in a realistic low-40s share;
+# 8.0 buys another 1.5 points of tail for six points of concentration,
+# and by 10.0 distinct builds start dropping off too.
+_SALARY_PACING_STRENGTH = 6.0
+
 # Named GPP stack shapes every generated lineup is deliberately built
 # toward -- team-group sizes only, largest first. A trailing size-1
 # group (e.g. "5-2-1"'s final "1") isn't a real constraint -- a single
@@ -167,10 +202,17 @@ STACK_SHAPE_WEIGHTS: list[float] = [_STACK_SHAPE_DECAY**i for i in range(len(STA
 # double-ups) -- not scraped or hardcoded from any specific live
 # contest, which would go stale immediately and varies contest to
 # contest anyway.
+# `sizes` is the list of real contest sizes each preset actually comes
+# in, and it's the ONLY size control the generator exposes: the number
+# of lineups built and the contest's own field size are the same number
+# now, because the generator builds a CONTEST, not a handful of entries
+# to drop into someone else's. `field_size` is each preset's default
+# pick out of its own `sizes`.
 CONTEST_TYPES: dict[str, dict[str, Any]] = {
     "double_up": {
         "label": "Double-up / 50-50",
         "field_size": 100,
+        "sizes": [50, 100],
         "entry_fee": 10.0,
         "payout_pct": 0.45,
         "shape": "flat",
@@ -178,6 +220,7 @@ CONTEST_TYPES: dict[str, dict[str, Any]] = {
     "gpp_small": {
         "label": "Small-field GPP (3-max)",
         "field_size": 500,
+        "sizes": [100, 500, 999],
         "entry_fee": 10.0,
         "payout_pct": 0.20,
         "shape": "top_heavy",
@@ -186,6 +229,7 @@ CONTEST_TYPES: dict[str, dict[str, Any]] = {
     "gpp_mid": {
         "label": "Mid-field GPP (1K-5K)",
         "field_size": 3_000,
+        "sizes": [1_000, 2_000, 3_000, 4_000, 5_000],
         "entry_fee": 10.0,
         "payout_pct": 0.19,
         "shape": "top_heavy",
@@ -194,6 +238,7 @@ CONTEST_TYPES: dict[str, dict[str, Any]] = {
     "gpp_large": {
         "label": "Large-field GPP",
         "field_size": 10_000,
+        "sizes": [6_000, 7_000, 8_000, 9_000, 10_000],
         "entry_fee": 5.0,
         "payout_pct": 0.18,
         "shape": "top_heavy",
@@ -202,6 +247,7 @@ CONTEST_TYPES: dict[str, dict[str, Any]] = {
     "gpp_milly": {
         "label": "Massive-field GPP (millionaire-maker style)",
         "field_size": 100_000,
+        "sizes": [12_500, 15_000, 20_000, 25_000, 50_000, 100_000],
         "entry_fee": 20.0,
         "payout_pct": 0.15,
         "shape": "top_heavy",
@@ -617,16 +663,16 @@ def _sample_one_lineup(
                 if quality_eligible:
                     eligible = quality_eligible
 
-        min_cost_of_rest = sum(
-            min(
-                (
-                    p["salary"]
-                    for p in candidates_by_slot[s]
-                    if p["id"] not in used_ids and p["id"] not in excluded_ids
-                ),
-                default=0,
-            )
+        remaining_pool = {
+            s: [
+                p
+                for p in candidates_by_slot[s]
+                if p["id"] not in used_ids and p["id"] not in excluded_ids
+            ]
             for s in remaining_slots
+        }
+        min_cost_of_rest = sum(
+            min((p["salary"] for p in remaining_pool[s]), default=0) for s in remaining_slots
         )
         budget = SALARY_CAP - salary_so_far - min_cost_of_rest
         affordable = [p for p in eligible if p["salary"] <= budget]
@@ -634,6 +680,29 @@ def _sample_one_lineup(
             return None
 
         weights = [weight_fn(p) for p in affordable]
+        # Salary pacing -- see _SALARY_PACING_STRENGTH. `max_cost_of_rest`
+        # is the symmetric counterpart to min_cost_of_rest above: the most
+        # this lineup could still spend if it took the priciest option at
+        # every slot from here (this one included). `pressure` is how much
+        # of that remaining headroom the lineup MUST use to finish at the
+        # cap -- 0 when it's already on pace, 1 when only the most
+        # expensive path still gets there. Nothing is forbidden; expensive
+        # picks are just weighted up in proportion to how far behind the
+        # walk has fallen.
+        if _SALARY_PACING_STRENGTH:
+            max_cost_of_rest = max(
+                (p["salary"] for p in affordable), default=0
+            ) + sum(max((p["salary"] for p in remaining_pool[s]), default=0) for s in remaining_slots)
+            if max_cost_of_rest > 0:
+                pressure = (SALARY_CAP - salary_so_far) / max_cost_of_rest
+                pressure = max(0.0, min(1.0, pressure))
+                if pressure > 0:
+                    cheapest = min(p["salary"] for p in affordable) or 1
+                    exponent = _SALARY_PACING_STRENGTH * pressure
+                    weights = [
+                        w * (p["salary"] / cheapest) ** exponent
+                        for w, p in zip(weights, affordable)
+                    ]
         pick = rng.choices(affordable, weights=weights, k=1)[0]
 
         picks.append(pick)
@@ -2122,6 +2191,118 @@ def _build_entries_and_field(
     return contest, entries, field
 
 
+def build_contest_lineups(
+    slate: dict[str, Any],
+    contest_type: str,
+    contest_size: int,
+    *,
+    projection_source: str = "rotowire",
+    included_game_pks: list[int] | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """
+    Build a whole CONTEST -- and nothing else.
+
+    This is the generator half of the generator/simulator split: it
+    produces lineups and describes what it produced (salary, projected
+    points, ownership, stack shapes, exposure), with no opponent field,
+    no payout curve and no ROI. Those are the simulator's job, run
+    afterwards on a batch that already exists (`simulate_contest_batch`),
+    so the two questions -- "what does this contest look like?" and "how
+    would it pay?" -- stop being answered by one indivisible call.
+
+    `contest_size` is a single number doing the job the old
+    num_lineups/field_size pair used to split between them: it IS the
+    contest's field size, and it IS how many lineups get built. They
+    were never meaningfully independent once the generator's job became
+    building the contest rather than building a handful of entries to
+    drop into someone else's.
+
+    The one place the two numbers separate is at the very top end.
+    Building is capped at MAX_USER_LINEUPS, so a contest larger than
+    that gets a MAX_USER_LINEUPS-lineup build standing in for the full
+    field, with every economics number downstream still keyed off the
+    real `contest_size` -- the same "build a sample, project it onto the
+    real size" approach this module already uses everywhere. The
+    response says so explicitly (`num_entries_built` vs `field_size`)
+    rather than quietly pretending the whole field was enumerated.
+
+    No salary floor and no exposure cap: a floor makes whole stack
+    shapes infeasible and stalls a batch, and the honest way to spend
+    the cap is to steer the sampler toward it while it builds (see
+    _SALARY_PACING_STRENGTH), not to reject what it already produced.
+    Duplicates are always allowed, because a real contest field
+    genuinely contains them -- especially on a short slate, where the
+    distinct-lineup space runs out well before the entry count does.
+    """
+    if contest_type not in CONTEST_TYPES:
+        raise ContestError(
+            f"Unknown contest_type '{contest_type}'. Choose one of: {', '.join(CONTEST_TYPES)}."
+        )
+    if not (1 <= contest_size <= MAX_FIELD_SIZE):
+        raise ContestError(f"contest_size must be between 1 and {MAX_FIELD_SIZE:,}.")
+
+    contest = dict(CONTEST_TYPES[contest_type])
+    contest["field_size"] = contest_size
+    num_lineups = min(contest_size, MAX_USER_LINEUPS)
+
+    entries = generate_entries(
+        slate,
+        num_lineups,
+        projection_source=projection_source,
+        included_game_pks=included_game_pks,
+        min_salary=0,
+        max_salary=SALARY_CAP,
+        allow_duplicates=True,
+        seed=seed,
+    )
+
+    salaries = sorted(e["salary_used"] for e in entries)
+    points = [e["projected_points"] for e in entries]
+    shape_counts = Counter(e["stack_type"] or "none" for e in entries)
+    return {
+        "contest_type": contest_type,
+        "contest": contest,
+        "field_size": contest_size,
+        "num_entries_requested": num_lineups,
+        "num_entries_built": len(entries),
+        "num_distinct_entries": len(
+            {frozenset(pl["id"] for pl in e["players"]) for e in entries}
+        ),
+        "summary": {
+            "avg_salary_used": round(sum(salaries) / len(salaries)),
+            "median_salary_used": salaries[len(salaries) // 2],
+            "min_salary_used": salaries[0],
+            "max_salary_used": salaries[-1],
+            "avg_projected_points": round(sum(points) / len(points), 2),
+            "min_projected_points": min(points),
+            "max_projected_points": max(points),
+            "avg_total_ownership_pct": round(
+                sum(e["total_ownership_pct"] for e in entries) / len(entries), 1
+            ),
+            "avg_duplication_risk": round(
+                sum(e["duplication_risk"] for e in entries) / len(entries), 3
+            ),
+        },
+        # Which stack shapes the contest actually came out with, most
+        # common first -- the real check on "does this look like a
+        # contest" that no single average can answer.
+        "stack_shapes": [
+            {"shape": shape, "count": n, "pct": round(100 * n / len(entries), 1)}
+            for shape, n in shape_counts.most_common()
+        ],
+        "exposure": field_exposure(entries, top_n=20),
+        "entries": entries,
+        "note": (
+            "Lineups only -- no simulation has been run yet. Each is built by fast "
+            "randomized construction weighted toward projected points and toward "
+            "spending the salary cap, deliberately allowing the duplicates a real "
+            "contest field contains. Send the batch to the simulator for cash "
+            "probability, payouts and ROI."
+        ),
+    }
+
+
 def build_contest_entries(
     slate: dict[str, Any],
     contest_type: str,
@@ -2363,6 +2544,43 @@ async def build_contest_entries_simulated(
             included_game_pks=included_game_pks,
         )
 
+    return _rank_and_summarize_simulated(
+        entries,
+        evaluation,
+        contest,
+        field,
+        contest_type=contest_type,
+        num_requested=num_lineups,
+        self_play=self_play,
+        engine=engine,
+        field_sharpness=field_sharpness,
+        first_place_pct=first_place_pct,
+    )
+
+
+def _rank_and_summarize_simulated(
+    entries: list[dict[str, Any]],
+    evaluation: dict[str, Any],
+    contest: dict[str, Any],
+    field: list[dict[str, Any]],
+    *,
+    contest_type: str,
+    num_requested: int,
+    self_play: bool,
+    engine: str,
+    field_sharpness: str,
+    first_place_pct: float | None,
+) -> dict[str, Any]:
+    """
+    Shared tail of every simulated-contest path: sort the batch by how
+    well it actually simulated, then roll the per-lineup results up into
+    one batch summary.
+
+    Split out so build_contest_entries_simulated() (build and simulate in
+    one call) and simulate_contest_batch() (simulate a contest that was
+    already built, the generator/simulator hand-off) produce byte-for-byte
+    the same response shape rather than two summaries that drift apart.
+    """
     # Best entries first -- ranked by top-1% rate with ROI as the
     # tiebreak, NOT by raw ROI. In a top-heavy GPP, per-lineup ROI is
     # dominated by rare first-place hits (a play worth ~0.02% P(1st)
@@ -2401,7 +2619,7 @@ async def build_contest_entries_simulated(
     return {
         "contest_type": contest_type,
         "contest": contest,
-        "num_entries_requested": num_lineups,
+        "num_entries_requested": num_requested,
         "num_entries_built": len(entries),
         # How many of those are structurally unique builds -- the rest
         # are deliberate duplicates, the way a real small-slate contest
@@ -2473,6 +2691,113 @@ async def build_contest_entries_simulated(
             )
         ),
     }
+
+
+
+async def simulate_contest_batch(
+    entries: list[dict[str, Any]],
+    contest: dict[str, Any],
+    *,
+    season: int,
+    contest_type: str = "",
+    slate: dict[str, Any] | None = None,
+    num_trials: int = 10_000,
+    entry_fee: float | None = None,
+    first_place_pct: float | None = None,
+    engine: str = "bootstrap",
+    self_play: bool = True,
+    field: list[dict[str, Any]] | None = None,
+    field_sharpness: str = "marquee",
+    projection_source: str = "rotowire",
+    included_game_pks: list[int] | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """
+    Simulate a contest that has ALREADY been built -- the simulator half
+    of the generator/simulator split.
+
+    `entry_fee`, if given, replaces the contest preset's own. It's the
+    number that sets the prize pool (field_size x entry_fee, less rake),
+    so it's what actually determines every payout and therefore every
+    ROI in the result -- which is why it's a real input here rather than
+    a fixed property of the preset.
+
+    `self_play=True` (the default) ranks the batch against ITSELF: the
+    generator now builds the whole contest, so the batch IS the field
+    and there's no second population to invent. `self_play=False` falls
+    back to the older model -- rank the batch against a separately
+    sampled, ownership-weighted public field -- which is still the
+    honest comparison if what you want to know is how these lineups
+    would do against real public rosters rather than against each other.
+    That mode needs `slate` to sample the field from.
+
+    A batch bigger than MAX_SAMPLE_SIZE is simulated as a
+    MAX_SAMPLE_SIZE-lineup slice of itself, projected back onto the real
+    field size -- entries come out of the generator in build order (no
+    ranking applied yet), so a leading slice is an unbiased sample of
+    the batch rather than its best or worst end.
+    """
+    if not entries:
+        raise ContestError("Nothing to simulate -- build a contest first.")
+
+    contest = dict(contest)
+    if entry_fee is not None:
+        if entry_fee < 0:
+            raise ContestError("entry_fee can't be negative.")
+        contest["entry_fee"] = float(entry_fee)
+        # Any prize pool carried on the contest was derived from its own
+        # entry fee, so a new fee invalidates it -- drop it and let the
+        # evaluators recompute field_size x fee less rake.
+        contest.pop("prize_pool", None)
+
+    num_requested = len(entries)
+    simulated = entries[:MAX_SAMPLE_SIZE]
+
+    if self_play:
+        evaluation = await evaluate_field_mirrored(
+            simulated, contest, season=season, num_trials=num_trials, seed=seed,
+            first_place_pct=first_place_pct, engine=engine, slate=slate,
+            included_game_pks=included_game_pks,
+        )
+        field = []
+    else:
+        if not field:
+            if slate is None:
+                raise ContestError(
+                    "Ranking against a public field needs the slate to sample one from."
+                )
+            field = generate_field(
+                slate,
+                min(contest["field_size"], MAX_SAMPLE_SIZE),
+                projection_source=projection_source,
+                included_game_pks=included_game_pks,
+                seed=(seed + 1) if seed is not None else None,
+                field_sharpness=field_sharpness,
+            )
+        evaluation = await evaluate_batch_simulated(
+            simulated, field, contest, season=season, num_trials=num_trials,
+            seed=(seed + 2) if seed is not None else None,
+            first_place_pct=first_place_pct, engine=engine, slate=slate,
+            included_game_pks=included_game_pks,
+        )
+
+    result = _rank_and_summarize_simulated(
+        simulated,
+        evaluation,
+        contest,
+        field,
+        contest_type=contest_type,
+        num_requested=num_requested,
+        self_play=self_play,
+        engine=engine,
+        field_sharpness=field_sharpness,
+        first_place_pct=first_place_pct,
+    )
+    # How much of the built batch actually got simulated -- equal to
+    # num_entries_built for every contest at or under MAX_SAMPLE_SIZE,
+    # and honestly smaller above it.
+    result["num_entries_simulated"] = len(simulated)
+    return result
 
 
 async def evaluate_field_mirrored(

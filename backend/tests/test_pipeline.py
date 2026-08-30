@@ -3494,6 +3494,91 @@ async def main() -> int:
           _max_hitters_from_one_team(unweighted_field) <= contest.MAX_HITTERS_PER_TEAM,
           str(_max_hitters_from_one_team(unweighted_field)))
 
+    print("\nContest generator: builds a whole contest, lineups only (build_contest_lineups)")
+
+    # Contest size is ONE control now, not two. Every preset advertises
+    # the real sizes it comes in, and its own default has to be one of
+    # them or the UI's dropdown would open on a value it can't offer.
+    _expected_sizes = {
+        "double_up": [50, 100],
+        "gpp_small": [100, 500, 999],
+        "gpp_mid": [1_000, 2_000, 3_000, 4_000, 5_000],
+        "gpp_large": [6_000, 7_000, 8_000, 9_000, 10_000],
+        "gpp_milly": [12_500, 15_000, 20_000, 25_000, 50_000, 100_000],
+    }
+    check("every contest preset advertises the real sizes it comes in",
+          {k: v["sizes"] for k, v in contest.CONTEST_TYPES.items()} == _expected_sizes,
+          str({k: v.get("sizes") for k, v in contest.CONTEST_TYPES.items()}))
+    check("every preset's own default field_size is one of its own selectable sizes -- otherwise "
+          "the size dropdown would open on a value it can't offer",
+          all(c["field_size"] in c["sizes"] for c in contest.CONTEST_TYPES.values()),
+          str([(k, c["field_size"]) for k, c in contest.CONTEST_TYPES.items()]))
+
+    lineups_only = contest.build_contest_lineups(mul_slate, "gpp_small", 100, seed=5)
+    check("build_contest_lineups builds exactly as many lineups as the contest holds -- the two "
+          "numbers are the same thing now",
+          lineups_only["num_entries_built"] == 100 == lineups_only["field_size"],
+          str((lineups_only["num_entries_built"], lineups_only["field_size"])))
+    check("build_contest_lineups returns NO economics at all -- no opponent field, no payout "
+          "curve, no ROI; that's the simulator's job on the batch it produces",
+          not any(k in lineups_only for k in ("field", "results", "prize_pool", "paid_count", "field_baseline")),
+          str(sorted(lineups_only)))
+    check("build_contest_lineups describes what it built instead: salary, points, ownership "
+          "and the stack shapes the contest actually came out with",
+          lineups_only["summary"]["median_salary_used"] > 0
+          and sum(sh["count"] for sh in lineups_only["stack_shapes"]) == 100,
+          str(lineups_only["summary"]))
+    check("build_contest_lineups allows duplicates unconditionally -- a real contest field "
+          "contains them, so it's built in rather than a checkbox",
+          lineups_only["num_distinct_entries"] <= lineups_only["num_entries_built"],
+          str((lineups_only["num_distinct_entries"], lineups_only["num_entries_built"])))
+
+    # A contest bigger than the build cap: field_size stays the REAL
+    # size (every payout and rank downstream keys off it) while the
+    # build itself is capped, and the response reports both rather than
+    # conflating them. MAX_USER_LINEUPS is patched down so this stays a
+    # fast test rather than a 10,000-lineup one.
+    _saved_max = contest.MAX_USER_LINEUPS
+    contest.MAX_USER_LINEUPS = 25
+    try:
+        capped = contest.build_contest_lineups(mul_slate, "gpp_small", 500, seed=5)
+    finally:
+        contest.MAX_USER_LINEUPS = _saved_max
+    check("a contest larger than the build cap keeps its REAL field_size while the build itself "
+          "is capped -- reported as two separate numbers, not silently conflated",
+          capped["field_size"] == 500 and capped["num_entries_built"] == 25,
+          str((capped["field_size"], capped["num_entries_built"])))
+
+    try:
+        contest.build_contest_lineups(mul_slate, "gpp_small", 0)
+        check("build_contest_lineups rejects a contest_size of 0", False)
+    except contest.ContestError:
+        check("build_contest_lineups rejects a contest_size of 0", True)
+
+    # Salary pacing. There is no salary FLOOR any more -- a hard floor
+    # makes whole stack shapes infeasible and stalls a batch -- so
+    # spending the cap has to come from steering the sampler while it
+    # builds. The real claim being checked is that pacing improves
+    # salary AND projected points at once: paying up generally buys a
+    # better player, so this is not a trade-off.
+    _saved_pacing = contest._SALARY_PACING_STRENGTH
+    contest._SALARY_PACING_STRENGTH = 0.0
+    try:
+        _unpaced = contest.generate_entries(mul_slate, 40, allow_duplicates=True, seed=77)
+    finally:
+        contest._SALARY_PACING_STRENGTH = _saved_pacing
+    _paced = contest.generate_entries(mul_slate, 40, allow_duplicates=True, seed=77)
+    _median = lambda es: sorted(e["salary_used"] for e in es)[len(es) // 2]
+    _avg_pts = lambda es: sum(e["projected_points"] for e in es) / len(es)
+    check("salary pacing raises the median salary actually used versus an unpaced build -- "
+          "'use as much of the cap as possible', measurably",
+          _median(_paced) > _median(_unpaced), str((_median(_paced), _median(_unpaced))))
+    check("...and raises average projected points at the same time, so spending the cap is a "
+          "real gain rather than a trade against lineup quality",
+          _avg_pts(_paced) > _avg_pts(_unpaced), str((round(_avg_pts(_paced), 2), round(_avg_pts(_unpaced), 2))))
+    check("pacing is off entirely at strength 0, so the behaviour it replaced is one constant away",
+          contest._SALARY_PACING_STRENGTH > 0, str(contest._SALARY_PACING_STRENGTH))
+
     print("\nContest generator: mass multi-entry economics (build_contest_entries)")
 
     # Regression fixture for the double/triple-counting bug: ranking a
@@ -5664,6 +5749,72 @@ async def main() -> int:
     check("build_contest_entries_simulated's default (self_play unset) mode is unaffected by the self_play "
           "branch -- still reports self_play=False",
           sim_batch["self_play"] is False, sim_batch.get("self_play"))
+
+    print("\nSimulator: pricing a contest that was already built (simulate_contest_batch)")
+
+    _built = contest.build_contest_lineups(mul_slate, "gpp_small", 100, seed=5)
+    _built_entries = _built["entries"]
+
+    priced = await contest.simulate_contest_batch(
+        _built_entries, _built["contest"], season=2099, num_trials=200,
+        entry_fee=10.0, contest_type="gpp_small", seed=3,
+    )
+    check("simulate_contest_batch prices an already-built contest without rebuilding a lineup -- "
+          "the same entries come back, now with real simulated results",
+          priced["num_entries_built"] == len(_built_entries)
+          and len(priced["results"]) == len(_built_entries),
+          str((priced["num_entries_built"], len(priced["results"]))))
+    check("simulate_contest_batch defaults to ranking the contest against ITSELF -- the generator "
+          "builds the whole field, so there's no second population to invent",
+          priced["self_play"] is True, str(priced["self_play"]))
+
+    # Entry cost is the load-bearing input: the prize pool is field_size
+    # x entry_fee less rake, so doubling the fee has to double the pool.
+    dearer = await contest.simulate_contest_batch(
+        _built_entries, _built["contest"], season=2099, num_trials=200,
+        entry_fee=20.0, contest_type="gpp_small", seed=3,
+    )
+    check("the entry cost given to the simulator sets the prize pool -- doubling the fee doubles "
+          "the pool, which is why it's a simulator input and not a build one",
+          abs(dearer["prize_pool"] - 2 * priced["prize_pool"]) < 0.02,
+          str((priced["prize_pool"], dearer["prize_pool"])))
+    check("...and it's the fee the results are actually priced against, not the preset's own",
+          priced["contest"]["entry_fee"] == 10.0 and dearer["contest"]["entry_fee"] == 20.0,
+          str((priced["contest"]["entry_fee"], dearer["contest"]["entry_fee"])))
+
+    flatter = await contest.simulate_contest_batch(
+        _built_entries, _built["contest"], season=2099, num_trials=200,
+        entry_fee=10.0, first_place_pct=5.0, contest_type="gpp_small", seed=3,
+    )
+    check("a flatter percent-to-first spreads the same prize pool further down the payout curve, "
+          "so more of the contest cashes for something",
+          flatter["first_place_pct"] == 5.0
+          and flatter["summary"]["total_expected_payout"] > 0,
+          str((flatter["first_place_pct"], flatter["summary"]["total_expected_payout"])))
+
+    # A contest bigger than MAX_SAMPLE_SIZE gets simulated as a slice of
+    # itself, projected back onto the real field size -- said out loud
+    # via num_entries_simulated rather than silently truncated.
+    _saved_sample = contest.MAX_SAMPLE_SIZE
+    contest.MAX_SAMPLE_SIZE = 20
+    try:
+        sliced = await contest.simulate_contest_batch(
+            _built_entries, _built["contest"], season=2099, num_trials=200,
+            entry_fee=10.0, contest_type="gpp_small", seed=3,
+        )
+    finally:
+        contest.MAX_SAMPLE_SIZE = _saved_sample
+    check("a contest too big to simulate whole is simulated as a slice of itself and says so, "
+          "while still being ranked against its real full field size",
+          sliced["num_entries_simulated"] == 20 and sliced["field_size"] == 100,
+          str((sliced["num_entries_simulated"], sliced["field_size"])))
+
+    try:
+        await contest.simulate_contest_batch([], _built["contest"], season=2099)
+        check("simulate_contest_batch refuses an empty batch rather than simulating nothing", False)
+    except contest.ContestError:
+        check("simulate_contest_batch refuses an empty batch rather than simulating nothing", True)
+
 
     print("\nBlock-averaged payout smoothing (contest.py _block_average_payouts)")
 
