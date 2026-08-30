@@ -191,7 +191,11 @@ async def generate_lineups(
     excluded_ids: list[str] | None = Body(
         None, embed=True, description="Player ids removed from the pool entirely"
     ),
-    min_salary: int | None = Body(None, embed=True, description="Floor on total lineup salary"),
+    min_salary: int | None = Body(
+        nfl_optimizer.DEFAULT_MIN_SALARY,
+        embed=True,
+        description="Floor on total lineup salary. Defaults to $47,000 -- pass 0 to disable.",
+    ),
     min_unique_players: int = Body(
         1, embed=True, description="Minimum number of players that must differ between any two lineups"
     ),
@@ -285,7 +289,11 @@ async def build_contest_entries(
     sample_size: int | None = Body(
         None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
     ),
-    min_salary: int = Body(0, embed=True, description="Floor on each entry's total salary"),
+    min_salary: int = Body(
+        nfl_optimizer.DEFAULT_MIN_SALARY,
+        embed=True,
+        description="Floor on each entry's total salary. Defaults to $47,000 -- pass 0 to disable.",
+    ),
     max_salary: int = Body(
         nfl_optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's total salary"
     ),
@@ -346,7 +354,11 @@ async def build_contest_entries_simulated(
     sample_size: int | None = Body(
         None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
     ),
-    min_salary: int = Body(0, embed=True, description="Floor on each entry's total salary"),
+    min_salary: int = Body(
+        nfl_optimizer.DEFAULT_MIN_SALARY,
+        embed=True,
+        description="Floor on each entry's total salary. Defaults to $47,000 -- pass 0 to disable.",
+    ),
     max_salary: int = Body(
         nfl_optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's total salary"
     ),

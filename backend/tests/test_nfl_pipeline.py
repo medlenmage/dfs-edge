@@ -12,6 +12,7 @@ Run it with:
 from __future__ import annotations
 
 import asyncio
+import inspect as inspect_module
 import random
 import sys
 from pathlib import Path
@@ -734,6 +735,56 @@ def main() -> int:
           "cashing_pct" in det["summary"] and "avg_roi_pct" in det["summary"], str(det["summary"]))
     check("build_contest_entries's entries each carry a real duplicate_count",
           all("duplicate_count" in e for e in det["entries"]), "")
+
+    # --- salary floor -------------------------------------------------
+    # The reported bug: NFL defaulted min_salary to 0 at EVERY layer
+    # (nfl_contest's signatures, the router's Body defaults, the panel's
+    # own input), so a real generated batch came back with 23% of
+    # entries under $47,000 -- worst at $40,500, nearly $10k unspent.
+    check("nfl_optimizer exposes a DEFAULT_MIN_SALARY of $47,000, matching MLB's own",
+          nfl_optimizer.DEFAULT_MIN_SALARY == 47_000, str(nfl_optimizer.DEFAULT_MIN_SALARY))
+    check("every public NFL generator defaults its salary floor to it, rather than 0 -- the "
+          "actual root cause of the under-cap lineups",
+          inspect_module.signature(nfl_contest.generate_entries).parameters["min_salary"].default
+          == nfl_optimizer.DEFAULT_MIN_SALARY
+          and inspect_module.signature(nfl_contest.generate_field).parameters["min_salary"].default
+          == nfl_optimizer.DEFAULT_MIN_SALARY, "")
+    check("the low-level _sample_one_lineup primitive stays policy-neutral (0) -- the floor is "
+          "a decision the public generators make, not the sampler",
+          inspect_module.signature(nfl_contest._sample_one_lineup).parameters["min_salary"].default == 0, "")
+
+    floored = nfl_contest.generate_entries(slate, 12, min_salary=44000, allow_duplicates=True, seed=4)
+    check("every generated entry respects the salary floor it was given",
+          all(e["salary_used"] >= 44000 for e in floored),
+          str(sorted(e["salary_used"] for e in floored)[:3]))
+
+    floored_field = nfl_contest.generate_field(slate, 12, min_salary=44000, seed=4)
+    check("the sampled opponent FIELD respects the floor too -- a field of under-cap lineups "
+          "would be an unrealistically weak benchmark to measure entries against",
+          all(lu["salary_used"] >= 44000 for lu in floored_field),
+          str(sorted(lu["salary_used"] for lu in floored_field)[:3]))
+
+    check("passing min_salary=0 still disables the floor entirely, so the old behavior is "
+          "one explicit argument away",
+          all(e["salary_used"] <= nfl_optimizer.SALARY_CAP
+              for e in nfl_contest.generate_entries(slate, 4, min_salary=0, allow_duplicates=True, seed=4)), "")
+
+    # Salary pacing: a lineup drifting cheap pulls itself back toward the
+    # floor DURING the walk, rather than being built and then rejected --
+    # the hard reachability prune alone is only a necessary condition and
+    # can't bite until a walk is already doomed (measured: adding the
+    # floor without pacing dropped a 300-entry request to 5 built).
+    _paced = nfl_contest.generate_entries(slate, 20, min_salary=44000, allow_duplicates=True, seed=11)
+    _saved_pacing = nfl_contest._SALARY_PACING_STRENGTH
+    nfl_contest._SALARY_PACING_STRENGTH = 0.0
+    _unpaced = nfl_contest.generate_entries(slate, 20, min_salary=0, allow_duplicates=True, seed=11)
+    nfl_contest._SALARY_PACING_STRENGTH = _saved_pacing
+    check("salary pacing raises the median salary actually used versus an unpaced, unfloored "
+          "build -- 'use as much of the cap as possible', measurably",
+          sorted(e["salary_used"] for e in _paced)[len(_paced) // 2]
+          > sorted(e["salary_used"] for e in _unpaced)[len(_unpaced) // 2],
+          str((sorted(e["salary_used"] for e in _paced)[len(_paced) // 2],
+               sorted(e["salary_used"] for e in _unpaced)[len(_unpaced) // 2])))
 
     no_dupes = nfl_contest.generate_entries(slate, 2, allow_duplicates=False, seed=1)
     dupes_allowed = nfl_contest.generate_entries(slate, 2, allow_duplicates=True, seed=1)

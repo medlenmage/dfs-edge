@@ -44,7 +44,11 @@ export function NflContestGeneratorPanel({ season, week }) {
   const [fieldSharpness, setFieldSharpness] = useState('marquee')
   const [fieldSizeOverride, setFieldSizeOverride] = useState('')
   const [maxExposure, setMaxExposure] = useState('')
-  const [minSalary, setMinSalary] = useState('')
+  // Defaults to $47,000, matching MLB's own panel and the backend's
+  // nfl_optimizer.DEFAULT_MIN_SALARY -- a lineup leaving thousands
+  // unspent is leaving real projected points on the table. Clear the
+  // box to disable the floor entirely.
+  const [minSalary, setMinSalary] = useState('47000')
   const [maxSalary, setMaxSalary] = useState('')
   const [firstPlacePct, setFirstPlacePct] = useState('')
   const [state, setState] = useState({ status: 'idle' })
