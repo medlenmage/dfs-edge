@@ -4172,8 +4172,103 @@ async def main() -> int:
 
     check("a stacked lineup (shared team multiplier) and an unstacked one land at roughly the same mean",
           abs(stacked_mean - unstacked_mean) < 2.0, str((round(stacked_mean, 2), round(unstacked_mean, 2))))
-    check("a stacked lineup shows genuinely higher variance than an equivalent unstacked one -- the whole point of correlation existing",
-          stacked_stdev > 1.3 * unstacked_stdev, str((round(stacked_stdev, 2), round(unstacked_stdev, 2))))
+    # The bounds are the CALIBRATED physics, not a vibe: at the measured
+    # real-world teammate correlation (+0.10, from 294 real 2026
+    # teammate pairs), a 4-man stack's variance factor is
+    # 1 + 3*rho ~ 1.36, i.e. a stdev ratio of ~1.17. The old sampler
+    # produced a ratio well above 1.3 because its correlation ran FIVE
+    # TIMES reality -- the upper bound guards against that regression
+    # just as much as the lower bound guards the correlation existing.
+    _stack_ratio = stacked_stdev / unstacked_stdev
+    check("a stacked lineup shows genuinely higher variance than an equivalent unstacked one -- "
+          "the whole point of correlation existing",
+          _stack_ratio > 1.06, str(round(_stack_ratio, 3)))
+    check("...but NOT the runaway correlation the old sampler had -- a 4-man stack at the "
+          "real-world +0.10 teammate correlation is ~1.17x, nowhere near the 1.5x+ the "
+          "5x-inflated version produced",
+          _stack_ratio < 1.35, str(round(_stack_ratio, 3)))
+
+    print("\nSim calibration: projection recentering + exact copula marginals")
+
+    # recenter_pool: the sim now centers every player on TODAY'S
+    # projection (the industry-standard construction -- reference sims
+    # use Gamma(mean=projection); ours keeps the empirical shape and
+    # rescales it), instead of his raw historical pool level.
+    _rc = variance.recenter_pool([0.0, 5.0, 10.0, 15.0, 20.0], 15.0)
+    check("recenter_pool rescales a pool so its mean IS today's projection",
+          abs(sum(_rc) / len(_rc) - 15.0) < 1e-9, str(_rc))
+    check("...multiplicatively, so zeros stay zeros and the shape scales with the level",
+          _rc[0] == 0.0 and _rc[-1] == 30.0, str(_rc))
+    check("recenter_pool clamps the scale so a degenerate projection can't stretch a pool "
+          "into nonsense",
+          max(variance.recenter_pool([1.0, 2.0, 3.0], 50.0)) == 3.0 * variance._RECENTER_SCALE_MAX,
+          str(variance.recenter_pool([1.0, 2.0, 3.0], 50.0)))
+    check("an all-zero/near-zero pool is left alone -- scaling zeros can't reach any projection",
+          variance.recenter_pool([0.0, 0.0, 0.5], 8.0) == [0.0, 0.0, 0.5], "")
+    check("no projection means no rescale -- the raw pool is the honest fallback",
+          variance.recenter_pool([2.0, 4.0], None) == [2.0, 4.0], "")
+
+    # Copula marginal exactness: the OLD percentile-target-plus-jitter
+    # sampler center-biased every player's own distribution once the
+    # shared shift was calibrated down to reality. The Gaussian copula
+    # produces an exactly uniform rank, so the sampled distribution IS
+    # the pool, at any correlation strength.
+    _cop_pool = sorted([0.0, 0.0, 3.0, 5.0, 8.0, 12.0, 18.0, 25.0, 32.0, 40.0] * 20)
+    _cop_rng = random_module.Random(99)
+    _draws = []
+    for _ in range(6000):
+        _tm = variance.team_environment_multiplier(_cop_rng)
+        _draws.append(variance.sample_correlated_outcome(_cop_pool, _cop_rng, team_multiplier=_tm))
+    _pool_mean = sum(_cop_pool) / len(_cop_pool)
+    _draw_mean = sum(_draws) / len(_draws)
+    _pool_sd = statistics_module.pstdev(_cop_pool)
+    _draw_sd = statistics_module.pstdev(_draws)
+    check("the copula sampler reproduces a player's own pool marginally under full team "
+          "correlation -- mean within 3%",
+          abs(_draw_mean - _pool_mean) / _pool_mean < 0.03, str((round(_pool_mean, 2), round(_draw_mean, 2))))
+    check("...and stdev within 4% -- the old sampler thinned every player's tails once its "
+          "shared shift was calibrated down, which silently understated individual variance",
+          abs(_draw_sd - _pool_sd) / _pool_sd < 0.04, str((round(_pool_sd, 2), round(_draw_sd, 2))))
+
+    # player_pools_for_entries recenters on each entry's own projected_fpts.
+    # A full 10-man entry: player_pools_for_entries reads each player's
+    # position off his roster SLOT, and the first two slots are always
+    # the pitchers -- the two players under test must sit in hitter
+    # slots to get hitter pools.
+    _rc_ids = [93811, 93812]
+    def _rc_game():
+        # one single + an RBI + a run = 7.0 DK points, every game
+        return {"plate_appearances": 4, "hits": 1, "doubles": 0, "triples": 0,
+                "home_runs": 0, "rbi": 1, "runs": 1, "walks": 0, "hit_by_pitch": 0,
+                "stolen_bases": 0}
+
+    correlation_game_logs_rc = {pid: [_rc_game() for _ in range(60)]
+                                for pid in _rc_ids + list(range(93820, 93828))}
+
+    async def fake_rc_game_log(player_id, season, group="hitting"):
+        return correlation_game_logs_rc.get(player_id, [])
+
+    _saved_log_fn = mlb.get_player_game_log
+    mlb.get_player_game_log = fake_rc_game_log
+    def _rc_p(pid, proj):
+        return {"id": pid, "name": f"F{pid}", "team": "AAA", "salary": 4000,
+                "projected_fpts": proj, "ownership_pct": 0}
+
+    _rc_filler = [_rc_p(93820 + i, None) for i in range(8)]
+    _rc_entries = [{
+        "players": _rc_filler[:2]  # land in the two pitcher slots
+        + [_rc_p(93811, 14.0), _rc_p(93812, None)]
+        + _rc_filler[2:],
+    }]
+    _rc_pools = await variance.player_pools_for_entries(_rc_entries, VARIANCE_SEASON)
+    mlb.get_player_game_log = _saved_log_fn
+    _m1 = sum(_rc_pools[93811]) / len(_rc_pools[93811])
+    _m2 = sum(_rc_pools[93812]) / len(_rc_pools[93812])
+    check("player_pools_for_entries recenters each pool on that player's own projected_fpts -- "
+          "the level the builder and the field are both driven by",
+          abs(_m1 - 14.0) < 0.75, str(round(_m1, 2)))
+    check("...and leaves a player with no projection on his raw historical level",
+          abs(_m2 - 7.0) < 0.75, str(round(_m2, 2)))
 
     print("\nMonte Carlo simulation engine (variance.py simulate_batch)")
 
@@ -4266,8 +4361,16 @@ async def main() -> int:
     edge_lo_entry = _sim_entry([_sim_player_full(pid, None, edge=0.7) for pid in edge_lo_ids])
     edge_sim = variance.simulate_batch([edge_hi_entry, edge_lo_entry], sim_pools, num_trials=3000, seed=321)
     edge_hi_mean, edge_lo_mean = float(edge_sim[0].mean()), float(edge_sim[1].mean())
-    check("a player's own edge_composite shifts their simulated mean, even with an identical outcome pool and no team",
-          edge_hi_mean > edge_lo_mean, str((round(edge_hi_mean, 2), round(edge_lo_mean, 2))))
+    # DELIBERATELY INVERTED from the pre-calibration behavior: pools are
+    # recentered on today's projection now (variance.recenter_pool), and
+    # the projection already embeds the matchup -- RotoWire's model
+    # does, and the in-house number is baseline x edge composite by
+    # construction. Also shifting the DRAW by the edge composite
+    # double-counted the matchup, once in the level and once in the
+    # percentile, which is exactly what the reference sims don't do.
+    check("a player's edge_composite NO LONGER shifts his simulated draw -- the matchup lives "
+          "in the (recentered) projection level, and shifting the draw too double-counted it",
+          abs(edge_hi_mean - edge_lo_mean) < 3.0, str((round(edge_hi_mean, 2), round(edge_lo_mean, 2))))
 
     # A pitcher (plus 9 always-zero fillers, so the lineup total is
     # effectively just his own simulated value) alongside a full
