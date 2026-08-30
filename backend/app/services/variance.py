@@ -379,25 +379,42 @@ TEAM_MULTIPLIER_MAX = 2.25
 # genuine but partial (each team's day still depends heavily on its own,
 # team-specific pitching matchup), nowhere near the near-total
 # correlation within a single team's own stack.
-GAME_CORRELATION = 0.35
+GAME_CORRELATION = 0.40
 
-# How much each signal, one unit away from its own neutral value (1.0),
-# shifts the target percentile of a player's own outcome pool. All
-# three are independently tunable and, like TEAM_MULTIPLIER_STD, were
-# picked as a reasonable starting point and checked against real
-# outcomes rather than derived analytically -- see the offline/live
-# verification in test_pipeline.py and the README roadmap entry for
-# the actual numbers found.
-TEAM_SENSITIVITY = 1.0
-EDGE_SENSITIVITY = 1.0
-OPPONENT_SENSITIVITY = 0.6
-
-# Stdev of random jitter around that target percentile, as a fraction
-# of the pool length -- keeps real day-to-day randomness even on a
-# good or bad team day (nobody homers every time their team scores a
-# lot, nobody goes hitless every time it doesn't).
-JITTER_FRACTION = 0.22
-
+# ---------------------------------------------------------------------------
+# Correlation strengths -- Gaussian copula, calibrated against MEASURED
+# reality rather than left at the strengths the machinery shipped with
+# (the same at-birth calibration NFL's variance model got and MLB's
+# never did). Each constant IS the target rank-level correlation, not
+# an abstract sensitivity; measured outcome-level (Pearson) correlation
+# comes out slightly lower on skewed pools. Targets and provenance:
+#
+#   same-team hitter-hitter DK-point correlation: +0.10
+#     (measured directly from real 2026 game logs -- 294 teammate
+#      pairs across 6 real rosters, mean +0.097, median +0.090; the
+#      open-source chanzer0/MLB-DFS-Tools fitted batting-order
+#      correlation matrix agrees at +0.12..0.20)
+#   hitter vs OPPOSING starter: about -0.28
+#     (that sim's fitted matrix, -0.26..-0.31 -- structural: the same
+#      at-bat is scored oppositely on the two sides)
+#   hitter vs opposing HITTERS: small positive, ~+0.05
+#     (shared park/weather/game environment; falls out of
+#      GAME_CORRELATION x MATE_CORRELATION, no constant of its own)
+#
+# The shipped strengths produced teammate correlation of +0.50 -- FIVE
+# TIMES reality. That overstated every stack's variance in both
+# directions, so the simulator systematically over-rated max-stack
+# lineups' top-1% rates and ROI relative to how often real stacks
+# actually spike -- and the lineups it ranked highest carried far more
+# correlation risk than the sim believed.
+MATE_CORRELATION = 0.12
+# Looks high next to MATE_CORRELATION, and should: under the shared
+# one-factor structure, the hitter side only loads sqrt(0.12) on the
+# team's day, so reaching the fitted -0.28 hitter-vs-opposing-starter
+# correlation needs the pitcher side to carry sqrt(0.12 * 0.70) ~ 0.29
+# of shared weight -- and mechanically a starter's DK score IS close to
+# an inverse function of what the opposing offense does against him.
+OPP_PITCHER_CORRELATION = 0.70
 
 def team_environment_multiplier(rng: random.Random) -> float:
     """One team's overall day for one Monte Carlo trial -- sample once
@@ -407,29 +424,30 @@ def team_environment_multiplier(rng: random.Random) -> float:
     return max(TEAM_MULTIPLIER_MIN, min(TEAM_MULTIPLIER_MAX, m))
 
 
-def _target_percentile(
-    *,
-    team_multiplier: float = 1.0,
-    own_edge: float | None = None,
-    opponent_multiplier: float | None = None,
-) -> float:
+def _norm_cdf(x: "np.ndarray") -> "np.ndarray":
     """
-    Shared math for both the scalar (sample_correlated_outcome) and
-    vectorized (simulate_batch) samplers -- the target percentile of a
-    player's own outcome pool this trial, before jitter. `team_multiplier`
-    is a hitter's own team's day (1.0 = no effect, the default for
-    pitchers and for hitters with an unknown team); `own_edge` is the
-    player's own matchup-quality multiplier for hitters and pitchers
-    alike; `opponent_multiplier`, pitchers only, applies with the
-    OPPOSITE sign -- the team he's facing having a big day pulls him
-    toward the worse end of his own history.
+    Standard normal CDF, vectorized, without a scipy dependency --
+    Abramowitz & Stegun 7.1.26 (max abs error ~1.5e-7, far below the
+    1/POOL_SIZE index resolution it feeds).
     """
-    delta = (team_multiplier - 1.0) * TEAM_SENSITIVITY
-    if own_edge is not None:
-        delta += (own_edge - 1.0) * EDGE_SENSITIVITY
-    if opponent_multiplier is not None:
-        delta -= (opponent_multiplier - 1.0) * OPPONENT_SENSITIVITY
-    return min(1.0, max(0.0, 0.5 + delta))
+    sign = np.sign(x)
+    ax = np.abs(x) / math.sqrt(2.0)
+    t = 1.0 / (1.0 + 0.3275911 * ax)
+    poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
+    erf = 1.0 - poly * np.exp(-ax * ax)
+    return 0.5 * (1.0 + sign * erf)
+
+
+def _copula_index(rho: float, z_shared: float, z_own: float, n: int) -> int:
+    """One correlated pool index: Gaussian copula with weight sqrt(rho)
+    on the shared factor. The uniform comes out EXACTLY uniform, so the
+    player's own empirical distribution is reproduced marginally no
+    matter the correlation strength -- the property the old
+    percentile-target-plus-jitter sampler lost (it center-biased every
+    marginal once the shared shift was calibrated down to reality)."""
+    z = math.sqrt(rho) * z_shared + math.sqrt(1.0 - rho) * z_own
+    u = 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+    return min(n - 1, int(u * n))
 
 
 def sample_correlated_outcome(
@@ -441,26 +459,35 @@ def sample_correlated_outcome(
     opponent_multiplier: float | None = None,
 ) -> float:
     """
-    One player's simulated outcome for a trial, biased toward the
-    better or worse end of his own outcome pool by whichever of
-    `team_multiplier` / `own_edge` / `opponent_multiplier` apply -- see
-    the module-level note above for what each one means and who it
-    applies to.
+    One player's simulated outcome for a trial, correlated to the
+    shared team/game environment through a Gaussian copula -- the same
+    construction the open-source reference sim uses (multivariate
+    normal -> CDF -> quantile), with this player's own empirical
+    bootstrap pool as the quantile function instead of a fitted gamma.
 
-    `sorted_pool` must already be sorted ascending -- sort a player's
-    pool once and reuse it across every trial in a batch, rather than
-    re-sorting on every single draw, since simulate_batch() calls this
-    many thousands of times per player.
+    `team_multiplier` (hitters) or `opponent_multiplier` (pitchers,
+    opposite sign -- the team he's FACING having a big day pulls him
+    down) supplies the shared factor, converted back to the standard
+    normal it was drawn from. `own_edge` is accepted for backward
+    compatibility and IGNORED: pools are recentered on today's
+    projection (see recenter_pool), and the projection already embeds
+    the matchup -- shifting the draw by the edge composite as well
+    double-counted it, once in the level and once in the percentile.
+
+    `sorted_pool` must already be sorted ascending -- sort once, reuse
+    across trials.
     """
     n = len(sorted_pool)
     if n <= 1:
         return sorted_pool[0] if sorted_pool else 0.0
-    target_pct = _target_percentile(
-        team_multiplier=team_multiplier, own_edge=own_edge, opponent_multiplier=opponent_multiplier
-    )
-    target_idx = target_pct * (n - 1)
-    idx = round(target_idx + rng.gauss(0, JITTER_FRACTION * n))
-    return sorted_pool[min(n - 1, max(0, idx))]
+    if opponent_multiplier is not None:
+        rho = OPP_PITCHER_CORRELATION
+        z_shared = -(opponent_multiplier - TEAM_MULTIPLIER_MEAN) / TEAM_MULTIPLIER_STD
+    else:
+        rho = MATE_CORRELATION
+        z_shared = (team_multiplier - TEAM_MULTIPLIER_MEAN) / TEAM_MULTIPLIER_STD
+    return sorted_pool[_copula_index(rho, z_shared, rng.gauss(0.0, 1.0), n)]
+
 
 
 async def player_pools_for_entries(
@@ -477,13 +504,76 @@ async def player_pools_for_entries(
     multi-eligible player.
     """
     positions: dict[int, str] = {}
+    projections: dict[int, float] = {}
     for lineup in lineups:
         for label, p in zip(SLOT_LABELS, players_in_slot_order(lineup)):
             positions.setdefault(p["id"], label.rstrip("0123456789"))
+            proj = p.get("projected_fpts")
+            if proj and p["id"] not in projections:
+                projections[p["id"]] = float(proj)
 
     ids = list(positions)
     pools = await asyncio.gather(*(player_outcome_pool(pid, positions[pid], season) for pid in ids))
-    return dict(zip(ids, pools))
+    return {
+        pid: recenter_pool(pool, projections.get(pid))
+        for pid, pool in zip(ids, pools)
+    }
+
+
+# How far a pool is allowed to be rescaled to meet today's projection.
+# A confirmed starter projected well above a pool diluted by pinch-hit
+# and rest days needs up to ~1.7x (measured: Cal Raleigh, projection
+# 11.2 over a 6.5-mean pool); the clamp exists so a degenerate
+# projection or a thin shared-pool blend can't stretch a distribution
+# into nonsense.
+_RECENTER_SCALE_MIN = 0.4
+_RECENTER_SCALE_MAX = 2.5
+# Below this pool mean there is nothing meaningful to rescale (an
+# all-zero rookie pool, a degenerate fallback) -- multiplying zeros by
+# any scale still can't reach a projection, so leave it alone.
+_RECENTER_MIN_POOL_MEAN = 1.0
+
+
+def recenter_pool(pool: list[float], projection: float | None) -> list[float]:
+    """
+    Rescale a player's outcome pool so its MEAN equals today's
+    projection, preserving its empirical shape (skew, zeros, fat right
+    tail scale with it).
+
+    This is the single biggest architectural correction from comparing
+    this simulator against the industry: every reference sim examined
+    (SaberSim's play-by-play engine conceptually, and the open-source
+    chanzer0/MLB-DFS-Tools implementation explicitly -- hitters ~
+    Gamma(mean=projection, sd=0.5x projection), pitchers ~
+    Normal(mean=projection, sd=0.3x projection)) centers each player's
+    outcome distribution on TODAY'S projection and uses history only
+    for variance/shape. This sim centered on the player's raw
+    historical pool instead, which embeds two real biases, both
+    measured on a live slate (158 players):
+
+      - Levels lagged today's information: pool mean vs projection had
+        only 0.83 correlation, was off by >25% for 23% of players, and
+        averaged -9% low -- pools include pinch-hit and rest-day games,
+        while today's projection knows the player is starting.
+      - The builder and the field are both driven by projections, so
+        grading them on historical levels ranked lineups substantially
+        by "whose history disagrees with the projection" rather than by
+        structure/leverage -- entering the sim's favorites into real
+        contests then underperforms exactly the way stale information
+        does.
+
+    Multiplicative rather than additive so the shape scales with the
+    level (a hitter's zero games stay zeros; scoring variance grows
+    with scoring mean), matching how the reference sims' gamma
+    parameterization behaves.
+    """
+    if not pool or not projection or projection <= 0:
+        return pool
+    mean = sum(pool) / len(pool)
+    if mean < _RECENTER_MIN_POOL_MEAN:
+        return pool
+    scale = min(_RECENTER_SCALE_MAX, max(_RECENTER_SCALE_MIN, projection / mean))
+    return [x * scale for x in pool]
 
 
 # --------------------------------------------------------------------------
@@ -683,29 +773,36 @@ def simulate_batch(
         if n == 0:
             continue
         i = player_index[pid]
-        own_edge = info.get("edge_composite")
 
+        # Gaussian copula (see sample_correlated_outcome): the shared
+        # team/game factor gets weight sqrt(rho), the player's own
+        # independent draw sqrt(1-rho), and the resulting uniform is
+        # exactly uniform -- his empirical pool is reproduced marginally
+        # regardless of correlation strength. A player with no shared
+        # factor at all (no team known; a pitcher whose opponent isn't
+        # in this batch) is just an independent uniform draw from his
+        # own pool. edge_composite is deliberately unused here: pools
+        # are recentered on today's projection, which already embeds
+        # the matchup.
         if info["is_pitcher"]:
             opponent_multiplier = team_multipliers.get(info.get("opponent"))
-            has_signal = own_edge is not None or opponent_multiplier is not None
+            if opponent_multiplier is not None:
+                rho = OPP_PITCHER_CORRELATION
+                z_shared = -(opponent_multiplier - TEAM_MULTIPLIER_MEAN) / TEAM_MULTIPLIER_STD
+            else:
+                rho, z_shared = 0.0, 0.0
+        elif info.get("team"):
+            rho = MATE_CORRELATION
+            z_shared = (team_multipliers[info["team"]] - TEAM_MULTIPLIER_MEAN) / TEAM_MULTIPLIER_STD
         else:
-            opponent_multiplier = None
-            has_signal = bool(info.get("team")) or own_edge is not None
+            rho, z_shared = 0.0, 0.0
 
-        if not has_signal:
+        if rho <= 0.0:
             idx = rng.integers(0, n, size=num_trials)
         else:
-            delta = np.zeros(num_trials)
-            if not info["is_pitcher"] and info.get("team"):
-                delta = delta + (team_multipliers[info["team"]] - 1.0) * TEAM_SENSITIVITY
-            if own_edge is not None:
-                delta = delta + (own_edge - 1.0) * EDGE_SENSITIVITY
-            if info["is_pitcher"] and opponent_multiplier is not None:
-                delta = delta - (opponent_multiplier - 1.0) * OPPONENT_SENSITIVITY
-            target_pct = np.clip(0.5 + delta, 0.0, 1.0)
-            target_idx = target_pct * (n - 1)
-            jitter = rng.normal(0.0, JITTER_FRACTION * n, size=num_trials)
-            idx = np.clip(np.round(target_idx + jitter).astype(int), 0, n - 1)
+            z = math.sqrt(rho) * z_shared + math.sqrt(1.0 - rho) * rng.standard_normal(num_trials)
+            u = _norm_cdf(z)
+            idx = np.minimum((u * n).astype(int), n - 1)
         outcomes[i] = pool[idx]
 
     outcomes = apply_projection_error(outcomes, rng)
