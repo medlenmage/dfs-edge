@@ -625,10 +625,17 @@ def generate_entries(
     capped_ids: set[str] = set()
     seen_signatures: set[frozenset[str]] = set()
     entries: list[dict[str, Any]] = []
+    # Same two-phase behavior as MLB's generate_entries: once the
+    # DISTINCT lineup space is exhausted, fill the rest of the batch
+    # with duplicates the way a real contest field does, rather than
+    # stopping short. Duplicates still respect every real constraint
+    # (salary, exposure caps); only distinctness is lifted.
+    duplicates_unlocked = allow_duplicates
 
     for _ in range(num_lineups):
         primary, secondary_teams = _pick_stack_plan(candidates_by_slot, running_qb_ids, _fpts_weight, rng)
         lineup = None
+        legal_duplicate = None
         for _ in range(max_attempts_per_lineup):
             candidate = _sample_one_lineup(
                 candidates_by_slot, slot_order, rng, _fpts_weight,
@@ -639,12 +646,16 @@ def generate_entries(
             )
             if candidate is None:
                 continue
-            if not allow_duplicates and candidate["player_ids"] in seen_signatures:
+            if not duplicates_unlocked and candidate["player_ids"] in seen_signatures:
+                legal_duplicate = candidate
                 continue
             lineup = candidate
             break
+        if lineup is None and legal_duplicate is not None:
+            duplicates_unlocked = True
+            lineup = legal_duplicate
         if lineup is None:
-            break  # ran out of room for more legal, exposure-legal entries
+            break  # infeasible even with duplicates -- salary/exposure bound
 
         seen_signatures.add(lineup.pop("player_ids"))
         entries.append(lineup)

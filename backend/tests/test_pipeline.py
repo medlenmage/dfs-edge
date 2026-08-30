@@ -3234,19 +3234,66 @@ async def main() -> int:
         ]
     }
 
-    no_dupes = contest.generate_entries(single_solution_slate, 3, seed=1)
-    check("without allow_duplicates, a single-solution pool returns only 1 entry",
-          len(no_dupes) == 1, str(len(no_dupes)))
+    # THE CONTRACT CHANGED HERE, deliberately: a pool that runs out of
+    # distinct builds no longer stops the batch short ("only built 7 of
+    # 5,000"). Real small-slate contests duplicate heavily once the
+    # distinct lineup space is exhausted, so the generator now fills
+    # the batch out with duplicates the way a real field does --
+    # duplicates still respect every REAL constraint (salary, exposure,
+    # the 5-hitters-per-team cap); only distinctness, which no real
+    # contest enforces, is lifted.
+    filled = contest.generate_entries(single_solution_slate, 3, seed=1)
+    check("a single-solution pool now fills the FULL requested count -- running out of "
+          "distinct builds means duplicating like a real contest, not stopping at 1",
+          len(filled) == 3, str(len(filled)))
+    filled_signatures = {frozenset(p["id"] for p in lu["players"]) for lu in filled}
+    check("...all 3 are exact copies of the only legal lineup, each honestly reporting "
+          "duplicate_count == 3 (their payouts get tie-split downstream)",
+          len(filled_signatures) == 1 and all(lu["duplicate_count"] == 3 for lu in filled),
+          str([lu["duplicate_count"] for lu in filled]))
 
     dupes_allowed = contest.generate_entries(single_solution_slate, 3, allow_duplicates=True, seed=1)
-    check("allow_duplicates lets a single-solution pool return the full requested count",
+    check("allow_duplicates=True (duplicates permitted from the very start) reaches the same "
+          "full count on a single-solution pool",
           len(dupes_allowed) == 3, str(len(dupes_allowed)))
-    dupe_signatures = {frozenset(p["id"] for p in lu["players"]) for lu in dupes_allowed}
-    check("...all 3 are exact copies of the same lineup",
-          len(dupe_signatures) == 1, str(len(dupe_signatures)))
-    check("...each reports duplicate_count == 3",
-          all(lu["duplicate_count"] == 3 for lu in dupes_allowed),
-          str([lu["duplicate_count"] for lu in dupes_allowed]))
+
+    # An exposure cap that genuinely binds is still an HONEST stop, not
+    # something duplicates paper over: with every player capped at ~1
+    # appearance and only one legal build existing, the batch stops at
+    # 1 rather than duplicating players past their cap.
+    capped_batch = contest.generate_entries(
+        single_solution_slate, 3, max_exposure_pct=34.0, seed=1,
+    )
+    check("a binding exposure cap still stops the batch short honestly -- duplicates never "
+          "violate a cap the user explicitly set",
+          len(capped_batch) == 1, str(len(capped_batch)))
+
+    # The full stack-shape space: with 8 hitter slots and DK's
+    # 5-per-team cap, every buildable hitter composition is a partition
+    # of <= 8 into parts of 2-5 (singletons aren't constraints).
+    # Enumerate that space here independently, so a shape silently
+    # missing from STACK_SHAPES is caught as drift -- the original list
+    # carried only 9 of the real 17, and the missing mini/scatter
+    # shapes are a genuine share of real small-slate fields.
+    def _all_shapes(remaining, max_part):
+        out = set()
+        for part in range(min(max_part, remaining, 5), 1, -1):
+            out.add((part,))
+            for tail in _all_shapes(remaining - part, part):
+                out.add((part,) + tail)
+        return out
+
+    expected_shapes = _all_shapes(8, 5)
+    actual_shapes = {tuple(sorted(shape, reverse=True)) for shape in contest.STACK_SHAPES}
+    check("STACK_SHAPES covers the COMPLETE mathematical shape space -- every partition of "
+          "<= 8 hitters into stack groups of 2-5, all seventeen of them, nothing missing "
+          "and nothing impossible",
+          actual_shapes == expected_shapes,
+          f"missing={sorted(expected_shapes - actual_shapes)} extra={sorted(actual_shapes - expected_shapes)}")
+    check("no shape is listed twice",
+          len(contest.STACK_SHAPES) == len(actual_shapes), str(len(contest.STACK_SHAPES)))
+    check("the canonical GPP winners (5-3, 5-2-1) still carry the heaviest weights",
+          contest.STACK_SHAPES[0] == [5, 3] and contest.STACK_SHAPES[1] == [5, 2], "")
 
     # Same sum (153.0) either way -- one lineup with one 90%-owned "auto
     # include" plus 9 barely-owned pieces, the other with all 10 players
@@ -3376,11 +3423,19 @@ async def main() -> int:
     check("_feasible_stack_shapes keeps the weight list aligned with the filtered shape list",
           len(feasible_shapes) == len(feasible_weights))
 
+    # With the full shape space, a 3-hitter team legitimately supports
+    # the [3] and [2] mini shapes -- the old "excludes everything"
+    # premise only held when the smallest listed shape was 3-3.
     thin_pool = {"TEAM_A": [{"id": i} for i in range(3)]}
-    check("_feasible_stack_shapes excludes every shape once even the pool's only team is too thin for the "
-          "smallest one",
-          contest._feasible_stack_shapes(thin_pool) == ([], []),
-          str(contest._feasible_stack_shapes(thin_pool)))
+    thin_shapes, _tw = contest._feasible_stack_shapes(thin_pool)
+    check("a 3-hitter single-team pool supports exactly the [3] and [2] mini shapes -- real "
+          "builds on the thinnest slates, newly representable",
+          sorted(map(tuple, thin_shapes)) == [(2,), (3,)], str(thin_shapes))
+    barren_pool = {"TEAM_A": [{"id": 1}]}
+    check("_feasible_stack_shapes excludes every shape once even the pool's only team is too "
+          "thin for the smallest one -- a 1-hitter team can't stack anything",
+          contest._feasible_stack_shapes(barren_pool) == ([], []),
+          str(contest._feasible_stack_shapes(barren_pool)))
 
     # _pick_stack_teams: a direct, deterministic check of the
     # team-assignment step, independent of the shape-selection

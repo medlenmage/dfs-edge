@@ -769,10 +769,23 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
           {!state.reshaped && state.num_entries_built < state.num_entries_requested && (
             <div className="notice" style={{ marginBottom: 12 }}>
               Only built {state.num_entries_built.toLocaleString()} of{' '}
-              {state.num_entries_requested.toLocaleString()} requested — the pool ran out of room
-              for more distinct, legal entries under the current exposure cap.
+              {state.num_entries_requested.toLocaleString()} requested — the salary range or
+              exposure cap is the binding constraint (running out of distinct builds no longer
+              stops a batch; it fills with duplicates like a real contest would).
             </div>
           )}
+          {!state.reshaped &&
+            state.num_distinct_entries != null &&
+            state.num_distinct_entries < state.num_entries_built && (
+              <div className="notice" style={{ marginBottom: 12 }}>
+                {state.num_distinct_entries.toLocaleString()} distinct builds +{' '}
+                {(state.num_entries_built - state.num_distinct_entries).toLocaleString()}{' '}
+                duplicates — this slate&apos;s pool can&apos;t support{' '}
+                {state.num_entries_built.toLocaleString()} unique lineups, so the batch fills out
+                with duplicates the way a real contest field does. Duplicate entries split their
+                payouts (the ×N badge), exactly like DK&apos;s real tie rule.
+              </div>
+            )}
 
           <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
             <span className="badge ok">{state.num_entries_built.toLocaleString()} entries built</span>
