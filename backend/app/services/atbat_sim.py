@@ -180,21 +180,33 @@ def blend_pa_rates(
     pitcher_rates: dict[str, float] | None,
     *,
     batter_pa: int = 0,
+    pitcher_pa: int = 0,
     league_rates: dict[str, float] = LEAGUE_AVG_PA_RATES,
     full_trust_pa: int = 300,
+    full_trust_pitcher_pa: int = 400,
 ) -> dict[str, float]:
     """
-    Blends the batter's own PA-outcome rates (shrunk toward league
-    average for a thin sample, same shrinkage philosophy used
-    everywhere else in this app) with the opposing pitcher's own
-    allowed-rates -- each event's final probability moves in whatever
-    direction BOTH signals agree on, each ratio individually capped so
-    one extreme signal can't blow the blended distribution out to an
-    unrealistic shape, then renormalized to sum to exactly 1.0.
+    Blends the batter's own PA-outcome rates with the opposing
+    pitcher's own allowed-rates -- each event's final probability moves
+    in whatever direction BOTH signals agree on, each ratio
+    individually capped so one extreme signal can't blow the blended
+    distribution out to an unrealistic shape, then renormalized to sum
+    to exactly 1.0.
+
+    BOTH sides are shrunk toward league average for thin samples, not
+    just the batter. Pitchers were originally never shrunk at all -- a
+    3-start call-up with zero HR allowed hit the 0.3x floor on the HR
+    event in every single trial, an absurdly confident read of ~40
+    batters faced. `pitcher_pa` is his real batters-faced count;
+    ~400 BF (a bit over a half-season of starts) earns full trust,
+    mirroring the batter's own 300-PA bar.
     """
     if not batter_rates:
         batter_rates = league_rates
     trust = min(1.0, batter_pa / full_trust_pa) if full_trust_pa else 1.0
+    pitcher_trust = (
+        min(1.0, pitcher_pa / full_trust_pitcher_pa) if full_trust_pitcher_pa else 1.0
+    )
 
     combined: dict[str, float] = {}
     for event in PA_EVENTS:
@@ -204,6 +216,7 @@ def blend_pa_rates(
         batter_ratio = max(0.3, min(3.0, batter_ratio))
         if pitcher_rates:
             pitcher_ratio = (pitcher_rates.get(event, base) / base) if base else 1.0
+            pitcher_ratio = 1.0 + (pitcher_ratio - 1.0) * pitcher_trust
             pitcher_ratio = max(0.3, min(3.0, pitcher_ratio))
         else:
             pitcher_ratio = 1.0
@@ -382,32 +395,55 @@ def simulate_game(
     away_outs_faced = home_outs_faced = 0  # outs recorded BY each team's OWN starter
     home_starter_line = _empty_pitcher_line()
     away_starter_line = _empty_pitcher_line()
+    home_score = away_score = 0
 
-    for _ in range(innings):
+    for inning in range(1, innings + 1):
         # Away bats first (top of the inning) against the HOME starter,
         # using their own blended rates until his out budget runs out --
         # _simulate_half_inning_tracking_starter() itself handles the
         # mid-inning switch to home_bullpen_rates once it does.
-        away_idx, outs_by_home_starter, half_home_line = _simulate_half_inning_tracking_starter(
-            away_order, away_idx, away_pa_rates, box, rng,
-            max(0, home_starter_outs - home_outs_faced), home_bullpen_rates,
+        away_idx, outs_by_home_starter, half_home_line, top_runs = (
+            _simulate_half_inning_tracking_starter(
+                away_order, away_idx, away_pa_rates, box, rng,
+                max(0, home_starter_outs - home_outs_faced), home_bullpen_rates,
+            )
         )
         home_outs_faced += outs_by_home_starter
         _accumulate_pitcher_line(home_starter_line, half_home_line)
+        away_score += top_runs
 
-        home_idx, outs_by_away_starter, half_away_line = _simulate_half_inning_tracking_starter(
-            home_order, home_idx, home_pa_rates, box, rng,
-            max(0, away_starter_outs - away_outs_faced), away_bullpen_rates,
+        # The home team doesn't bat in the bottom of the final inning
+        # when it's already ahead -- a real game just ends. The old
+        # unconditional bottom half handed home hitters 3-4 phantom
+        # plate appearances across the lineup in every game they led.
+        if inning == innings and home_score > away_score:
+            break
+
+        # In the bottom of the final inning, the game ends the moment
+        # the home team takes the lead (a walk-off) -- runs past that
+        # can't happen in a real game either.
+        walkoff_deficit = (away_score - home_score) if inning == innings else None
+        home_idx, outs_by_away_starter, half_away_line, bottom_runs = (
+            _simulate_half_inning_tracking_starter(
+                home_order, home_idx, home_pa_rates, box, rng,
+                max(0, away_starter_outs - away_outs_faced), away_bullpen_rates,
+                walkoff_deficit=walkoff_deficit,
+            )
         )
         away_outs_faced += outs_by_away_starter
         _accumulate_pitcher_line(away_starter_line, half_away_line)
+        home_score += bottom_runs
 
     home_runs = sum(box.get(pid, {}).get("runs", 0) for pid in home_order)
     away_runs = sum(box.get(pid, {}).get("runs", 0) for pid in away_order)
 
-    total_outs_per_side = innings * 3
-    home_starter_line["complete_games"] = int(home_outs_faced >= total_outs_per_side)
-    away_starter_line["complete_games"] = int(away_outs_faced >= total_outs_per_side)
+    # A complete game means the starter recorded every out his side's
+    # defense actually played. For the AWAY starter that's legitimately
+    # 24 rather than 27 when the home team won -- a winning home team
+    # doesn't bat in (or finish) the bottom of the final inning.
+    home_starter_line["complete_games"] = int(home_outs_faced >= innings * 3)
+    away_cg_outs = (innings - 1) * 3 if home_score > away_score else innings * 3
+    away_starter_line["complete_games"] = int(away_outs_faced >= away_cg_outs)
     home_starter_line["shutouts"] = int(home_starter_line["complete_games"] and away_runs == 0)
     away_starter_line["shutouts"] = int(away_starter_line["complete_games"] and home_runs == 0)
 
@@ -434,7 +470,9 @@ def _simulate_half_inning_tracking_starter(
     rng: random.Random,
     starter_outs_remaining: int,
     bullpen_rates: dict[str, float],
-) -> tuple[int, int, dict[str, int]]:
+    *,
+    walkoff_deficit: int | None = None,
+) -> tuple[int, int, dict[str, int], int]:
     """
     Simulates one team's half-inning plate appearance by plate
     appearance, mutating `box` (player_id -> counting-stat line, same
@@ -451,7 +489,20 @@ def _simulate_half_inning_tracking_starter(
     Returns (next_start_idx, outs_charged_to_the_starter, a partial
     _empty_pitcher_line()-shaped dict of what the STARTER (not the
     bullpen) allowed this half-inning only -- simulate_game() sums
-    these across all of a starter's half-innings itself).
+    these across all of a starter's half-innings itself, and the runs
+    scored this half-inning).
+
+    Earned runs follow MLB's real charging rule: a run is charged to
+    whichever pitcher put THAT RUNNER on base, not whoever happens to
+    be pitching when he scores. The old version only charged the
+    starter when the scoring play itself was his -- runners he left on
+    base who scored off the bullpen were never charged to anyone,
+    which systematically under-counted starter ER (about -2 DK points
+    per inherited runner who came around) and ran every simulated
+    pitcher score hot.
+
+    `walkoff_deficit`: when set (the bottom of the final inning), the
+    half ends the moment this team's runs exceed it -- a real walk-off.
     """
     bases: tuple[int | None, int | None, int | None] = (None, None, None)
     outs = 0
@@ -459,6 +510,11 @@ def _simulate_half_inning_tracking_starter(
     starter_outs_charged = 0
     on_bullpen = starter_outs_remaining <= 0
     starter_line = _empty_pitcher_line()
+    runs_this_half = 0
+    # Which pitcher is responsible for each runner currently aboard --
+    # keyed by player id (a player occupies at most one base). Reaching
+    # base overwrites any stale entry from an earlier trip.
+    reached_vs_starter: dict[int, bool] = {}
 
     # A real half-inning always ends in 3 outs -- rarely more than a
     # dozen or so plate appearances even in a genuine chaotic rally.
@@ -511,6 +567,12 @@ def _simulate_half_inning_tracking_starter(
             elif event == "HR":
                 line["home_runs"] += 1
 
+        if event in ("1B", "2B", "3B", "HR", "BB", "HBP"):
+            # The batter reached (a HR "reaches" and scores in the same
+            # play) -- record which pitcher is responsible for him, for
+            # MLB's real earned-run charging rule below.
+            reached_vs_starter[batter_id] = pitched_by_starter
+
         new_bases, scorers, extra_out = _advance_runners(bases, event, batter_id, outs_before, rng)
         bases = new_bases
         if extra_out:
@@ -518,10 +580,22 @@ def _simulate_half_inning_tracking_starter(
             this_play_outs += 1
         for scorer_id in scorers:
             box.setdefault(scorer_id, _empty_line())["runs"] += 1
+            # MLB's real rule: the run is charged to whoever put THIS
+            # RUNNER on base -- an inherited runner scoring off the
+            # bullpen is still the starter's earned run.
+            if reached_vs_starter.get(scorer_id, pitched_by_starter):
+                starter_line["earned_runs"] += 1
+        runs_this_half += len(scorers)
         if scorers:
             line["rbi"] += len(scorers)
-            if pitched_by_starter:
-                starter_line["earned_runs"] += len(scorers)
+
+        if walkoff_deficit is not None and runs_this_half > walkoff_deficit:
+            # Walk-off: the game is over the instant the home team
+            # leads in the bottom of the final inning.
+            if not on_bullpen:
+                starter_outs_charged = min(starter_outs_charged, starter_outs_remaining)
+            idx += 1
+            break
 
         if not on_bullpen:
             starter_outs_charged += this_play_outs
@@ -531,7 +605,7 @@ def _simulate_half_inning_tracking_starter(
         idx += 1
 
     starter_line["outs"] = min(starter_outs_charged, starter_outs_remaining)
-    return idx % len(order), starter_line["outs"], starter_line
+    return idx % len(order), starter_line["outs"], starter_line, runs_this_half
 
 
 # Fewer than this many projected batting-order spots isn't a usable
@@ -733,19 +807,33 @@ async def _game_pa_rates(
     home_bullpen_rates = bullpen_pa_rates(bullpen_by_team.get(home["team_id"]))
     away_bullpen_rates = bullpen_pa_rates(bullpen_by_team.get(away["team_id"]))
 
+    home_pitcher_pa = sum(g.get("plate_appearances") or 0 for g in home_pitcher_log)
+    away_pitcher_pa = sum(g.get("plate_appearances") or 0 for g in away_pitcher_log)
+
     async def _hitter_rate(
-        hitter_id: int, opposing_pitcher_rates: dict[str, float], composites: dict[int, float | None]
+        hitter_id: int,
+        opposing_pitcher_rates: dict[str, float],
+        opposing_pitcher_pa: int,
+        composites: dict[int, float | None],
     ) -> tuple[int, dict[str, float]]:
         game_log = await mlb.get_player_game_log(hitter_id, season, group="hitting")
         game_log = _cutoff(game_log, as_of_date)
         own = pa_outcome_rates(game_log)
         batter_pa = sum(g.get("plate_appearances") or 0 for g in game_log)
-        blended = blend_pa_rates(own, opposing_pitcher_rates, batter_pa=batter_pa)
+        blended = blend_pa_rates(
+            own, opposing_pitcher_rates, batter_pa=batter_pa, pitcher_pa=opposing_pitcher_pa
+        )
         return hitter_id, _apply_edge_composite(blended, composites.get(hitter_id))
 
     home_rate_pairs, away_rate_pairs = await asyncio.gather(
-        asyncio.gather(*(_hitter_rate(pid, away_pitcher_allowed, home_composites) for pid in home_order)),
-        asyncio.gather(*(_hitter_rate(pid, home_pitcher_allowed, away_composites) for pid in away_order)),
+        asyncio.gather(*(
+            _hitter_rate(pid, away_pitcher_allowed, away_pitcher_pa, home_composites)
+            for pid in home_order
+        )),
+        asyncio.gather(*(
+            _hitter_rate(pid, home_pitcher_allowed, home_pitcher_pa, away_composites)
+            for pid in away_order
+        )),
     )
 
     return {
@@ -759,6 +847,132 @@ async def _game_pa_rates(
         "away_starter_outs_pool": away_starter_outs_pool,
         "home_pitcher_id": home_pitcher_id,
         "away_pitcher_id": away_pitcher_id,
+        # For the Vegas run anchoring in simulate_slate_trials -- the
+        # market's own implied team totals, already attached to every
+        # slate game.
+        "home_implied_runs": home.get("implied_runs"),
+        "away_implied_runs": away.get("implied_runs"),
+    }
+
+
+# --------------------------------------------------------------------------
+# Vegas run anchoring
+# --------------------------------------------------------------------------
+
+# How many quick games each calibration round simulates, and how many
+# damped correction rounds run. 300 x 5 = 1,500 extra sims per game --
+# ~15% of a real 10,000-trial run, for the single most valuable
+# calibration the engine gets.
+_ANCHOR_TRIALS = 300
+_ANCHOR_ROUNDS = 5
+# Correction damping: each round multiplies a side's scale by
+# (target/measured)^this. Below 1 so a single noisy round can't
+# overshoot, chosen with run-scoring convexity in mind (runs respond
+# super-linearly to reach-base probability, so a full-strength ratio
+# correction overshoots even off a perfect measurement).
+_ANCHOR_STEP = 0.5
+# A team's scale is bounded so anchoring can correct genuine engine
+# bias without being able to invent a cartoon offense when a market
+# number disagrees wildly with the roster-level inputs.
+_ANCHOR_SCALE_MIN = 0.75
+_ANCHOR_SCALE_MAX = 1.35
+# Close enough -- inside the market's own half-run quoting granularity.
+_ANCHOR_TOLERANCE = 0.15
+
+
+def _apply_run_scale(rates: dict[str, float], scale: float) -> dict[str, float]:
+    """Scale every reach-base event's probability by `scale` and
+    renormalize -- the same mechanism _apply_edge_composite uses, with
+    a single explicit knob, so anchoring nudges HOW OFTEN a team
+    reaches base without reshaping its mix of outcomes."""
+    if abs(scale - 1.0) < 1e-9:
+        return rates
+    out = {
+        e: (v * scale if e in _REACH_BASE_EVENTS else v)
+        for e, v in rates.items()
+    }
+    total = sum(out.values())
+    return {e: v / total for e, v in out.items()}
+
+
+def _anchored_rates(g: dict[str, Any], seed: int | None) -> dict[str, Any]:
+    """
+    Calibrate one game's PA rates so each side's mean simulated runs
+    match its Vegas implied total -- the review's "single most valuable
+    fix", and the honest replacement for hand-guessing how hard to damp
+    the composite. The field prices games off the market's numbers; a
+    sim that disagrees with the market about how many runs a team
+    scores disagrees with the field about every stack's value.
+
+    Damped stochastic fixed-point iteration: each round simulates
+    _ANCHOR_TRIALS quick games on its own INDEPENDENT stream, then
+    multiplies each side's scale by (target/measured)^_ANCHOR_STEP.
+
+    Independent streams per round -- deliberately NOT common random
+    numbers. CRN was tried first and fails here, because a simulated
+    game consumes its random stream sequentially: change one early
+    plate appearance's outcome and every later draw in the game shifts
+    to a different purpose, so re-running the "same" stream at a
+    different scale measures a genuinely different set of games (a real
+    trace showed a side's mean jumping half a run between rounds at an
+    IDENTICAL scale). Fresh noise each round plus a damped step
+    averages out instead of latching onto one stream's quirks.
+
+    A side with no implied total (odds not loaded) keeps scale 1.0 and
+    is left exactly as built.
+    """
+    home_target = g.get("home_implied_runs")
+    away_target = g.get("away_implied_runs")
+    if home_target is None and away_target is None:
+        return g
+
+    home_scale = away_scale = 1.0
+    for round_no in range(_ANCHOR_ROUNDS):
+        cal_rng = random.Random((seed or 0) * 7919 + 104729 + round_no)
+        home_rates = {
+            pid: _apply_run_scale(r, home_scale) for pid, r in g["home_pa_rates"].items()
+        }
+        away_rates = {
+            pid: _apply_run_scale(r, away_scale) for pid, r in g["away_pa_rates"].items()
+        }
+        home_bp = _apply_run_scale(g["home_bullpen_rates"], away_scale)
+        away_bp = _apply_run_scale(g["away_bullpen_rates"], home_scale)
+
+        home_total = away_total = 0
+        for _ in range(_ANCHOR_TRIALS):
+            result = simulate_game(
+                g["home_order"], g["away_order"], home_rates, away_rates,
+                home_bp, away_bp,
+                cal_rng.choice(g["home_starter_outs_pool"]),
+                cal_rng.choice(g["away_starter_outs_pool"]),
+                cal_rng,
+            )
+            home_total += result["home_runs"]
+            away_total += result["away_runs"]
+        home_mean = home_total / _ANCHOR_TRIALS
+        away_mean = away_total / _ANCHOR_TRIALS
+
+        done = True
+        if home_target is not None and home_mean > 0:
+            if abs(home_mean - home_target) > _ANCHOR_TOLERANCE:
+                home_scale *= (home_target / home_mean) ** _ANCHOR_STEP
+                home_scale = max(_ANCHOR_SCALE_MIN, min(_ANCHOR_SCALE_MAX, home_scale))
+                done = False
+        if away_target is not None and away_mean > 0:
+            if abs(away_mean - away_target) > _ANCHOR_TOLERANCE:
+                away_scale *= (away_target / away_mean) ** _ANCHOR_STEP
+                away_scale = max(_ANCHOR_SCALE_MIN, min(_ANCHOR_SCALE_MAX, away_scale))
+                done = False
+        if done:
+            break
+
+    return {
+        **g,
+        "home_pa_rates": {pid: _apply_run_scale(r, home_scale) for pid, r in g["home_pa_rates"].items()},
+        "away_pa_rates": {pid: _apply_run_scale(r, away_scale) for pid, r in g["away_pa_rates"].items()},
+        "home_bullpen_rates": _apply_run_scale(g["home_bullpen_rates"], away_scale),
+        "away_bullpen_rates": _apply_run_scale(g["away_bullpen_rates"], home_scale),
+        "vegas_anchor_scales": {"home": round(home_scale, 3), "away": round(away_scale, 3)},
     }
 
 
@@ -840,6 +1054,11 @@ async def simulate_slate_trials(
 
     player_trials: dict[int, list[float]] = {}
     rng = random.Random(seed)
+
+    # Anchor every game's simulated run environment to the market's
+    # implied totals before burning 10,000 trials on it -- see
+    # _anchored_rates.
+    per_game = [_anchored_rates(g, seed) for g in per_game]
 
     for g in per_game:
         home_ids, away_ids = g["home_order"], g["away_order"]

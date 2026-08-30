@@ -4373,6 +4373,116 @@ async def main() -> int:
           ),
           "")
 
+    print("\nAt-bat engine realism: ER charging, 9th inning, shrinkage, Vegas anchor")
+
+    # MLB's real earned-run rule: a run is charged to whoever put THAT
+    # RUNNER on base. Deterministic fixture: the starter walks the
+    # first batter (runner charged to him), strikes out the second
+    # (his 1-out budget is used up -> bullpen), and the third homers
+    # off the bullpen -- scoring the starter's inherited runner. The
+    # old code charged that run to nobody.
+    _walk_rates = {e: (1.0 if e == "BB" else 0.0) for e in atbat_sim.PA_EVENTS}
+    _k_rates = {e: (1.0 if e == "K" else 0.0) for e in atbat_sim.PA_EVENTS}
+    _hr_only = {e: (1.0 if e == "HR" else 0.0) for e in atbat_sim.PA_EVENTS}
+    _out_only = {e: (1.0 if e == "OUT" else 0.0) for e in atbat_sim.PA_EVENTS}
+    er_order = [601, 602, 603, 604, 605, 606, 607, 608, 609]
+    er_rates = {601: _walk_rates, 602: _k_rates, 603: _hr_only}
+    for pid in er_order[3:]:
+        er_rates[pid] = _out_only
+    # Once the starter departs, every batter faces the BULLPEN's rates
+    # -- so the bullpen fixture is all-HR, which scores the starter's
+    # inherited runner (charged to him) plus a stream of bullpen-era
+    # runs (charged to nobody's line here, and rightly not the starter).
+    er_box: dict[int, dict] = {}
+    _, er_outs, er_line, er_runs = atbat_sim._simulate_half_inning_tracking_starter(
+        er_order, 0, er_rates, er_box, random.Random(1), 1, _hr_only,
+    )
+    check("an INHERITED runner who scores off the bullpen is charged to the STARTER's earned "
+          "runs -- MLB's real rule, where the old code charged that run to nobody",
+          er_line["earned_runs"] == 1, str(er_line))
+    check("...while every bullpen-era run (and there are plenty in this all-HR fixture) is NOT "
+          "charged to the starter -- his ER stays at exactly the one inherited runner",
+          er_runs > 1 and er_line["earned_runs"] == 1, str((er_line["earned_runs"], er_runs)))
+    check("the starter's own line still reflects only what he personally allowed (1 walk, 1 K, "
+          "1 out, 0 hits -- the HR came off the bullpen)",
+          er_line["walks_against"] == 1 and er_line["strikeouts"] == 1
+          and er_line["outs"] == 1 and er_line["hits_against"] == 0, str(er_line))
+
+    # The home team doesn't bat in the bottom of the 9th when it leads:
+    # the all-out away lineup can never score, the home lineup homers
+    # constantly, so the away STARTER only ever faces 8 innings of home
+    # hitters -- 24 outs, never 27.
+    lead_result = atbat_sim.simulate_game(
+        home_order=hr_lineup, away_order=out_lineup,
+        home_pa_rates={pid: hr_rates for pid in hr_lineup},
+        away_pa_rates={pid: all_out_rates for pid in out_lineup},
+        home_bullpen_rates=all_out_rates, away_bullpen_rates=hr_rates,
+        home_starter_outs=27, away_starter_outs=27,
+        rng=random.Random(11),
+    )
+    check("a leading home team skips the bottom of the 9th -- its opponents' starter records "
+          "24 outs (8 innings), not 27, ending the old 3-4 phantom home plate appearances",
+          lead_result["away_starter_line"]["outs"] == 24, str(lead_result["away_starter_line"]))
+    check("the away starter who pitched every out his defense played in a home win still earns "
+          "his complete game at 24 outs",
+          lead_result["away_starter_line"]["complete_games"] == 1,
+          str(lead_result["away_starter_line"]))
+
+    # Walk-off: in the bottom of the final inning the half ends the
+    # moment the home team takes the lead. With only HR/OUT events and
+    # a 0-run deficit, exactly one run can ever score.
+    wo_box: dict[int, dict] = {}
+    _, _, _, wo_runs = atbat_sim._simulate_half_inning_tracking_starter(
+        hr_lineup, 0, {pid: hr_rates for pid in hr_lineup}, wo_box,
+        random.Random(3), 27, all_out_rates, walkoff_deficit=0,
+    )
+    check("a walk-off ends the half-inning the instant the home team leads -- exactly one run "
+          "scores past a tied game, never a phantom multi-run bottom of the 9th",
+          wo_runs == 1, str(wo_runs))
+
+    # Pitcher-rate shrinkage: a 40-BF pitcher with zero HR allowed must
+    # NOT suppress opposing HR probability anywhere near as hard as a
+    # 400-BF pitcher with the same zero -- the old code trusted both
+    # identically (straight to the 0.3x floor).
+    _zero_hr_pitcher = dict(atbat_sim.LEAGUE_AVG_PA_RATES)
+    _zero_hr_pitcher["HR"] = 0.0
+    thin = atbat_sim.blend_pa_rates(
+        atbat_sim.LEAGUE_AVG_PA_RATES, _zero_hr_pitcher, batter_pa=600, pitcher_pa=40)
+    proven = atbat_sim.blend_pa_rates(
+        atbat_sim.LEAGUE_AVG_PA_RATES, _zero_hr_pitcher, batter_pa=600, pitcher_pa=400)
+    check("a 40-batters-faced pitcher's zero-HR line is shrunk toward league average, while a "
+          "400-BF pitcher's identical line is trusted -- ~40 BF was never evidence of anything",
+          thin["HR"] > proven["HR"], str((thin["HR"], proven["HR"])))
+
+    check("_apply_run_scale scales reach-base probability and stays a real distribution",
+          abs(sum(atbat_sim._apply_run_scale(atbat_sim.LEAGUE_AVG_PA_RATES, 1.2).values()) - 1.0) < 1e-9
+          and atbat_sim._apply_run_scale(atbat_sim.LEAGUE_AVG_PA_RATES, 1.2)["HR"]
+          > atbat_sim.LEAGUE_AVG_PA_RATES["HR"], "")
+
+    # Vegas anchoring: two identical league-average offenses, but the
+    # market says one scores 2.8 runs and the other 6.2 -- the anchor
+    # must scale the first DOWN and the second UP.
+    anchor_game = {
+        "home_order": hr_lineup, "away_order": out_lineup,
+        "home_pa_rates": {pid: dict(atbat_sim.LEAGUE_AVG_PA_RATES) for pid in hr_lineup},
+        "away_pa_rates": {pid: dict(atbat_sim.LEAGUE_AVG_PA_RATES) for pid in out_lineup},
+        "home_bullpen_rates": dict(atbat_sim.LEAGUE_AVG_PA_RATES),
+        "away_bullpen_rates": dict(atbat_sim.LEAGUE_AVG_PA_RATES),
+        "home_starter_outs_pool": [18], "away_starter_outs_pool": [18],
+        "home_pitcher_id": 9901, "away_pitcher_id": 9902,
+        "home_implied_runs": 2.8, "away_implied_runs": 6.2,
+    }
+    anchored = atbat_sim._anchored_rates(anchor_game, seed=5)
+    scales = anchored.get("vegas_anchor_scales") or {}
+    check("Vegas anchoring scales a team the market prices LOW below 1.0 and a team priced "
+          "HIGH above 1.0 -- the sim now agrees with the market about run environments the "
+          "way the real field does",
+          scales.get("home", 1) < 1.0 < scales.get("away", 1), str(scales))
+    check("a game with no implied totals at all is left exactly as built -- anchoring never "
+          "invents a target",
+          "vegas_anchor_scales" not in atbat_sim._anchored_rates(
+              {**anchor_game, "home_implied_runs": None, "away_implied_runs": None}, seed=5), "")
+
     print("\nAt-bat-level slate orchestration (atbat_sim.simulate_slate_trials)")
 
     def _slate_hit_game():
