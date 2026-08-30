@@ -281,7 +281,7 @@ _SALARY_TIER_WEIGHT = 0.3
 # runs alone rank-correlates with its real summed hitter ownership at
 # r=+0.80 across 15 real slates, stronger than any per-player signal in
 # this module.
-_TEAM_STACK_WEIGHT = 2.0
+_TEAM_STACK_WEIGHT = 4.0
 
 # The two team-level signals, blended into one 0-1 desirability score.
 # Both measured against real archived DK contest standings (see
@@ -335,7 +335,19 @@ _OPPONENT_PITCHER_CHALK_WEIGHT = 0.25
 # sit at its centre rather than at its exact argmin -- with only 4
 # slates the 1-2% between them is noise, and the lower, rounder values
 # are the more conservative read of a signal this new.
-_SOFTMAX_TEMPERATURE = 1.0
+#
+# Re-swept a FOURTH time (jointly with the stack weight) when the
+# ownership pool was restricted to the starting nine and multi-slot
+# eligibility landed. Both changes reshape every group -- fewer, more
+# concentrated players per group, some competing in two groups at once
+# -- so the old constants, tuned against the diluted
+# every-rostered-hitter pool, genuinely mis-fit the new one (chalk MAE
+# 8.00 at the old 2.0/1.0 vs 7.03 here, on the same slates). The
+# optimum moved along a weight/temperature diagonal and was probed
+# past the sweep grid's edge to confirm it turns (stack MAE bottoms at
+# weight ~4.0-4.5 then rises); 4.0/1.4 sits at the balance point
+# rather than either metric's argmin.
+_SOFTMAX_TEMPERATURE = 1.4
 
 
 def _percentiles(values: dict[str, float]) -> dict[str, float]:
@@ -568,9 +580,19 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
     """
     ownership: dict[int, float] = {}
 
+    # A multi-eligible player ("1B/3B") competes in EVERY slot group
+    # he's eligible for, and his reported ownership is the sum across
+    # them -- real %Drafted is his share of entries rostering him at
+    # ANY slot. Keeping only the first-listed slot made a "2B/SS"
+    # player invisible to the SS group entirely, understating him and
+    # overstating the remaining SS chalk (each group always sums to
+    # slots x 100%, so his missing share got redistributed). Entries
+    # carry `positions` (all slots) when the caller knows them, falling
+    # back to the single `position` everywhere else.
     groups: dict[str, list[dict[str, Any]]] = {}
     for p in pool:
-        groups.setdefault(p["position"], []).append(p)
+        for slot in (p.get("positions") or [p["position"]]):
+            groups.setdefault(slot, []).append(p)
 
     team_stack = _team_stack_scores(pool)
 
@@ -635,7 +657,10 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
         total_weight = sum(weights)
 
         for p, weight in zip(players, weights):
-            ownership[p["id"]] = round((weight / total_weight) * slot_count * 100, 2)
+            share = (weight / total_weight) * slot_count * 100
+            # Accumulate, not overwrite -- a multi-eligible player's
+            # total is his share summed across every group he's in.
+            ownership[p["id"]] = round(ownership.get(p["id"], 0.0) + share, 2)
 
     # Pass 1: pitchers, scored exactly as any other group -- nothing
     # downstream can affect a pitcher's own ownership.
