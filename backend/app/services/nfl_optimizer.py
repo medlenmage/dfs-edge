@@ -26,6 +26,14 @@ import pulp
 
 # DraftKings Classic NFL: one salary cap, nine roster slots.
 SALARY_CAP = 50_000
+# Applied automatically unless the caller overrides it (0 disables the
+# floor entirely) -- a lineup leaving thousands of dollars unspent is
+# almost always leaving real projected points on the table, so this is
+# a sensible default rather than an opt-in. Mirrors MLB's own
+# optimizer.DEFAULT_MIN_SALARY, which NFL was missing entirely: every
+# NFL entry point defaulted the floor to 0, so 23% of a real generated
+# batch came back under $47,000 (worst: $40,500 -- nearly $10k unspent).
+DEFAULT_MIN_SALARY = 47_000
 SLOT_REQUIREMENTS = {
     "QB": 1,
     "RB": 2,
