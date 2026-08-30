@@ -27,6 +27,12 @@ env/
 *.sqlite3
 /cache/
 
+# Real DraftKings contest-standings exports (the user's own downloaded
+# archives). Kept locally on purpose -- every ownership/projection
+# backtest in scripts/ reads them -- but never pushed: they're large
+# binaries and they carry other real DK users' usernames.
+/Contest Data/
+
 # ---- Node / frontend ----
 node_modules/
 dist/

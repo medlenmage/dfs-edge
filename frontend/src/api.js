@@ -195,40 +195,52 @@ export const api = {
       }),
     }),
 
+  // Build a whole contest -- lineups only, no economics. `contestSize`
+  // is the single size control: it's both the contest's field size and
+  // how many lineups get built. Economics come afterwards, from
+  // simulateContestBatch() on the batch_id this returns.
   buildContestEntries: (
     date,
     contestType,
-    numLineups,
-    {
-      projectionSource = 'rotowire',
-      maxExposurePct = null,
-      fieldSize = null,
-      sampleSize = null,
-      includedGamePks = null,
-      minSalary = 47000,
-      maxSalary = 50000,
-      allowDuplicates = false,
-      maxDuplicationRisk = null,
-      fieldSharpness = 'marquee',
-      reroll = 0,
-    } = {},
+    contestSize,
+    { projectionSource = 'rotowire', includedGamePks = null, reroll = 0 } = {},
   ) =>
     request('/api/mlb/contest-entries', {
       method: 'POST',
       body: JSON.stringify({
         date,
         contest_type: contestType,
-        num_lineups: numLineups,
+        contest_size: contestSize,
         projection_source: projectionSource,
-        max_exposure_pct: maxExposurePct,
-        field_size: fieldSize,
-        sample_size: sampleSize,
         included_game_pks: includedGamePks,
-        min_salary: minSalary,
-        max_salary: maxSalary,
-        allow_duplicates: allowDuplicates,
-        max_duplication_risk: maxDuplicationRisk,
+        reroll,
+      }),
+    }),
+
+  // Simulate a contest that was already built. Re-runnable against the
+  // same batch under different economics (a different entry cost, a
+  // flatter payout curve) without rebuilding a single lineup.
+  simulateContestBatch: (
+    batchId,
+    {
+      date = null,
+      entryFee = null,
+      firstPlacePct = null,
+      selfPlay = true,
+      fieldSharpness = 'marquee',
+      engine = 'bootstrap',
+      reroll = 0,
+    } = {},
+  ) =>
+    request(`/api/mlb/contest-entries/${batchId}/simulate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        date,
+        entry_fee: entryFee,
+        first_place_pct: firstPlacePct,
+        self_play: selfPlay,
         field_sharpness: fieldSharpness,
+        engine,
         reroll,
       }),
     }),

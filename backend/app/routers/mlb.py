@@ -788,121 +788,192 @@ async def build_contest_field(
 async def build_contest_entries(
     date: str | None = Body(None, embed=True),
     contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
-    num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {contest.MAX_USER_LINEUPS:,}"),
+    contest_size: int = Body(
+        ...,
+        embed=True,
+        description=(
+            "The contest's size -- one of the selected preset's own `sizes`. This is the single "
+            "size control: it is both the contest's field size AND how many lineups get built, "
+            "since the generator builds a contest rather than a handful of entries to drop into "
+            f"someone else's. Building is capped at {contest.MAX_USER_LINEUPS:,}, so a larger "
+            "contest gets that many lineups standing in for the full field -- the response "
+            "reports num_entries_built alongside field_size rather than conflating them."
+        ),
+    ),
     projection_source: str = Body(
         "rotowire", embed=True, description="Which FPTS/ownership numbers to build against: 'rotowire' or 'inhouse'"
-    ),
-    max_exposure_pct: float | None = Body(
-        None, embed=True, description="Cap how often any one player appears across the whole batch"
-    ),
-    field_size: int | None = Body(
-        None, embed=True, description="Override the preset's real contest size (entries) -- must be >= num_lineups"
-    ),
-    sample_size: int | None = Body(
-        None, embed=True, description="How many synthetic opponent lineups to actually build (capped)"
     ),
     included_game_pks: list[int] | None = Body(
         None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
     ),
-    min_salary: int = Body(
-        optimizer.DEFAULT_MIN_SALARY,
-        embed=True,
-        description="Floor on each entry's salary. Defaults to $47,000 -- pass 0 to disable.",
-    ),
-    max_salary: int = Body(
-        optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's salary"
-    ),
-    allow_duplicates: bool = Body(
-        False,
-        embed=True,
-        description="Allow exact duplicate entries in the batch (a real GPP move -- entering a signature build multiple times). Each entry reports duplicate_count",
-    ),
-    max_duplication_risk: float | None = Body(
-        None,
-        embed=True,
-        description="Reject any entry whose cumulative (log-product) ownership exceeds this -- a chalk filter distinct from a salary/exposure cap, catching a lineup where every player is moderately chalky together (the real 'exact duplicate' risk) even when its SUMMED total_ownership_pct looks unremarkable. More negative = stricter (closer to 0 = looser). Unset by default (unconstrained).",
-    ),
-    field_sharpness: str = Body(
-        "marquee",
-        embed=True,
-        description="How sharp the simulated opponent field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays).",
-    ),
     reroll: int = Body(
         0,
         embed=True,
-        description="Bump to get a genuinely different random draw for otherwise-identical settings. At the default 0, the same settings on the same date always reproduce the same batch.",
+        description="Bump to get a genuinely different random draw for otherwise-identical settings. At the default 0, the same settings on the same date always reproduce the same contest.",
     ),
 ) -> dict[str, Any]:
     """
-    The mass multi-entry contest generator: build up to MAX_USER_LINEUPS
-    of your own entries for a named contest type in one request, then
-    rank the whole batch against a simulated opponent field for
-    cash-rate and payout economics.
+    The contest generator: build a whole DraftKings Classic MLB contest
+    in one request -- lineups and nothing else.
 
-    Separate from both the small/exact optimizer (POST /lineups, MILP,
-    capped at 150) and the single-lineup field test (POST
-    /contest-field) -- this is the fast, large-scale path: entries are
-    built by randomized construction weighted toward projected points,
-    not an exact solve, so they're individually strong and mutually
-    distinct rather than provably optimal. Requires a DraftKings salary
-    CSV and either a RotoWire projections CSV or the in-house model
-    loaded for the date, same as the optimizer.
+    Deliberately has no economics. Cash rate, payouts and ROI belong to
+    the simulator, which runs afterwards on the batch this returns
+    (POST /contest-entries/{batch_id}/simulate) with its own inputs --
+    the entry cost and the payout curve's percent-to-first, neither of
+    which has anything to do with how the lineups themselves get built.
 
-    The full batch is cached under a `batch_id` returned in the
-    response -- GET /contest-entries/{batch_id}/csv downloads all of
-    it (not just the `sample_entries`/`results` preview capped at 200
-    below), e.g. to hand off to an external simulator.
+    Equally deliberately, there are no salary, exposure or duplicate
+    knobs. Every entry is built toward spending the cap (see
+    contest._SALARY_PACING_STRENGTH) because a lineup leaving salary
+    unspent is leaving projected points behind, and duplicates are
+    always allowed because a real contest field contains them. Requires
+    a DraftKings salary CSV and either a RotoWire projections CSV or the
+    in-house model loaded for the date, same as the optimizer.
+
+    The full batch is cached under a `batch_id` returned in the response
+    -- the simulator, the late-swap endpoint, the Entry Manager and GET
+    /contest-entries/{batch_id}/csv all read it from there, rather than
+    it being re-sent (the response itself previews only the first 200).
     """
     day = date or date_cls.today().isoformat()
     # Always includes in-house data -- see build_contest_field's own
-    # comment above; the opponent field this batch gets ranked against
-    # needs a real ownership fallback wherever RotoWire's export doesn't
-    # cover a player.
+    # comment above; the pool needs a real ownership fallback wherever
+    # RotoWire's export doesn't cover a player.
     slate = await mlb_slate.build_slate(day, include_inhouse=True)
     try:
-        result = contest.build_contest_entries(
+        result = contest.build_contest_lineups(
             slate,
             contest_type,
-            num_lineups,
+            contest_size,
             projection_source=projection_source,
-            max_exposure_pct=max_exposure_pct,
-            field_size=field_size,
-            sample_size=sample_size,
             included_game_pks=included_game_pks,
-            min_salary=min_salary,
-            max_salary=max_salary,
-            allow_duplicates=allow_duplicates,
-            max_duplication_risk=max_duplication_risk,
-            field_sharpness=field_sharpness,
-            # Same determinism as the simulated endpoint -- identical
-            # settings reproduce the identical batch (see _sim_seed).
-            seed=_sim_seed(day, contest_type, projection_source, "deterministic", reroll),
+            # Identical settings reproduce the identical contest (see
+            # _sim_seed); `reroll` bumps into a genuinely new draw.
+            seed=_sim_seed(day, contest_type, projection_source, "build", reroll),
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     full_entries = result.pop("entries")
-    full_results = result["results"]  # keep the full list cached...
-    # Field and contest are cached alongside so a later late swap can
-    # re-rank against the SAME opponent field; popped off the response
-    # since the frontend has no use for thousands of opponent lineups.
-    full_field = result.pop("field", [])
     batch_id = uuid4().hex
     cache.put(
         f"contest_batch:{batch_id}",
         {
             "entries": full_entries,
-            "results": full_results,
-            "field": full_field,
+            "results": [],
+            "field": [],
             "contest": result.get("contest"),
+            "contest_type": contest_type,
+            "projection_source": projection_source,
+            "included_game_pks": included_game_pks,
         },
         _CONTEST_BATCH_TTL,
     )
 
     result["batch_id"] = batch_id
-    result["results"] = full_results[:200]  # ...but only preview it here
     result["sample_entries"] = full_entries[:200]
     return {"date": day, **result}
+
+
+@router.post("/contest-entries/{batch_id}/simulate")
+async def simulate_contest_batch(
+    batch_id: str,
+    date: str | None = Body(None, embed=True),
+    entry_fee: float | None = Body(
+        None,
+        embed=True,
+        description="What one entry costs. This sets the prize pool (field size x entry fee, less rake), so it drives every payout and every ROI in the result. Defaults to the contest preset's own fee.",
+    ),
+    first_place_pct: float | None = Body(
+        None,
+        embed=True,
+        description="What share of the prize pool 1st place wins. A lower value flattens the payout curve -- more spread across the paid ranks, less concentrated at 1st -- which changes every entry's simulated ROI. Defaults to the contest preset's own value.",
+    ),
+    self_play: bool = Body(
+        True,
+        embed=True,
+        description="Default: rank the contest against ITSELF -- the generator builds the whole contest, so the batch IS the field. Set false to rank it against a separately-sampled, ownership-weighted public field instead, which answers the different question of how these lineups would fare against real public rosters.",
+    ),
+    field_sharpness: str = Body(
+        "marquee",
+        embed=True,
+        description="How sharp the sampled public field is: 'low', 'marquee' (default) or 'high'. Only used when self_play is false -- self-play never samples a separate field.",
+    ),
+    engine: str = Body(
+        "bootstrap",
+        embed=True,
+        description="'bootstrap' (default) samples each player's own historical DK-point outcome pool. 'atbat' instead runs genuine plate-appearance-by-plate-appearance simulated games for the whole slate, but requires a CONFIRMED lineup on both sides and a resolvable probable pitcher for every game on the slate.",
+    ),
+    reroll: int = Body(
+        0, embed=True, description="Bump for a genuinely different set of simulated draws on the same batch."
+    ),
+) -> dict[str, Any]:
+    """
+    Simulate an already-built contest -- the simulator half of the
+    generator/simulator split.
+
+    Takes a `batch_id` from POST /contest-entries and runs
+    _SIM_TRIALS Monte Carlo trials over it, so the same contest can be
+    simulated repeatedly under different economics (a different entry
+    cost, a flatter or more top-heavy payout curve) without rebuilding a
+    single lineup. The simulated batch is cached under a NEW batch_id,
+    leaving the original build intact and re-simulatable.
+    """
+    cached = cache.get(f"contest_batch:{batch_id}")
+    if not cached or not cached.get("entries"):
+        raise HTTPException(
+            status_code=404,
+            detail="That batch has expired or was never built -- build the contest again.",
+        )
+
+    day = date or date_cls.today().isoformat()
+    season = int(day[:4])
+    slate = await mlb_slate.build_slate(day, include_inhouse=True)
+    try:
+        result = await contest.simulate_contest_batch(
+            cached["entries"],
+            cached["contest"],
+            season=season,
+            contest_type=cached.get("contest_type", ""),
+            slate=slate,
+            num_trials=_SIM_TRIALS,
+            entry_fee=entry_fee,
+            first_place_pct=first_place_pct,
+            self_play=self_play,
+            field=cached.get("field") or None,
+            field_sharpness=field_sharpness,
+            engine=engine,
+            projection_source=cached.get("projection_source", "rotowire"),
+            included_game_pks=cached.get("included_game_pks"),
+            seed=_sim_seed(day, batch_id, str(entry_fee), engine, reroll),
+        )
+    except contest.ContestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    full_entries = result.pop("entries")
+    full_results = result["results"]
+    full_field = result.pop("field", [])
+    new_batch_id = uuid4().hex
+    cache.put(
+        f"contest_batch:{new_batch_id}",
+        {
+            "entries": full_entries,
+            "results": full_results,
+            "field": full_field,
+            "contest": result.get("contest"),
+            "contest_type": cached.get("contest_type", ""),
+            "projection_source": cached.get("projection_source", "rotowire"),
+            "included_game_pks": cached.get("included_game_pks"),
+        },
+        _CONTEST_BATCH_TTL,
+    )
+
+    result["batch_id"] = new_batch_id
+    result["source_batch_id"] = batch_id
+    result["results"] = full_results[:200]
+    result["sample_entries"] = full_entries[:200]
+    return {"date": day, **result}
+
 
 
 @router.post("/contest-entries-simulated")
@@ -926,9 +997,9 @@ async def build_contest_entries_simulated(
         None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
     ),
     min_salary: int = Body(
-        optimizer.DEFAULT_MIN_SALARY,
+        0,
         embed=True,
-        description="Floor on each entry's salary. Defaults to $47,000 -- pass 0 to disable.",
+        description="Floor on each entry's salary. Off by default: a hard floor makes whole stack shapes infeasible and stalls a batch, and entries are already built toward spending the cap (contest._SALARY_PACING_STRENGTH).",
     ),
     max_salary: int = Body(
         optimizer.SALARY_CAP, embed=True, description="Ceiling on each entry's salary"
@@ -1212,7 +1283,12 @@ async def download_contest_entries_csv(batch_id: str) -> Response:
             status_code=404,
             detail="That batch has expired or doesn't exist -- generate a new one and download again.",
         )
-    csv_text = lineup_export.lineups_to_csv(cached["entries"], results=cached["results"])
+    # A build-only batch has no results yet (the simulator is a
+    # separate step now) -- pass None rather than an empty list, which
+    # would not line up with the entries it is meant to be aligned to.
+    csv_text = lineup_export.lineups_to_csv(
+        cached["entries"], results=cached.get("results") or None
+    )
     return Response(
         content=csv_text,
         media_type="text/csv",
