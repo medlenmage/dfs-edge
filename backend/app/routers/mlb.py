@@ -454,6 +454,8 @@ async def refresh_rotowire_projections(
 
     found: list[dict[str, Any]] = []
     rows_by_window: dict[str, list[dict[str, Any]]] = {}
+    teams_by_window: dict[str, set[str]] = {}
+    window_dates: dict[str, str | None] = {}
     for slate in slates:
         window = slate["windowName"]
         entry: dict[str, Any] = {
@@ -474,6 +476,10 @@ async def refresh_rotowire_projections(
             found.append(entry)
             continue
         rows_by_window[window] = rows
+        teams_by_window[window] = {
+            player_match.normalize_team(r["team"]) for r in rows if r.get("team")
+        }
+        window_dates[window] = slate.get("startDateOnly")
         cache.put(_rotowire_slate_key(slate["slateID"]), rows, _ROTOWIRE_SLATE_TTL)
         entry["players"] = len(rows)
         # Teams, not games -- a RotoWire player row carries its own team
@@ -489,9 +495,34 @@ async def refresh_rotowire_projections(
             detail="RotoWire has slates listed but no players posted in any of them yet.",
         )
 
-    # Which one becomes active: the requested window, else the main
-    # slate, else whichever did come back (some days there's no "All").
+    # Which one becomes active. An explicitly requested window always
+    # wins. With no request, AUTO-MATCH against the loaded DK salary
+    # slate's own teams: a user working DK's Late Night slate who
+    # clicks Refresh wants the Late Night window's projections, and
+    # activating "All" (which doesn't even contain the late-night-only
+    # games) silently loaded a pool that missed their entire slate --
+    # the exact reported bug this exists to prevent. Only when no DK
+    # slate is loaded (or nothing covers at least half of it) does the
+    # old default -- the main "All" window -- apply.
     active = slate_name if slate_name in rows_by_window else None
+    auto_matched = False
+    if active is None:
+        dk_dates = {d for d in window_dates.values() if d}
+        for dk_day in sorted(dk_dates):
+            dk_teams = {
+                player_match.normalize_team(g[side])
+                for g in salaries.slate_games(salaries.load(dk_day))
+                for side in ("away", "home")
+            }
+            matchable = {
+                w: teams for w, teams in teams_by_window.items()
+                if window_dates.get(w) == dk_day
+            }
+            match = salaries.pick_best_team_match(matchable, dk_teams)
+            if match is not None:
+                active = match
+                auto_matched = True
+                break
     if active is None:
         active = (
             rotowire.MAIN_SLATE_NAME
@@ -502,6 +533,11 @@ async def refresh_rotowire_projections(
 
     result = await _activate_rotowire_slate(active_slate["startDateOnly"], rows_by_window[active])
     result["active_slate"] = active
+    if auto_matched:
+        result["note"] = (
+            f"Auto-matched to the '{active}' window -- its games line up with the DK slate "
+            "you have loaded. Use the Slate picker to override."
+        )
     result["slates"] = found
     if slate_name and slate_name != active:
         result["note"] = (
