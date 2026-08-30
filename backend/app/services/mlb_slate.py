@@ -28,7 +28,7 @@ from typing import Any
 from app import cache
 from app.clients import fantasylabs, mlb, odds, rotowire_umpires, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
-from app.services import inhouse_projections, projections, salaries, scoring
+from app.services import inhouse_projections, projections, salaries, scoring, variance
 
 log = logging.getLogger(__name__)
 
@@ -430,6 +430,11 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
     # (not just the ones that made it into ownership_pool), so leverage
     # can still show up even before a DK salary is loaded.
     ceilings = await inhouse_projections.player_ceilings(all_players, season)
+    # Boom/bust tail reads of the same pools -- what fraction of each
+    # player's real games would have cleared 1.5x today's projection,
+    # and what fraction were the nightmare night (see
+    # variance.boom_bust_from_pool for thresholds and calibration).
+    boom_bust = await inhouse_projections.player_boom_bust(all_players, season, inhouse)
 
     def _leverage(ceiling: float | None, own_pct: float | None) -> float | None:
         if ceiling is None or own_pct is None:
@@ -442,6 +447,9 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                 value = inhouse.get(hitter["id"])
                 if value is not None:
                     hitter["projection"] = {**(hitter["projection"] or {}), "inhouse_fpts": value}
+                bb = boom_bust.get(hitter["id"])
+                if bb:
+                    hitter["projection"] = {**(hitter["projection"] or {}), **bb}
                 own_pct = ownership.get(hitter["id"])
                 if own_pct is not None:
                     hitter["projection"] = {**(hitter["projection"] or {}), "inhouse_ownership_pct": own_pct}
@@ -458,6 +466,9 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                 value = inhouse.get(pitcher["id"])
                 if value is not None:
                     pitcher["projection"] = {**(pitcher["projection"] or {}), "inhouse_fpts": value}
+                bb = boom_bust.get(pitcher["id"])
+                if bb:
+                    pitcher["projection"] = {**(pitcher["projection"] or {}), **bb}
                 own_pct = ownership.get(pitcher["id"])
                 if own_pct is not None:
                     pitcher["projection"] = {**(pitcher["projection"] or {}), "inhouse_ownership_pct": own_pct}
@@ -469,6 +480,40 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                         "inhouse_ceiling": ceiling,
                         "leverage_score": leverage,
                     }
+
+    # Stack-level boom/bust for the Stacks tab: a real correlated Monte
+    # Carlo over each side's top-5 bats' own outcome pools (teammates
+    # share each trial's team-environment draw, exactly as the full
+    # simulator correlates them) -- NOT five independent tail reads
+    # multiplied together, which would thin both tails. Top 5 by the
+    # same displayed projection the per-player numbers measure against.
+    for g in out_games:
+        for side in ("home", "away"):
+            scored = [
+                h for h in g[side]["hitters"]
+                if ((h.get("projection") or {}).get("fpts")
+                    or (h.get("projection") or {}).get("inhouse_fpts"))
+            ]
+            top5 = sorted(
+                scored,
+                key=lambda h: -(h["projection"].get("fpts") or h["projection"]["inhouse_fpts"]),
+            )[:5]
+            if len(top5) < 5:
+                continue
+            pools = await asyncio.gather(
+                *(
+                    variance.player_outcome_pool(h["id"], h["position"], season)
+                    for h in top5
+                )
+            )
+            result = variance.stack_boom_bust(
+                [sorted(pool) for pool in pools],
+                [h["projection"].get("fpts") or h["projection"]["inhouse_fpts"] for h in top5],
+                [(h.get("edge") or {}).get("composite") for h in top5],
+            )
+            if result:
+                g[side]["stack_boom_pct"] = result["boom_pct"]
+                g[side]["stack_bust_pct"] = result["bust_pct"]
 
 
 # --------------------------------------------------------------------------

@@ -90,6 +90,10 @@ export function PitcherTable({ slate }) {
         inhouseFpts: p.projection?.inhouse_fpts ?? null,
         inhouseOwnershipPct: p.projection?.inhouse_ownership_pct ?? null,
         leverage: p.projection?.leverage_score ?? null,
+        boomPct: p.projection?.boom_pct ?? null,
+        boom175Pct: p.projection?.boom_175x_pct ?? null,
+        boom2xPct: p.projection?.boom_2x_pct ?? null,
+        bustPct: p.projection?.bust_pct ?? null,
         venue: g.venue.name,
         parkHr: g.venue.park_factors.hr,
         roofClosed: g.venue.roof_closed,
@@ -163,6 +167,8 @@ export function PitcherTable({ slate }) {
             <th className="num">Own%</th>
             <th className="num">In-house FPTS</th>
             <th className="num">In-house Own%</th>
+            <th className="num" title="Chance of a BOOM game: how often this player's own real games this season cleared 1.5x today's projection. Hover a value for the 1.75x and 2x ladder. Computed from the same per-game outcome pool the Monte Carlo simulator draws from -- needs in-house projections loaded.">Boom%</th>
+            <th className="num" title="Chance of a BUST start: how often this pitcher's own real starts this season scored 5 DK points or fewer -- shelled and pulled early, negative scores included. Needs in-house projections loaded.">Bust%</th>
             <th className="num">Leverage</th>
             <th>Park / conditions</th>
             <th>Biggest factor</th>
@@ -209,6 +215,30 @@ export function PitcherTable({ slate }) {
               </td>
               <td className="num">
                 {r.inhouseOwnershipPct != null ? `${r.inhouseOwnershipPct.toFixed(1)}%` : '—'}
+              </td>
+              <td
+                className="num"
+                title={
+                  r.boomPct != null
+                    ? `How often his real starts cleared a multiple of today's projection: 1.5x ${r.boomPct}%, 1.75x ${r.boom175Pct}%, 2x ${r.boom2xPct}%.`
+                    : undefined
+                }
+              >
+                {r.boomPct != null ? (
+                  <span className={`badge ${r.boomPct >= 30 ? 'ok' : ''}`}>{r.boomPct}%</span>
+                ) : (
+                  '—'
+                )}
+              </td>
+              <td
+                className="num"
+                title={r.bustPct != null ? 'How often his real starts scored 5 DK points or fewer -- shelled and pulled early, negatives included.' : undefined}
+              >
+                {r.bustPct != null ? (
+                  <span className={`badge ${r.bustPct >= 25 ? 'risk' : ''}`}>{r.bustPct}%</span>
+                ) : (
+                  '—'
+                )}
               </td>
               <td className="num">
                 {r.leverage != null ? (

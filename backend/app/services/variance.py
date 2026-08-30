@@ -164,6 +164,143 @@ async def player_outcome_pool(
     return await cache.cached(cache_key, settings.ttl_game_logs, _load)
 
 
+# ---------------------------------------------------------------------------
+# Boom / bust
+# ---------------------------------------------------------------------------
+#
+# "Boom" and "bust" are direct tail reads of a player's own bootstrap
+# outcome pool against TODAY'S projection -- what fraction of his real,
+# already-played games would have cleared 1.5x the number he's projected
+# for today, and what fraction were the nightmare night. No new model:
+# the pool is the exact same one the Monte Carlo simulator draws from
+# (player_outcome_pool above), so these percentages and the simulator
+# can never disagree about what a player's distribution looks like.
+#
+# The projection is the denominator on purpose. A pool whose MEAN sits
+# above today's projection booms often (the market/projection is asking
+# less of him than he usually delivers); one priced for perfection booms
+# rarely. Measured on the real 2026-08-30 slate: Parker Messick
+# (projected 15.5, pool mean 19.9) boomed in 49.5% of his real games,
+# while Tyler Glasnow (projected 20.1, pool mean 17.5) boomed in 10.5%
+# -- which is exactly the leverage signal the number is meant to carry.
+
+# "Big margin" over the projection. 1.5x is the headline; the 1.75x/2x
+# ladder ships alongside for the tooltip. Measured medians on a real
+# slate: pitchers 30% / 10% at 1.5x / 2x, hitters 14% / 5.5% -- real
+# spread in both directions, so the thresholds discriminate rather than
+# pinning everyone to the same number.
+BOOM_MULTIPLIERS = (1.5, 1.75, 2.0)
+
+# A hitter's bust is the 0-for-4-with-nothing night: exactly 0 DK
+# points (a hitter can't go negative under DK Classic MLB scoring).
+# Median 17% on a real slate, spread 9-25%.
+HITTER_BUST_MAX = 0.0
+# A pitcher's bust is getting shelled -- knocked out in the 2nd or 3rd,
+# negative score included. 3 IP with any earned runs already sits below
+# 5 DK points (2.25/IP minus 2/ER and 0.6 per baserunner), so <= 5
+# captures "the start was a disaster" while <= 0 alone would only catch
+# the very worst of them. Median 20% on a real slate, spread 0-37.5%
+# (Messick has never scored <= 5 this season; Scherzer does it 37.5%
+# of the time).
+PITCHER_BUST_MAX = 5.0
+
+
+def boom_bust_from_pool(
+    pool: list[float], projection: float | None, kind: str
+) -> dict[str, float] | None:
+    """
+    Boom%/bust% for one player from his own outcome pool vs today's
+    projection -- see the section note above for what each threshold
+    means and how it was calibrated. `kind` is player_kind()'s output;
+    it only changes which bust threshold applies. Returns None when
+    there's nothing real to read (no pool, or no positive projection to
+    measure against).
+    """
+    if not pool or not projection or projection <= 0:
+        return None
+    n = len(pool)
+    bust_max = PITCHER_BUST_MAX if kind == "pitcher" else HITTER_BUST_MAX
+    out = {
+        f"boom_{str(m).replace('.', '')}x_pct": round(
+            100 * sum(1 for x in pool if x >= m * projection) / n, 1
+        )
+        for m in BOOM_MULTIPLIERS
+    }
+    return {
+        "boom_pct": out["boom_15x_pct"],
+        "boom_175x_pct": out["boom_175x_pct"],
+        "boom_2x_pct": out["boom_20x_pct"],
+        "bust_pct": round(100 * sum(1 for x in pool if x <= bust_max) / n, 1),
+    }
+
+
+# Trials for the stack-level Monte Carlo below. 2,000 puts the standard
+# error of a ~25% probability at ~1 point -- plenty for a two-decimal-
+# free display column -- while keeping a full slate's 18 team stacks
+# under a couple of seconds combined.
+STACK_BOOM_TRIALS = 2000
+
+# A stack's bust is the offense getting shut down: the top-5 bats
+# combining for no more than HALF their combined projection. Half
+# rather than the individual thresholds because a 5-man SUM almost
+# never hits literal zero -- someone scratches out a single -- but
+# landing at half the projected total is precisely the "this stack
+# killed my lineups" night. Measured spread on a real slate: 18-44%.
+STACK_BUST_FRACTION = 0.5
+
+
+def stack_boom_bust(
+    sorted_pools: list[list[float]],
+    projections: list[float],
+    edges: list[float | None],
+    *,
+    trials: int = STACK_BOOM_TRIALS,
+    seed: int | None = 11,
+) -> dict[str, float] | None:
+    """
+    Boom%/bust% for a team's top-5 stack, from a real correlated Monte
+    Carlo over the five hitters' own outcome pools -- NOT five
+    independent tail reads multiplied together. Teammates share each
+    trial's team_environment_multiplier() exactly as the full simulator
+    correlates them, which is what makes a stack a stack: the whole
+    point of rostering five bats together is that their big nights
+    cluster, and independent sampling would thin both tails and
+    understate boom AND bust alike.
+
+    `sorted_pools` must each already be sorted ascending (the same
+    contract sample_correlated_outcome() has). Boom uses the same 1.5x
+    headline threshold the per-player numbers use, against the five
+    projections' SUM; bust is STACK_BUST_FRACTION of that sum.
+
+    Deterministic for a fixed seed so the Stacks tab doesn't flicker a
+    fraction of a point on every refresh.
+    """
+    if len(sorted_pools) < 2 or len(sorted_pools) != len(projections):
+        return None
+    proj_sum = sum(projections)
+    if proj_sum <= 0:
+        return None
+    rng = random.Random(seed)
+    boom = bust = 0
+    boom_line = 1.5 * proj_sum
+    bust_line = STACK_BUST_FRACTION * proj_sum
+    for _ in range(trials):
+        team_mult = team_environment_multiplier(rng)
+        total = 0.0
+        for pool, edge in zip(sorted_pools, edges):
+            total += sample_correlated_outcome(
+                pool, rng, team_multiplier=team_mult, own_edge=edge
+            )
+        if total >= boom_line:
+            boom += 1
+        if total <= bust_line:
+            bust += 1
+    return {
+        "boom_pct": round(100 * boom / trials, 1),
+        "bust_pct": round(100 * bust / trials, 1),
+    }
+
+
 def ceiling_from_pool(pool: list[float], percentile: float = 0.9) -> float:
     """
     The `percentile`-th percentile of a player's own outcome pool -- a

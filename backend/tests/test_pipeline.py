@@ -7151,6 +7151,81 @@ async def main() -> int:
           lev_proj.get("leverage_score") == round(lev_proj["inhouse_ceiling"] - lev_proj["inhouse_ownership_pct"], 2),
           str(lev_proj))
 
+    print("\nBoom/bust scores (variance.boom_bust_from_pool / stack_boom_bust)")
+
+    # A hand-built pool where every tail read is checkable by eye:
+    # projection 10 -> boom lines at 15/17.5/20, hitter bust at <= 0.
+    bb_pool = [0.0, 0.0, 4.0, 8.0, 12.0, 15.0, 16.0, 18.0, 20.0, 25.0]
+    bb = variance.boom_bust_from_pool(bb_pool, 10.0, "hitter")
+    check("boom_pct is the exact fraction of the pool at or above 1.5x the projection",
+          bb["boom_pct"] == 50.0, str(bb))
+    check("the 1.75x/2x ladder narrows monotonically -- each higher bar can only be rarer",
+          bb["boom_pct"] >= bb["boom_175x_pct"] >= bb["boom_2x_pct"]
+          and bb["boom_2x_pct"] == 20.0, str(bb))
+    check("a hitter's bust is the zero game -- exactly the 0-for-with-nothing nights",
+          bb["bust_pct"] == 20.0, str(bb))
+
+    # Same pool, pitcher kind: bust widens to <= 5 (shelled/pulled early,
+    # negatives included) -- 3 IP with any earned runs already sits
+    # below 5 DK points, so <= 0 alone would miss most real disasters.
+    bb_p = variance.boom_bust_from_pool(bb_pool, 10.0, "pitcher")
+    check("a pitcher's bust threshold is <= 5 DK points, not just <= 0",
+          bb_p["bust_pct"] == 30.0 and bb_p["boom_pct"] == bb["boom_pct"], str(bb_p))
+
+    check("no pool or no positive projection returns None rather than fabricating a number",
+          variance.boom_bust_from_pool([], 10.0, "hitter") is None
+          and variance.boom_bust_from_pool(bb_pool, 0, "hitter") is None
+          and variance.boom_bust_from_pool(bb_pool, None, "hitter") is None, "")
+
+    # The projection is the denominator on purpose: the same pool booms
+    # more against a modest projection than an aggressive one -- the
+    # real leverage signal (measured live: Messick, pool mean above his
+    # projection, boomed 49.5%; Glasnow, priced for perfection, 10.5%).
+    bb_cheap = variance.boom_bust_from_pool(bb_pool, 8.0, "hitter")
+    check("the same pool booms MORE against a lower projection -- projection is the bar to clear",
+          bb_cheap["boom_pct"] > bb["boom_pct"], str((bb_cheap["boom_pct"], bb["boom_pct"])))
+
+    # Stack level: five identical hitters, correlated through the shared
+    # team-environment draw. Against five INDEPENDENT tail reads the
+    # correlated sum must have fatter tails on BOTH ends -- that's what
+    # the shared multiplier exists to model, and the reason this is a
+    # Monte Carlo rather than five multiplied probabilities.
+    bb_sorted = sorted(bb_pool)
+    stack = variance.stack_boom_bust([bb_sorted] * 5, [10.0] * 5, [None] * 5, trials=4000, seed=7)
+    check("stack_boom_bust returns real percentages for a 5-man stack",
+          stack and 0 < stack["boom_pct"] < 100 and 0 < stack["bust_pct"] < 100, str(stack))
+
+    import random as _random
+    _rng = _random.Random(7)
+    _indep_boom = _indep_bust = 0
+    for _ in range(4000):
+        _total = sum(_rng.choice(bb_pool) for _ in range(5))
+        if _total >= 1.5 * 50.0:
+            _indep_boom += 1
+        if _total <= 0.5 * 50.0:
+            _indep_bust += 1
+    check("correlation fattens BOTH tails versus independent sampling -- a stack's big and bad "
+          "nights cluster, which is the entire reason to roster one",
+          stack["boom_pct"] > 100 * _indep_boom / 4000
+          and stack["bust_pct"] > 100 * _indep_bust / 4000,
+          str((stack, round(100 * _indep_boom / 4000, 1), round(100 * _indep_bust / 4000, 1))))
+
+    check("stack_boom_bust is deterministic for a fixed seed -- the Stacks tab must not flicker",
+          variance.stack_boom_bust([bb_sorted] * 5, [10.0] * 5, [None] * 5, trials=1000, seed=3)
+          == variance.stack_boom_bust([bb_sorted] * 5, [10.0] * 5, [None] * 5, trials=1000, seed=3), "")
+    check("stack_boom_bust returns None for fewer than 2 pools or a non-positive projection sum",
+          variance.stack_boom_bust([bb_sorted], [10.0], [None]) is None
+          and variance.stack_boom_bust([bb_sorted] * 2, [0.0, 0.0], [None, None]) is None, "")
+
+    # End to end through the attach path: the leverage fixture's own
+    # hitter (80025, streaky, full-trust game log) must come out of
+    # _attach_inhouse_projections carrying boom/bust alongside his
+    # ceiling -- same pools, same single pass.
+    check("_attach_inhouse_projections attaches boom_pct/bust_pct onto the same projection dict "
+          "as ceiling/leverage -- one pass over the same pools",
+          lev_proj.get("boom_pct") is not None and lev_proj.get("bust_pct") is not None,
+          str({k: v for k, v in lev_proj.items() if "boom" in k or "bust" in k}))
+
     print("\nLate swap for a whole batch (late_swap.py)")
 
     from datetime import datetime as _dt

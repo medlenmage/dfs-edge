@@ -380,6 +380,42 @@ async def player_ceilings(players: list[dict[str, Any]], season: int) -> dict[in
     }
 
 
+async def player_boom_bust(
+    players: list[dict[str, Any]],
+    season: int,
+    inhouse_fpts: dict[int, float] | None = None,
+) -> dict[int, dict[str, float]]:
+    """
+    Boom%/bust% for every unique player id in `players` -- direct tail
+    reads of each player's own bootstrap outcome pool against today's
+    projection (variance.boom_bust_from_pool(); the thresholds and their
+    calibration live there). Sibling of player_ceilings() above, sharing
+    the same already-cached game-log fetch, so this costs one cheap
+    cached lookup per player rather than a second real fetch.
+
+    The projection measured against is the RotoWire fpts already
+    attached to the player when one is loaded, falling back to the
+    in-house number (`inhouse_fpts`, keyed by player id) -- the same
+    "whichever projection the tables are actually showing" precedence
+    the rest of the slate uses.
+    """
+    inhouse_fpts = inhouse_fpts or {}
+    unique = {p["id"]: p for p in players if p.get("id")}
+    ids = list(unique.values())
+    pools = await asyncio.gather(
+        *(variance.player_outcome_pool(p["id"], p["position"], season) for p in ids)
+    )
+    out: dict[int, dict[str, float]] = {}
+    for p, pool in zip(ids, pools):
+        projection = (p.get("projection") or {}).get("fpts") or inhouse_fpts.get(p["id"])
+        result = variance.boom_bust_from_pool(
+            pool, projection, variance.player_kind(p["position"])
+        )
+        if result:
+            out[p["id"]] = result
+    return out
+
+
 # --------------------------------------------------------------------------
 # In-house ownership% v1 (Phase 3)
 # --------------------------------------------------------------------------
