@@ -489,6 +489,39 @@ export const api = {
 
   nflContestTypes: () => request('/api/nfl/contest-types'),
 
+  // Build a whole NFL contest -- lineups only, no economics.
+  // `contestSize` is the single size control: it's both the contest's
+  // field size and how many lineups get built. Economics come
+  // afterwards from nflSimulateContestBatch() on the batch_id returned.
+  nflBuildContestEntries: (season, week, { contestType, contestSize, reroll = 0 }) =>
+    request('/api/nfl/contest-entries', {
+      method: 'POST',
+      body: JSON.stringify({
+        season,
+        week,
+        contest_type: contestType,
+        contest_size: contestSize,
+        reroll,
+      }),
+    }),
+
+  // Simulate an NFL contest that was already built. Re-runnable against
+  // the same batch under different economics without rebuilding a lineup.
+  nflSimulateContestBatch: (
+    batchId,
+    { entryFee = null, firstPlacePct = null, selfPlay = true, fieldSharpness = 'marquee', reroll = 0 } = {},
+  ) =>
+    request(`/api/nfl/contest-entries/${batchId}/simulate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        entry_fee: entryFee,
+        first_place_pct: firstPlacePct,
+        self_play: selfPlay,
+        field_sharpness: fieldSharpness,
+        reroll,
+      }),
+    }),
+
   nflBuildContestEntriesSimulated: (
     season,
     week,

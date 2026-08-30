@@ -804,10 +804,16 @@ def main() -> int:
           str((sim["self_play"], len(sim["results"]), sim["num_entries_built"])))
     check("every simulated result carries a real cash_probability_pct and roi_pct",
           all("cash_probability_pct" in r and "roi_pct" in r for r in sim["results"]), "")
-    check("build_contest_entries_simulated's entries are sorted by simulated roi_pct, best first",
-          all(sim["results"][i]["roi_pct"] >= sim["results"][i + 1]["roi_pct"]
+    # Ranked by top-1% rate with ROI as the tiebreak, NOT raw ROI --
+    # in a top-heavy GPP, per-lineup ROI is dominated by rare
+    # first-place hits, so sorting by it ranks lineups substantially by
+    # which ones got lucky in this run's draws. Same ordering the MLB
+    # side already uses.
+    check("build_contest_entries_simulated's entries are ranked by top-1% rate, ROI as tiebreak",
+          all((-sim["results"][i]["top_1pct_pct"], -sim["results"][i]["roi_pct"])
+              <= (-sim["results"][i + 1]["top_1pct_pct"], -sim["results"][i + 1]["roi_pct"])
               for i in range(len(sim["results"]) - 1)),
-          str([r["roi_pct"] for r in sim["results"]]))
+          str([(r["top_1pct_pct"], r["roi_pct"]) for r in sim["results"]]))
     check("first_place_pct defaults to the gpp_small preset's own value (15.0) when not overridden",
           sim["first_place_pct"] == 15.0, str(sim["first_place_pct"]))
 
@@ -826,6 +832,105 @@ def main() -> int:
     check("every real generated entry carries a primary_stack type and a has_bringback boolean",
           all("primary_stack" in e and isinstance(e["has_bringback"], bool) for e in sim["entries"]),
           str(sim["entries"][0]))
+
+    print("\nNFL contest generator/simulator split + deterministic seeding")
+
+    # Contest size is ONE control now: it IS the field size and it IS
+    # how many lineups get built. NFL reuses contest.py's CONTEST_TYPES,
+    # so it inherits the same real per-preset size tiers.
+    check("every NFL contest preset advertises the real sizes it comes in (shared with MLB)",
+          all(c.get("sizes") and c["field_size"] in c["sizes"]
+              for c in nfl_contest.CONTEST_TYPES.values()),
+          str({k: c.get("sizes") for k, c in nfl_contest.CONTEST_TYPES.items()}))
+
+    built = asyncio.run(nfl_contest.build_contest_lineups(slate, "gpp_small", 6, season=2098, seed=5))
+    check("build_contest_lineups builds exactly as many lineups as the contest holds -- the two "
+          "numbers are the same thing now",
+          built["num_entries_built"] == 6 == built["field_size"],
+          str((built["num_entries_built"], built["field_size"])))
+    check("build_contest_lineups returns NO economics at all -- no opponent field, no payout "
+          "curve, no ROI; that's the simulator's job on the batch it produces",
+          not any(k in built for k in ("results", "prize_pool", "paid_count", "field_baseline")),
+          str(sorted(built)))
+    check("build_contest_lineups describes what it built instead: salary, points, ownership and "
+          "the NFL stack archetypes the contest actually came out with",
+          built["summary"]["median_salary_used"] > 0
+          and sum(x["count"] for x in built["stack_shapes"]) == 6,
+          str(built["summary"]))
+
+    # SEEDING -- NFL previously passed seed=None everywhere, so every
+    # click produced a different contest and nothing was reproducible.
+    same = asyncio.run(nfl_contest.build_contest_lineups(slate, "gpp_small", 6, season=2098, seed=5))
+    other = asyncio.run(nfl_contest.build_contest_lineups(slate, "gpp_small", 6, season=2098, seed=6))
+    check("the same seed reproduces the identical contest -- NFL had no seeding at all before, "
+          "so identical settings reshuffled on every click",
+          [e["players"] for e in built["entries"]] == [e["players"] for e in same["entries"]], "")
+    check("...and a different seed genuinely draws a different one",
+          [e["players"] for e in built["entries"]] != [e["players"] for e in other["entries"]], "")
+
+    # A contest larger than the build cap keeps its REAL field size.
+    _saved_max = nfl_contest.MAX_USER_LINEUPS
+    nfl_contest.MAX_USER_LINEUPS = 4
+    try:
+        capped = asyncio.run(nfl_contest.build_contest_lineups(slate, "gpp_small", 100, season=2098, seed=5))
+    finally:
+        nfl_contest.MAX_USER_LINEUPS = _saved_max
+    check("a contest larger than the build cap keeps its REAL field_size while the build itself "
+          "is capped -- reported as two separate numbers, not silently conflated",
+          capped["field_size"] == 100 and capped["num_entries_built"] == 4,
+          str((capped["field_size"], capped["num_entries_built"])))
+
+    try:
+        asyncio.run(nfl_contest.build_contest_lineups(slate, "gpp_small", 0, season=2098))
+        check("build_contest_lineups rejects a contest_size of 0", False)
+    except nfl_contest.ContestError:
+        check("build_contest_lineups rejects a contest_size of 0", True)
+
+    priced = asyncio.run(nfl_contest.simulate_contest_batch(
+        built["entries"], built["contest"], season=2098, contest_type="gpp_small",
+        num_trials=300, entry_fee=10.0, seed=3,
+    ))
+    check("simulate_contest_batch prices an already-built contest without rebuilding a lineup",
+          priced["num_entries_built"] == len(built["entries"])
+          and len(priced["results"]) == len(built["entries"]),
+          str((priced["num_entries_built"], len(priced["results"]))))
+    check("simulate_contest_batch defaults to ranking the contest against ITSELF -- the generator "
+          "builds the whole field, so there's no second population to invent",
+          priced["self_play"] is True, str(priced["self_play"]))
+
+    dearer = asyncio.run(nfl_contest.simulate_contest_batch(
+        built["entries"], built["contest"], season=2098, contest_type="gpp_small",
+        num_trials=300, entry_fee=20.0, seed=3,
+    ))
+    check("the entry cost given to the simulator sets the prize pool -- doubling the fee doubles "
+          "the pool, which is why it's a simulator input and not a build one",
+          abs(dearer["prize_pool"] - 2 * priced["prize_pool"]) < 0.02,
+          str((priced["prize_pool"], dearer["prize_pool"])))
+    check("...and it's the fee the results are actually priced against, not the preset's own",
+          priced["contest"]["entry_fee"] == 10.0 and dearer["contest"]["entry_fee"] == 20.0, "")
+
+    try:
+        asyncio.run(nfl_contest.simulate_contest_batch([], built["contest"], season=2098))
+        check("simulate_contest_batch refuses an empty batch rather than simulating nothing", False)
+    except nfl_contest.ContestError:
+        check("simulate_contest_batch refuses an empty batch rather than simulating nothing", True)
+
+    # Salary pacing is CAP-driven now, not floor-driven. It used to be
+    # gated on min_salary being non-zero, which made the whole mechanism
+    # dead code the moment the floor was removed -- measured on a real
+    # Week 1 slate, every strength from 0 to 10 produced the identical
+    # batch at min_salary=0.
+    _saved_pace = nfl_contest._SALARY_PACING_STRENGTH
+    nfl_contest._SALARY_PACING_STRENGTH = 0.0
+    try:
+        _unpaced = nfl_contest.generate_entries(slate, 10, min_salary=0, allow_duplicates=True, seed=21)
+    finally:
+        nfl_contest._SALARY_PACING_STRENGTH = _saved_pace
+    _paced = nfl_contest.generate_entries(slate, 10, min_salary=0, allow_duplicates=True, seed=21)
+    _med = lambda es: sorted(e["salary_used"] for e in es)[len(es) // 2]
+    check("salary pacing still works with NO floor at all -- it paces against the CAP now, so "
+          "removing the floor doesn't silently disable it",
+          _med(_paced) > _med(_unpaced), str((_med(_paced), _med(_unpaced))))
 
     print("\nStack archetypes (nfl_contest.py's _classify_pool/_pick_primary/_pick_secondary_teams)")
 
