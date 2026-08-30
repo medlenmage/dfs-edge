@@ -117,22 +117,47 @@ _FPTS_FLOOR = 0.1
 # sampling produced all sorts of shapes nobody would actually build for
 # a real GPP (single mega-stacks, no-stack spreads across 8 teams),
 # unevenly and without any deliberate control.
+# The COMPLETE constraint-distinct shape space, not a curated subset.
+# With 8 hitter slots and DK's 5-hitters-per-team cap, every buildable
+# hitter composition is an integer partition of <= 8 into parts of 2-5
+# (a singleton isn't a constraint -- one player has nothing to stack
+# with -- so "5-2-1" collapses to [5, 2], "4-3-1" to [4, 3], "5-1-1-1"
+# to [5], and so on). Enumerating that space fully gives exactly the
+# seventeen shapes below; the previous nine-shape list was missing
+# 3-2-2, 2-2-2-2, 3-2, 2-2-2, 2-2 and the single-group mini shapes,
+# which real fields genuinely build -- mini-stack and scatter
+# constructions are a documented small-slate differentiation play
+# (Stokastic/RotoGrinders both describe 2-man mini-stacks and unusual
+# constructions as real GPP tools), and on a 2-3 game slate they're a
+# meaningful share of the actual field.
+#
+# Ordered by how often each shape wins/appears in real large-field
+# GPPs: the classic primary+secondary builds first (5-3, 5-2-1 -- the
+# canonical DK tournament shapes, since one 5-man rally pays every
+# slot), then 4-primary builds, then the 3-primary and mini/scatter
+# tail.
 STACK_SHAPES: list[list[int]] = [
     [5, 3],
-    [5, 2],  # "5-2-1"
-    [5],
+    [5, 2],        # "5-2-1"
     [4, 4],
-    [4, 3],
+    [4, 3],        # "4-3-1"
     [4, 2, 2],
-    [4, 2],
+    [5],           # "5-1-1-1"
+    [4, 2],        # "4-2-1-1"
     [3, 3, 2],
-    [3, 3],
+    [3, 3],        # "3-3-1-1"
+    [3, 2, 2],     # "3-2-2-1"
+    [2, 2, 2, 2],  # game mini-stacks across the slate
+    [4],           # "4-1-1-1-1"
+    [3, 2],
+    [2, 2, 2],
+    [3],
+    [2, 2],
+    [2],           # one lone mini-stack, the most scattered real build
 ]
-# Weighted toward the shapes that most often win real large-field GPPs
-# (5-3, 5-2-1) without ruling the rest out entirely -- simple rank-based
-# decay, first-listed shape heaviest, ~5x the last-listed shape's
-# weight. Tune the decay constant here if the mix needs to shift;
-# nothing else needs to change.
+# Rank-based decay, first-listed shape heaviest. 0.8 over seventeen
+# shapes puts the scatter tail at ~3% of the 5-3's weight -- present
+# the way it is in real fields, never dominant.
 _STACK_SHAPE_DECAY = 0.8
 STACK_SHAPE_WEIGHTS: list[float] = [_STACK_SHAPE_DECAY**i for i in range(len(STACK_SHAPES))]
 
@@ -889,22 +914,46 @@ def generate_field(
         # hitters from one team) gets max_attempts_per_lineup real
         # shots at a working team assignment instead of losing out to
         # whichever easier shape happens to get rolled on a given retry.
-        shape = _pick_stack_shape(feasible_shapes, feasible_weights, rng)
         lineup = None
-        for _ in range(max_attempts_per_lineup):
-            lineup = _sample_one_lineup(
-                candidates_by_slot,
-                slot_order,
-                rng,
-                field_weight_fn,
-                team_hitter_pools=team_hitter_pools,
-                stack_groups=shape,
-                min_salary=min_salary,
-                max_salary=max_salary,
-                one_off_quality_ids=one_off_quality_ids,
-            )
+        # A shape still gets max_attempts_per_lineup dedicated shots --
+        # but a shape that exhausts them no longer costs the batch a
+        # lineup. Re-roll a different shape (twice), then fall back to
+        # fully unconstrained sampling, so one hard multi-group draw on
+        # a thin slate can't leave a hole in the field.
+        shape_plans = [
+            _pick_stack_shape(feasible_shapes, feasible_weights, rng),
+            _pick_stack_shape(feasible_shapes, feasible_weights, rng),
+            None,
+        ]
+        for shape in shape_plans:
+            for _ in range(max_attempts_per_lineup):
+                lineup = _sample_one_lineup(
+                    candidates_by_slot,
+                    slot_order,
+                    rng,
+                    field_weight_fn,
+                    team_hitter_pools=team_hitter_pools,
+                    stack_groups=shape,
+                    min_salary=min_salary,
+                    max_salary=max_salary,
+                    one_off_quality_ids=one_off_quality_ids,
+                )
+                if lineup is not None:
+                    break
             if lineup is not None:
                 break
+        if lineup is None and field:
+            # Same starved-pool fallback as generate_entries: a real
+            # field converges onto the same few builds when legal
+            # lineups are rare, so duplicate an existing one rather
+            # than leaving a hole in the sampled field.
+            source = rng.choices(
+                field, weights=[max(lu["total_ownership_pct"], 0.1) for lu in field], k=1
+            )[0]
+            lineup = {
+                **{k: v for k, v in source.items() if k != "duplicate_count"},
+                "players": [dict(p) for p in source["players"]],
+            }
         if lineup is not None:
             field.append(lineup)
 
@@ -990,34 +1039,92 @@ def generate_entries(
     capped_ids: set[int] = set()
     seen_signatures: set[frozenset[int]] = set()
     entries: list[dict[str, Any]] = []
+    # Flips to True the first time the pool runs out of DISTINCT builds
+    # -- from then on the batch fills with duplicates, the way a real
+    # contest does. On a 2-3 game slate the distinct lineup space is
+    # genuinely small and real fields duplicate heavily (a chalky build
+    # appears dozens of times); stopping the whole batch at the point
+    # of first duplication -- the old behavior, "only built 7 of
+    # 5,000" -- modeled a contest that doesn't exist. Duplicates still
+    # respect every REAL constraint (salary, exposure caps, the
+    # 5-hitters-per-team rule); only distinctness, which no real
+    # contest enforces, is lifted. _attach_duplicate_counts and the
+    # payout tie-splitting already price duplicates honestly.
+    duplicates_unlocked = allow_duplicates
 
     for _ in range(num_lineups):
-        # Picked once per lineup, outside the retry loop below -- see
-        # generate_field()'s matching comment for why.
-        shape = _pick_stack_shape(feasible_shapes, feasible_weights, rng)
+        # Each shape still gets max_attempts_per_lineup dedicated shots
+        # (see generate_field()'s matching comment) -- but a shape that
+        # exhausts them re-rolls to a different one, then to fully
+        # unconstrained sampling, before the batch ever gives up on the
+        # lineup.
         lineup = None
-        for _ in range(max_attempts_per_lineup):
-            candidate = _sample_one_lineup(
-                candidates_by_slot,
-                slot_order,
-                rng,
-                _fpts_weight,
-                excluded_ids=frozenset(capped_ids),
-                team_hitter_pools=team_hitter_pools,
-                stack_groups=shape,
-                min_salary=min_salary,
-                max_salary=max_salary,
-                one_off_quality_ids=one_off_quality_ids,
-                max_duplication_risk=max_duplication_risk,
-            )
-            if candidate is None:
-                continue
-            if not allow_duplicates and candidate["player_ids"] in seen_signatures:
-                continue
-            lineup = candidate
-            break
+        legal_duplicate = None
+        shape_plans = [
+            _pick_stack_shape(feasible_shapes, feasible_weights, rng),
+            _pick_stack_shape(feasible_shapes, feasible_weights, rng),
+            None,
+        ]
+        for shape in shape_plans:
+            for _ in range(max_attempts_per_lineup):
+                candidate = _sample_one_lineup(
+                    candidates_by_slot,
+                    slot_order,
+                    rng,
+                    _fpts_weight,
+                    excluded_ids=frozenset(capped_ids),
+                    team_hitter_pools=team_hitter_pools,
+                    stack_groups=shape,
+                    min_salary=min_salary,
+                    max_salary=max_salary,
+                    one_off_quality_ids=one_off_quality_ids,
+                    max_duplication_risk=max_duplication_risk,
+                )
+                if candidate is None:
+                    continue
+                if not duplicates_unlocked and candidate["player_ids"] in seen_signatures:
+                    legal_duplicate = candidate
+                    continue
+                lineup = candidate
+                break
+            if lineup is not None:
+                break
+        if lineup is None and legal_duplicate is not None:
+            # Every retry produced only already-seen builds: the
+            # distinct space is exhausted. Build the contest out with
+            # duplicates from here, like the real field would.
+            duplicates_unlocked = True
+            lineup = legal_duplicate
+        if lineup is None and entries:
+            # The sampler couldn't complete ANY legal lineup this round
+            # -- on a starved pool (a tight salary window over a tiny
+            # slate) legal builds can be so rare the random walk misses
+            # them for dozens of attempts even though several already
+            # exist. A real field in that spot converges onto the same
+            # few builds, so duplicate an already-built entry (weighted
+            # toward the stronger ones) rather than abandoning the rest
+            # of the contest. Exposure caps stay honored: only entries
+            # containing no capped player are eligible, and if none
+            # qualify the cap is genuinely binding and we stop.
+            eligible = [
+                e for e in entries
+                if not any(p["id"] in capped_ids for p in e["players"])
+            ]
+            if eligible:
+                duplicates_unlocked = True
+                source = rng.choices(
+                    eligible, weights=[e["projected_points"] for e in eligible], k=1
+                )[0]
+                lineup = {
+                    **{k: v for k, v in source.items() if k != "duplicate_count"},
+                    "players": [dict(p) for p in source["players"]],
+                    "player_ids": frozenset(p["id"] for p in source["players"]),
+                }
         if lineup is None:
-            break  # ran out of room for more legal, exposure-legal entries
+            # Genuinely infeasible even WITH duplicates -- the salary
+            # range or exposure cap is the binding constraint, not
+            # distinctness. That's a real stop, reported honestly.
+            break
 
         seen_signatures.add(lineup.pop("player_ids"))
         entries.append(lineup)
@@ -2076,6 +2183,10 @@ def build_contest_entries(
         "contest": contest,
         "num_entries_requested": num_lineups,
         "num_entries_built": len(entries),
+        # How many of those are structurally unique builds -- the rest
+        # are deliberate duplicates, the way a real small-slate contest
+        # field duplicates once the distinct lineup space runs out.
+        "num_distinct_entries": len({frozenset(p["id"] for p in e["players"]) for e in entries}),
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
         "paid_count": evaluation["paid_count"],
@@ -2292,6 +2403,10 @@ async def build_contest_entries_simulated(
         "contest": contest,
         "num_entries_requested": num_lineups,
         "num_entries_built": len(entries),
+        # How many of those are structurally unique builds -- the rest
+        # are deliberate duplicates, the way a real small-slate contest
+        # field duplicates once the distinct lineup space runs out.
+        "num_distinct_entries": len({frozenset(p["id"] for p in e["players"]) for e in entries}),
         "field_sharpness": field_sharpness,
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
@@ -2598,6 +2713,10 @@ async def build_dk_entries_simulated(
     return {
         "contest": contest,
         "num_entries_built": len(entries),
+        # How many of those are structurally unique builds -- the rest
+        # are deliberate duplicates, the way a real small-slate contest
+        # field duplicates once the distinct lineup space runs out.
+        "num_distinct_entries": len({frozenset(p["id"] for p in e["players"]) for e in entries}),
         "field_sharpness": field_sharpness,
         "field_size": evaluation["field_size"],
         "sample_size": evaluation["sample_size"],
