@@ -1760,6 +1760,16 @@ async def evaluate_batch_simulated(
                 "payout_p10": round(float(np.percentile(payout_row, 10)), 2),
                 "payout_p90": round(float(np.percentile(payout_row, 90)), 2),
                 "roi_pct": round((expected_payout - entry_fee) / entry_fee * 100, 1) if entry_fee else 0.0,
+                # Monte Carlo standard error of roi_pct, in the same
+                # percentage-point units. Top-heavy GPP payouts are
+                # dominated by rare first-place hits -- a play worth
+                # ~0.02% P(1st) lands 2 hits in 10,000 trials, and ONE
+                # extra hit swings ROI by 100+ points -- so an ROI whose
+                # SE rivals its value is noise, not signal, and the UI
+                # should say so rather than rank by it.
+                "roi_se_pct": round(
+                    float(payout_row.std()) / (num_trials ** 0.5) / entry_fee * 100, 1
+                ) if entry_fee else 0.0,
                 "simulated_points_mean": round(float(row.mean()), 2),
                 "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
                 "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
@@ -1773,7 +1783,7 @@ async def evaluate_batch_simulated(
         results,
         [
             "cash_probability_pct", "first_place_pct", "top_1pct_pct", "top_10pct_pct",
-            "expected_payout", "payout_p10", "payout_p90", "roi_pct",
+            "expected_payout", "payout_p10", "payout_p90", "roi_pct", "roi_se_pct",
         ],
     )
 
@@ -2204,16 +2214,26 @@ async def build_contest_entries_simulated(
             included_game_pks=included_game_pks,
         )
 
-    # Highest simulated ROI first -- the whole point of running the
-    # simulation is finding which of your own entries actually pays
-    # off, so that should lead the results rather than whatever
-    # arbitrary order generate_entries() built them in. entries and
-    # results are re-ordered together (same permutation) so every
-    # downstream consumer -- the JSON response, the sample-entries
-    # preview, and the cached batch behind the CSV download -- gets
-    # the sorted order for free, with no separate sort step anywhere
-    # else.
-    order = sorted(range(len(entries)), key=lambda i: -evaluation["results"][i]["roi_pct"])
+    # Best entries first -- ranked by top-1% rate with ROI as the
+    # tiebreak, NOT by raw ROI. In a top-heavy GPP, per-lineup ROI is
+    # dominated by rare first-place hits (a play worth ~0.02% P(1st)
+    # lands 2 hits in 10,000 trials, and one extra hit swings ROI by
+    # 100+ points), so sorting by ROI ranks lineups substantially by
+    # which ones got lucky in THIS run's draws. top_1pct_pct measures
+    # the same "can this build spike?" quality from ~100x more trial
+    # hits, so it's far more stable draw to draw. Each row still
+    # carries its roi_pct (and its roi_se_pct, so the noise is visible
+    # rather than hidden). entries and results are re-ordered together
+    # (same permutation) so every downstream consumer -- the JSON
+    # response, the sample-entries preview, and the cached batch behind
+    # the CSV download -- gets the sorted order for free.
+    order = sorted(
+        range(len(entries)),
+        key=lambda i: (
+            -evaluation["results"][i].get("top_1pct_pct", 0),
+            -evaluation["results"][i]["roi_pct"],
+        ),
+    )
     entries = [entries[i] for i in order]
     evaluation = {
         **evaluation,
@@ -2410,6 +2430,16 @@ async def evaluate_field_mirrored(
                 "payout_p10": round(float(np.percentile(payout_row, 10)), 2),
                 "payout_p90": round(float(np.percentile(payout_row, 90)), 2),
                 "roi_pct": round((expected_payout - entry_fee) / entry_fee * 100, 1) if entry_fee else 0.0,
+                # Monte Carlo standard error of roi_pct, in the same
+                # percentage-point units. Top-heavy GPP payouts are
+                # dominated by rare first-place hits -- a play worth
+                # ~0.02% P(1st) lands 2 hits in 10,000 trials, and ONE
+                # extra hit swings ROI by 100+ points -- so an ROI whose
+                # SE rivals its value is noise, not signal, and the UI
+                # should say so rather than rank by it.
+                "roi_se_pct": round(
+                    float(payout_row.std()) / (num_trials ** 0.5) / entry_fee * 100, 1
+                ) if entry_fee else 0.0,
                 "simulated_points_mean": round(float(row.mean()), 2),
                 "simulated_points_p10": round(float(np.percentile(row, 10)), 2),
                 "simulated_points_p90": round(float(np.percentile(row, 90)), 2),
@@ -2423,7 +2453,7 @@ async def evaluate_field_mirrored(
         results,
         [
             "cash_probability_pct", "first_place_pct", "top_1pct_pct", "top_10pct_pct",
-            "expected_payout", "payout_p10", "payout_p90", "roi_pct",
+            "expected_payout", "payout_p10", "payout_p90", "roi_pct", "roi_se_pct",
         ],
     )
 

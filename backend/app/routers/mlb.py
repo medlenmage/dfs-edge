@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import zlib
 from datetime import date as date_cls
 from typing import Any
 from uuid import uuid4
@@ -37,6 +38,23 @@ _CONTEST_BATCH_TTL = 3600
 # so results are always directly comparable across runs and there's no
 # "how many trials should I pick" decision to make.
 _SIM_TRIALS = 10_000
+
+
+def _sim_seed(day: str, contest_type: str, source: str, engine: str, reroll: int) -> int:
+    """
+    A deterministic seed derived from the settings that actually shape
+    a batch, so identical requests reproduce identical results. Without
+    this, every click generated different entries, a different opponent
+    field, AND different Monte Carlo draws -- the results table
+    reshuffled even when the model and inputs hadn't changed at all,
+    which reads as instability rather than what it was: unseeded RNG.
+
+    zlib.crc32 rather than hash(): Python salts hash() per process, so
+    it would break the whole point across a backend restart.
+    """
+    key = f"{day}|{contest_type}|{source}|{engine}|{reroll}"
+    return zlib.crc32(key.encode()) & 0x7FFFFFFF
+
 
 router = APIRouter(prefix="/api/mlb", tags=["mlb"])
 
@@ -773,6 +791,11 @@ async def build_contest_entries(
         embed=True,
         description="How sharp the simulated opponent field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays).",
     ),
+    reroll: int = Body(
+        0,
+        embed=True,
+        description="Bump to get a genuinely different random draw for otherwise-identical settings. At the default 0, the same settings on the same date always reproduce the same batch.",
+    ),
 ) -> dict[str, Any]:
     """
     The mass multi-entry contest generator: build up to MAX_USER_LINEUPS
@@ -815,6 +838,9 @@ async def build_contest_entries(
             allow_duplicates=allow_duplicates,
             max_duplication_risk=max_duplication_risk,
             field_sharpness=field_sharpness,
+            # Same determinism as the simulated endpoint -- identical
+            # settings reproduce the identical batch (see _sim_seed).
+            seed=_sim_seed(day, contest_type, projection_source, "deterministic", reroll),
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -901,6 +927,11 @@ async def build_contest_entries_simulated(
         embed=True,
         description="Override the contest preset's own percent-to-first (% of the prize pool 1st place wins) for this run -- a lower value flattens the payout curve, which changes every entry's simulated ROI. Defaults to the preset's own value when omitted.",
     ),
+    reroll: int = Body(
+        0,
+        embed=True,
+        description="Bump to get a genuinely different random draw (new entries, new field, new sim trials) for otherwise-identical settings. At the default 0, the same settings on the same date always reproduce the same batch.",
+    ),
 ) -> dict[str, Any]:
     """
     Like POST /contest-entries, but ranks the batch against a genuine
@@ -942,6 +973,13 @@ async def build_contest_entries_simulated(
             engine=engine,
             field_sharpness=field_sharpness,
             first_place_pct=first_place_pct,
+            # A deterministic seed derived from the settings, so the
+            # same request on the same date reproduces the same batch
+            # -- without it every click generated different entries, a
+            # different field AND different sim draws, and the table
+            # reshuffled even when nothing changed. `reroll` bumps into
+            # a genuinely new draw on demand.
+            seed=_sim_seed(day, contest_type, projection_source, engine, reroll),
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1422,6 +1460,11 @@ async def simulate_dk_entries(
             max_salary=max_salary,
             engine=engine,
             field_sharpness=field_sharpness,
+            # Same determinism as the generator endpoints: identical
+            # settings reproduce identical results (see _sim_seed) --
+            # the uploaded entries are fixed anyway, so only the field
+            # sample and sim draws vary.
+            seed=_sim_seed(day, contest_id, projection_source, engine, 0),
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
