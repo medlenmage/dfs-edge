@@ -272,10 +272,34 @@ TEAM_MULTIPLIER_MIN = 0.25
 TEAM_MULTIPLIER_MAX = 2.25
 
 # How strongly each position's outcome reacts to its own team's shared
-# day (1.0 = full pull, same strength as the QB/pass-catcher stack this
-# whole mechanic exists to model). RB is damped -- see the module
-# docstring's note on why game script cuts both ways for the run game.
-TEAM_SENSITIVITY = {"QB": 1.0, "WR": 1.0, "TE": 1.0, "RB": 0.5}
+# day. CALIBRATED against the real league-wide pairwise correlations
+# nfl_correlations.py measures from actual weekly game logs, via
+# scripts/measure_nfl_sim_correlations.py -- the sim's induced
+# correlations are tuned to land on the measured ones, not guessed:
+#
+#   pair          real 2025   old sim   tuned sim
+#   QB<->WR1        0.355      0.564      0.361
+#   QB<->WR2        0.353      0.562      0.363   (real data says WR1
+#   QB<->TE1        0.290      0.564      0.306    and WR2 correlate
+#   QB<->RB1        0.042      0.397      0.039    with the QB about
+#   QB<->opp WR1    0.134     -0.008      0.128    EQUALLY)
+#
+# The old hand-set values over-correlated QB/WR by ~60% and QB/RB by
+# TEN-FOLD -- a sim that believes an RB is half a pass-catcher can't
+# price a QB+WR stack against a QB+RB one honestly. Note what the real
+# data says about ranks: WR1 and WR2 correlate with their QB almost
+# identically, so there's no per-rank split to model within WR -- the
+# real split is pass-catcher vs TE vs RB.
+TEAM_SENSITIVITY = {"QB": 0.60, "WR": 0.60, "TE": 0.47, "RB": 0.055}
+
+# Fraction of each team's shared-day variance that comes from the GAME
+# both teams are playing in (shootouts and slogs lift/sink both sides
+# together) -- what makes a bring-back (QB + opposing WR1) genuinely
+# correlated instead of independent. Calibrated to the real measured
+# QB<->opposing-WR1 correlation of 0.134 the same way as the
+# sensitivities above. Same construction MLB's variance engine already
+# uses for its own GAME_CORRELATION.
+GAME_CORRELATION = 0.36
 
 # How strongly a DST reacts to its OPPONENT's shared day, applied with
 # the opposite sign (a big day for the offense it's facing pulls a DST
@@ -371,14 +395,37 @@ def simulate_batch(
         {info["team"] for info in unique_players.values() if info.get("team")}
         | {info["opponent"] for info in unique_players.values() if info.get("opponent")}
     )
-    team_multipliers = {
-        team: np.clip(
-            rng.normal(TEAM_MULTIPLIER_MEAN, TEAM_MULTIPLIER_STD, size=num_trials),
-            TEAM_MULTIPLIER_MIN,
-            TEAM_MULTIPLIER_MAX,
+    # Which team each team is facing, from whichever players carry the
+    # pair -- lets both sides of one game share a game-level factor, so
+    # a bring-back (QB + opposing WR) is genuinely correlated the way
+    # the real measured 0.134 says it is.
+    team_to_opponent: dict[str, str] = {}
+    for info in unique_players.values():
+        if info.get("team") and info.get("opponent"):
+            team_to_opponent[info["team"]] = info["opponent"]
+
+    game_factors: dict[frozenset, np.ndarray] = {}
+
+    def _shared_game_factor(a: str, b: str) -> np.ndarray:
+        key = frozenset((a, b))
+        if key not in game_factors:
+            game_factors[key] = rng.normal(0.0, TEAM_MULTIPLIER_STD, size=num_trials)
+        return game_factors[key]
+
+    game_weight = GAME_CORRELATION ** 0.5
+    indep_weight = (1.0 - GAME_CORRELATION) ** 0.5
+
+    team_multipliers = {}
+    for team in relevant_teams:
+        opponent = team_to_opponent.get(team)
+        independent = rng.normal(0.0, TEAM_MULTIPLIER_STD, size=num_trials)
+        if opponent and opponent in relevant_teams and team_to_opponent.get(opponent) == team:
+            residual = game_weight * _shared_game_factor(team, opponent) + indep_weight * independent
+        else:
+            residual = independent
+        team_multipliers[team] = np.clip(
+            TEAM_MULTIPLIER_MEAN + residual, TEAM_MULTIPLIER_MIN, TEAM_MULTIPLIER_MAX
         )
-        for team in relevant_teams
-    }
 
     player_ids = list(unique_players)
     player_index = {pid: i for i, pid in enumerate(player_ids)}

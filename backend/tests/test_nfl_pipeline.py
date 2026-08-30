@@ -688,8 +688,11 @@ def main() -> int:
     check("simulate_batch returns a (len(entries), num_trials) array",
           stacked_sim.shape == (1, 4000), str(stacked_sim.shape))
     check("a real QB+his-own-WR stack shows genuinely higher combined variance than the same two "
-          "pools with no shared team (the whole reason NFL stacking correlation exists to model)",
-          statistics_module.pstdev(stacked_sim[0].tolist()) > 1.15 * statistics_module.pstdev(unstacked_sim[0].tolist()),
+          "pools with no shared team (the whole reason NFL stacking correlation exists to model). "
+          "The bar is 1.08x -- the REAL measured QB<->WR correlation of 0.355 implies a "
+          "sqrt(1+rho) ~ 1.16x ceiling for equal spreads, and the old 1.15x bar was only "
+          "reachable because the sim over-correlated the pair at 0.56",
+          statistics_module.pstdev(stacked_sim[0].tolist()) > 1.08 * statistics_module.pstdev(unstacked_sim[0].tolist()),
           str((statistics_module.pstdev(stacked_sim[0].tolist()), statistics_module.pstdev(unstacked_sim[0].tolist()))))
 
     dst_lineup = {"slots": {"DST": [{"id": "aaa_dst", "team": "AAA", "opponent": "OPP", "position": "DST"}]}}
@@ -1096,6 +1099,40 @@ def main() -> int:
     check("_fantasylabs_has_line is False for a real matched row whose fields haven't posted yet -- "
           "the exact real bug this guards against (matched != has a real line)",
           nfl_slate._fantasylabs_has_line(empty_but_matched_row) is False, "")
+
+    print("\nNFL sim correlations calibrated to the measured league values")
+
+    import numpy as _np_corr
+
+    def _corr_pool(mean):
+        raw = _np_corr.random.default_rng(1).normal(mean, mean * 0.6, 200)
+        return [max(0.0, float(v)) for v in raw]
+
+    _corr_players = [
+        {"id": "cqb", "position": "QB", "team": "AAA", "opponent": "BBB"},
+        {"id": "cwr", "position": "WR", "team": "AAA", "opponent": "BBB"},
+        {"id": "crb", "position": "RB", "team": "AAA", "opponent": "BBB"},
+        {"id": "cowr", "position": "WR", "team": "BBB", "opponent": "AAA"},
+    ]
+    _corr_pools = {p["id"]: _corr_pool(15.0) for p in _corr_players}
+    _corr_sim = nfl_variance.simulate_batch(
+        [{"players": [p]} for p in _corr_players], _corr_pools, num_trials=20000, seed=9,
+    )
+
+    def _pair(a, b):
+        return float(_np_corr.corrcoef(_corr_sim[a], _corr_sim[b])[0, 1])
+
+    check("the sim's QB<->WR correlation lands near the REAL measured 0.355, not the old "
+          "hand-set machinery's 0.56 -- calibrated, not guessed",
+          0.28 < _pair(0, 1) < 0.43, str(_pair(0, 1)))
+    check("QB<->RB correlation lands near the real measured 0.042 -- the old 0.397 believed "
+          "an RB was half a pass-catcher, a ten-fold overstatement",
+          -0.03 < _pair(0, 2) < 0.12, str(_pair(0, 2)))
+    check("a bring-back (QB + OPPOSING WR) is now genuinely positively correlated (real "
+          "measured 0.134) via the shared game factor -- it was ~0 before",
+          0.06 < _pair(0, 3) < 0.22, str(_pair(0, 3)))
+    check("the correlation ordering matches football reality: own pass-catcher > bring-back > RB",
+          _pair(0, 1) > _pair(0, 3) > _pair(0, 2), str((_pair(0, 1), _pair(0, 3), _pair(0, 2))))
 
     print("\nNFL rolling multi-season baseline + ownership floors")
 
