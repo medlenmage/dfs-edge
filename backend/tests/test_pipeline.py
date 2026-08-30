@@ -760,6 +760,120 @@ async def main() -> int:
     mlb.get_people = original_get_people_2
     mlb.get_team_injuries = original_get_injuries_projstarter
 
+    print("\nProjected BATTING ORDER recovery (mlb_slate._projected_lineup_ids) -- the hitter "
+          "sibling of the projected-starter fallback above")
+
+    # The real reported bug, measured on 2026-08-30: Boston's projected
+    # 1st and 6th hitters were both D60 on MLB's own roster feed -- so
+    # off the ACTIVE roster, which is all _team_hitters used to look at
+    # -- while RotoWire had them batting and DraftKings had them priced.
+    # BOS came out with 7 usable batting spots against the at-bat
+    # engine's minimum of 8, and the engine refused the entire slate.
+    async def fake_active_hitters(team_id, season):
+        return [80001, 80002] if team_id == 901 else []
+
+    async def fake_40man_hitters(team_id, season):
+        # The call-up is on the 40-man; the 60-day-IL bat is not (a real
+        # 60-day stint removes him from it), so only the injury fallback
+        # can reach him -- same split the pitcher fixture above models.
+        return [80001, 80002, 80003] if team_id == 901 else []
+
+    async def fake_injuries_hitters(team_id, season):
+        return [{"id": 80004, "name": "Activated Off IL", "status_code": "D60"}] if team_id == 901 else []
+
+    hitter_bios = {
+        80001: {"id": 80001, "name": "Everyday Guy", "position": "OF", "bats": "R"},
+        80002: {"id": 80002, "name": "Regular Bat", "position": "2B", "bats": "L"},
+        80003: {"id": 80003, "name": "Called Up Bat", "position": "SS", "bats": "R"},
+        80004: {"id": 80004, "name": "Activated Off IL", "position": "1B", "bats": "L"},
+    }
+
+    async def fake_people_hitters(ids):
+        return {i: hitter_bios[i] for i in ids if i in hitter_bios}
+
+    mlb.get_active_roster = fake_active_hitters
+    mlb.get_40man_roster = fake_40man_hitters
+    mlb.get_team_injuries = fake_injuries_hitters
+    mlb.get_people = fake_people_hitters
+
+    full_order_lookup = projections.build_lookup([
+        projection_row("Everyday Guy", "BOS", 9.0, 8.0, lineup_spot=1),
+        projection_row("Regular Bat", "BOS", 8.0, 7.0, lineup_spot=2),
+        projection_row("Called Up Bat", "BOS", 7.0, 6.0, lineup_spot=3),
+        projection_row("Activated Off IL", "BOS", 6.5, 5.0, lineup_spot=4),
+    ])
+    recovered = await mlb_slate._projected_lineup_ids(901, "BOS", 2026, full_order_lookup, [80001, 80002])
+    check("_projected_lineup_ids recovers BOTH a 40-man call-up and a 60-day-IL activation that "
+          "RotoWire names in today's batting order but MLB's active roster doesn't carry yet",
+          sorted(recovered) == [80003, 80004], str(recovered))
+
+    covered_lookup = projections.build_lookup([
+        projection_row("Everyday Guy", "BOS", 9.0, 8.0, lineup_spot=1),
+        projection_row("Regular Bat", "BOS", 8.0, 7.0, lineup_spot=2),
+    ])
+    check("...and returns nothing at all when every projected hitter already resolves off the "
+          "active roster -- the common case, which must not widen the pool",
+          await mlb_slate._projected_lineup_ids(901, "BOS", 2026, covered_lookup, [80001, 80002]) == [], "")
+
+    no_order_lookup = projections.build_lookup([
+        projection_row("Called Up Bat", "BOS", 7.0, 6.0, lineup_spot=None),
+    ])
+    check("a player with NO projected batting spot is never recovered -- this is deliberately not "
+          "a blanket 40-man widening, which would drag in every genuinely-injured player still on it",
+          await mlb_slate._projected_lineup_ids(901, "BOS", 2026, no_order_lookup, [80001, 80002]) == [], "")
+
+    check("_projected_lineup_ids returns nothing with no projections file loaded at all",
+          await mlb_slate._projected_lineup_ids(901, "BOS", 2026, {}, [80001, 80002]) == [], "")
+
+    # End to end through _team_hitters: an unconfirmed lineup should now
+    # produce hitters for the recovered players too, and the low-PA
+    # noise filter must not undo the recovery.
+    recovery_data = {
+        "bullpen": {}, "bullpen_workload": {},
+        "hit_season": {
+            80001: hit(400, 0.800, 0.280, 0.520, 30),
+            80002: hit(380, 0.780, 0.270, 0.510, 28),
+            80003: hit(10, 0.700, 0.250, 0.450, 20),   # a real call-up, 10 PA
+            80004: hit(150, 0.820, 0.290, 0.530, 25),
+            80005: hit(10, 0.600, 0.220, 0.380, 15),   # bench, 10 PA, NOT projected
+        },
+        "hit_vl": {}, "hit_vr": {}, "hit_home": {}, "hit_away": {},
+        "hit_recent": {}, "savant_hit": {},
+    }
+    recovery_env = {"park": parks.get_park("BOS"), "roof_closed": True, "temp_fx": None, "wind_fx": None}
+
+    hitter_bios[80005] = {"id": 80005, "name": "Deep Bench", "position": "C", "bats": "R"}
+
+    async def fake_active_with_bench(team_id, season):
+        return [80001, 80002, 80005] if team_id == 901 else []
+
+    mlb.get_active_roster = fake_active_with_bench
+    recovered_hitters = await mlb_slate._team_hitters(
+        901, 2026, recovery_data, twp_baselines, recovery_env,
+        opposing_pitcher=None, opponent_team_id=None, is_home=True,
+        implied_runs=4.4, confirmed=[], team_abbrev="BOS",
+        projection_lookup=full_order_lookup,
+    )
+    recovered_ids = {h["id"] for h in recovered_hitters}
+    check("_team_hitters with an unconfirmed lineup now includes the players RotoWire projects to "
+          "bat who aren't on the active roster -- the whole reported failure",
+          {80003, 80004} <= recovered_ids, str(sorted(recovered_ids)))
+    check("the <25 PA noise filter no longer drops a player RotoWire names in TODAY's order -- a "
+          "10-PA call-up projected to bat 3rd is a starter, not noise",
+          80003 in recovered_ids, str(sorted(recovered_ids)))
+    check("...while a 10-PA bench player NOT in today's projected order is still filtered out, so "
+          "the exemption stays scoped to real same-day evidence",
+          80005 not in recovered_ids, str(sorted(recovered_ids)))
+    check("every recovered hitter carries his real projected batting spot through to the slate",
+          sorted(h["projected_batting_order"] for h in recovered_hitters if h["projected_batting_order"])
+          == [1, 2, 3, 4],
+          str([(h["id"], h.get("projected_batting_order")) for h in recovered_hitters]))
+
+    mlb.get_active_roster = original_get_active_roster
+    mlb.get_40man_roster = original_get_40man_roster
+    mlb.get_people = original_get_people_2
+    mlb.get_team_injuries = original_get_injuries_projstarter
+
     print("\nRotoWire window auto-match (pick_best_team_match)")
 
     # The real reported bug: the user had DK's LATE NIGHT slate loaded
@@ -4726,6 +4840,34 @@ async def main() -> int:
           str({pid: len(slate_trials.get(pid, [])) for pid in all_slate_ids}))
     check("every simulated value is a real float",
           all(isinstance(v, float) for arr in slate_trials.values() for v in arr), "")
+
+    # A hitter on the slate but NOT in either batting order: the contest
+    # generator's pool is built from salary and projection alone, so a
+    # cheap bench bat with a real DK price can legally land in a lineup,
+    # and the whole batch used to be refused over him ("no simulated
+    # outcome for player id(s) ..."). He takes no plate appearances in
+    # the simulated game, so he scores nothing -- the simulation's own
+    # answer, not a fabricated stand-in.
+    bench_slate = {
+        "games": [
+            {
+                "in_slate": True,
+                "home": _slate_side(9001, "HOM", list(range(401, 410)), 5001),
+                "away": _slate_side(9002, "AWY", list(range(501, 510)), 5002),
+            }
+        ]
+    }
+    bench_slate["games"][0]["home"]["hitters"].append(
+        {"id": 4999, "batting_order": None, "projected_batting_order": None}
+    )
+    bench_trials = await atbat_sim.simulate_slate_trials(
+        bench_slate, VARIANCE_SEASON, num_trials=25, seed=5
+    )
+    check("a rostered hitter who isn't in either batting order gets a real all-zero trial series "
+          "instead of blocking the whole slate -- he doesn't bat, so he doesn't score",
+          bench_trials.get(4999) == [0.0] * 25, str(bench_trials.get(4999))[:80])
+    check("...and adding him changes nothing about the nine real starters' own simulated trials",
+          all(bench_trials[pid] == slate_trials[pid] for pid in range(401, 410)), "")
     check("simulate_slate_trials is deterministic for a fixed seed -- re-running with the same "
           "seed reproduces the exact same trial arrays",
           await atbat_sim.simulate_slate_trials(ready_slate, VARIANCE_SEASON, num_trials=25, seed=5)
@@ -4888,8 +5030,10 @@ async def main() -> int:
           all(len(projected_trials.get(pid, [])) == 5 for pid in projected_expected_ids),
           str({pid: len(projected_trials.get(pid, [])) for pid in projected_expected_ids}))
     check("the hitter left OUT of the projected order (409 has no projected_batting_order set) "
-          "never appears in the simulated results -- only the projected 8 were actually used",
-          409 not in projected_trials, str(sorted(projected_trials.keys())))
+          "scores a flat zero every trial -- he never came to the plate, so only the projected 8 "
+          "were actually used, and a lineup rostering him is priced accordingly rather than "
+          "blocking the whole slate",
+          projected_trials.get(409) == [0.0] * 5, str(projected_trials.get(409)))
 
     # Too few projected spots (below MIN_PROJECTED_LINEUP_SIZE) -- still
     # not ready, same as having no projection data at all.

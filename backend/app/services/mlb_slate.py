@@ -1082,6 +1082,99 @@ async def _projected_starter(
     return {"id": matched["id"], "name": best["name"]}
 
 
+async def _projected_lineup_ids(
+    team_id: int,
+    team_abbrev: str,
+    season: int,
+    projection_lookup: dict[tuple[str, str], dict[str, Any]],
+    known_ids: list[int],
+) -> list[int]:
+    """
+    MLB ids for anyone RotoWire puts in TODAY'S projected batting order
+    who isn't on the active roster -- resolved off the 40-man roster and
+    the injured list, exactly as _projected_starter() already does for a
+    projected STARTING PITCHER.
+
+    Same real problem, same user-confirmed reading of it: a roster move
+    posts to MLB's feed when the transaction clears, which routinely
+    lands close to first pitch, while RotoWire and DraftKings already
+    have the player in the lineup and priced. RotoWire listing an
+    injured player in today's batting order typically means he's being
+    activated to play, not that RotoWire is stale -- and a 60-day IL
+    stint is precisely the case where MLB's own "active" roster says no
+    while every other source says yes.
+
+    Measured on 2026-08-30: Boston's projected 1st and 6th hitters
+    (Roman Anthony, Trevor Story -- both D60 on MLB's feed, both priced
+    by DK, both carrying 130+ real plate appearances this season) were
+    dropped from the slate entirely, leaving BOS with 7 usable batting
+    spots against the at-bat engine's minimum of 8. The whole slate was
+    refused over it.
+
+    Deliberately NOT a blanket widening to the 40-man. That would pull
+    in every genuinely-injured player who happens to remain on it --
+    138 extra hitters league-wide on that same date, including several
+    stars nobody was projecting to play at all. Only players RotoWire
+    actually names in today's order are recovered, which is exactly the
+    set with real same-day evidence behind them.
+
+    Returns only ids NOT already in `known_ids`; an empty list whenever
+    every projected hitter already resolves off the active roster, which
+    is the common case and costs nothing beyond the (cached) name match.
+    """
+    if not projection_lookup:
+        return []
+    team_norm = projections.normalize_team(team_abbrev)
+    projected_names = [
+        row["name"]
+        for (t, _name), row in projection_lookup.items()
+        if t == team_norm and row.get("lineup_spot") and row.get("name")
+    ]
+    if not projected_names:
+        return []
+
+    known_bios = await mlb.get_people(known_ids)
+    known_lookup = projections.build_lookup(
+        [
+            {"team": team_abbrev, "normalized_name": projections.normalize_name(bio["name"]), "id": pid}
+            for pid, bio in known_bios.items()
+            if bio.get("name")
+        ]
+    )
+    missing = [
+        name for name in projected_names
+        if not projections.match(known_lookup, name, team_abbrev, fuzzy=True)
+    ]
+    if not missing:
+        return []
+
+    forty_man_ids, injuries = await asyncio.gather(
+        mlb.get_40man_roster(team_id, season),
+        mlb.get_team_injuries(team_id, season),
+    )
+    candidate_ids = [
+        pid
+        for pid in {*forty_man_ids, *(inj["id"] for inj in injuries if inj.get("id"))}
+        if pid not in set(known_ids)
+    ]
+    if not candidate_ids:
+        return []
+    candidate_bios = await mlb.get_people(candidate_ids)
+    candidate_lookup = projections.build_lookup(
+        [
+            {"team": team_abbrev, "normalized_name": projections.normalize_name(bio["name"]), "id": pid}
+            for pid, bio in candidate_bios.items()
+            if bio.get("name")
+        ]
+    )
+    recovered: list[int] = []
+    for name in missing:
+        matched = projections.match(candidate_lookup, name, team_abbrev, fuzzy=True)
+        if matched and matched["id"] not in recovered:
+            recovered.append(matched["id"])
+    return recovered
+
+
 # --------------------------------------------------------------------------
 # One team's hitters
 # --------------------------------------------------------------------------
@@ -1113,11 +1206,18 @@ async def _team_hitters(
     opp_bullpen = data["bullpen"].get(opponent_team_id)
     opp_bullpen_workload = data["bullpen_workload"].get(opponent_team_id)
 
-    # Prefer the confirmed lineup; fall back to the active roster.
+    # Prefer the confirmed lineup; fall back to the active roster, plus
+    # anyone RotoWire's own projected batting order names who isn't on
+    # it yet (see _projected_lineup_ids -- an IL activation or call-up
+    # whose transaction hasn't posted to MLB's feed).
     if confirmed:
         player_ids = confirmed
     else:
         player_ids = await mlb.get_active_roster(team_id, season)
+        if projection_lookup:
+            player_ids = player_ids + await _projected_lineup_ids(
+                team_id, team_abbrev, season, projection_lookup, player_ids
+            )
 
     bios = await mlb.get_people(player_ids)
     p_hand = (opposing_pitcher or {}).get("throws")  # 'L' or 'R'
@@ -1145,7 +1245,21 @@ async def _team_hitters(
 
         season_stat = data["hit_season"].get(pid)
         # Skip players with almost no playing time -- they add noise.
-        if not season_stat or (season_stat.get("pa") or 0) < 25:
+        # Exempt anyone RotoWire actually names in TODAY'S projected
+        # batting order: the filter exists to keep bench noise out of
+        # the tables, and a named starter is by definition not noise.
+        # Measured: on 2026-08-30 the Dodgers' projected 9th hitter sat
+        # on 24 plate appearances, one short of the cutoff, so the
+        # at-bat engine simulated an 8-man Los Angeles order -- silently,
+        # since 8 still clears its readiness minimum. A player with NO
+        # season line at all is still skipped; there's nothing to score
+        # him with.
+        projected_spot = (
+            (_projection_info(projection_lookup, bio.get("name"), team_abbrev) or {}).get("lineup_spot")
+            if projection_lookup
+            else None
+        )
+        if not season_stat or ((season_stat.get("pa") or 0) < 25 and not projected_spot):
             continue
 
         bats = bio.get("bats") or "R"
