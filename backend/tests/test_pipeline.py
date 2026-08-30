@@ -6351,6 +6351,67 @@ async def main() -> int:
     check("a hitter with no opponent_pitcher_id at all still gets scored normally, no crash",
           91013 in inhouse_projections.project_ownership(no_opp_pool), "")
 
+    print("\nOwnership: multi-slot eligibility and the starters-only pool")
+
+    # A "2B/SS" player must compete in BOTH groups and report the SUM --
+    # real %Drafted is his share of entries rostering him at ANY slot.
+    # Previously only the first-listed slot counted, making him
+    # invisible to the SS group entirely.
+    multi_pool = [
+        {"id": 95001, "position": "2B", "positions": ["2B", "SS"], "salary": 4500,
+         "fpts": 9.0, "implied_runs": 4.4},
+        {"id": 95002, "position": "2B", "positions": ["2B"], "salary": 4500,
+         "fpts": 9.0, "implied_runs": 4.4},
+        {"id": 95003, "position": "SS", "positions": ["SS"], "salary": 4500,
+         "fpts": 9.0, "implied_runs": 4.4},
+    ]
+    multi_own = inhouse_projections.project_ownership(multi_pool)
+    check("a multi-eligible player competes in every slot group and reports the SUM -- more "
+          "total ownership than an identical single-slot player",
+          multi_own[95001] > multi_own[95002] and multi_own[95001] > multi_own[95003],
+          str(multi_own))
+    check("each group still sums to its slot count x 100% (2B=100, SS=100 -> 200 total)",
+          abs(sum(multi_own.values()) - 200.0) < 0.1, str(multi_own))
+    check("entries without a positions list still work exactly as before (single position)",
+          95002 in multi_own and 95003 in multi_own, str(multi_own))
+
+    def _bench_hitter(pid, order=None, projected=None, pa=300):
+        return {"id": pid, "batting_order": order, "projected_batting_order": projected,
+                "season": {"pa": pa}}
+
+    # Confirmed lineup: exactly the 9 with a batting_order survive.
+    confirmed_team = [_bench_hitter(96000 + i, order=i) for i in range(1, 10)] + [
+        _bench_hitter(96100 + i) for i in range(4)
+    ]
+    kept = mlb_slate._ownership_eligible_hitters(confirmed_team)
+    check("with a confirmed lineup, only the batting-order nine compete for ownership -- a "
+          "bench bat nobody can roster gets 0%, not a share of the group's fixed total",
+          {h["id"] for h in kept} == {96000 + i for i in range(1, 10)},
+          str(sorted(h["id"] for h in kept)))
+
+    # Projected order (RotoWire) stands in before confirmation.
+    projected_team = [_bench_hitter(96200 + i, projected=i) for i in range(1, 9)] + [
+        _bench_hitter(96300 + i) for i in range(5)
+    ]
+    kept_proj = mlb_slate._ownership_eligible_hitters(projected_team)
+    check("before confirmation, RotoWire's projected order stands in -- projected starters "
+          "compete, projected bench doesn't",
+          {h["id"] for h in kept_proj} == {96200 + i for i in range(1, 9)},
+          str(sorted(h["id"] for h in kept_proj)))
+
+    # Neither signal: top 9 by season PA -- playing time, not talent.
+    blind_team = [_bench_hitter(96400 + i, pa=600 - i * 40) for i in range(13)]
+    kept_blind = mlb_slate._ownership_eligible_hitters(blind_team)
+    check("with no lineup signal at all, the top 9 by season plate appearances stand in -- "
+          "usage, not talent, decides who's probably starting",
+          {h["id"] for h in kept_blind} == {96400 + i for i in range(9)},
+          str(sorted(h["id"] for h in kept_blind)))
+
+    check("_dk_slot_positions splits a multi-eligible salary string into every slot",
+          mlb_slate._dk_slot_positions("1B/3B", "OF") == ["1B", "3B"], "")
+    check("_dk_slot_positions falls back to the bio position with no salary loaded",
+          mlb_slate._dk_slot_positions(None, "OF") == ["OF"], "")
+
     print("\nOwnership: the team-stack layer (hitters are owned team-first)")
 
     # Percentile helper: the primitive the whole layer rests on.

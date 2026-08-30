@@ -71,13 +71,14 @@ def _rebuild_pool(slate):
             opp_side = "away" if side == "home" else "home"
             opp_p = g[opp_side].get("probable_pitcher")
             opp_id = opp_p.get("id") if opp_p else None
-            for h in g[side].get("hitters") or []:
+            for h in mlb_slate._ownership_eligible_hitters(g[side].get("hitters") or []):
                 proj = h.get("projection") or {}
                 sal = h.get("salary")
                 if proj.get("inhouse_fpts") is not None and sal:
                     pool.append({
                         "id": h["id"],
                         "position": mlb_slate._dk_slot_position(sal.get("position"), h["position"]),
+                        "positions": mlb_slate._dk_slot_positions(sal.get("position"), h["position"]),
                         "salary": sal["salary"], "fpts": proj["inhouse_fpts"],
                         "implied_runs": g[side]["implied_runs"],
                         "opponent_pitcher_id": opp_id, "team": g[side]["abbrev"],

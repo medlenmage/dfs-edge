@@ -266,16 +266,59 @@ async def build_slate(
 
 
 def _dk_slot_position(salary_position: str | None, fallback: str) -> str:
-    """
-    The first-listed DK roster-slot code from a multi-eligible salary
+    """The first-listed DK roster-slot code from a multi-eligible salary
     string (e.g. "1B/3B" -> "1B"), or `fallback` if no salary CSV is
-    loaded for this player. Ownership grouping needs exactly one slot
-    per player -- splitting a real player's ownership across every
-    eligible slot is Phase-5-level precision this v1 doesn't attempt.
-    """
+    loaded for this player. Kept for callers that genuinely need one
+    slot; ownership uses _dk_slot_positions (plural) below instead."""
     if not salary_position:
         return fallback
     return salary_position.split("/")[0].strip() or fallback
+
+
+def _dk_slot_positions(salary_position: str | None, fallback: str) -> list[str]:
+    """
+    EVERY DK roster-slot code a player is eligible at ("1B/3B" ->
+    ["1B", "3B"]), or [fallback] with no salary CSV loaded.
+
+    Ownership needs all of them, not just the first: a player's real
+    %Drafted is his share of entries rostering him at ANY eligible
+    slot, so a scarce shortstop DK lists as "2B/SS" was previously
+    invisible to the SS group entirely -- his ownership went missing
+    and the remaining SS chalk was overstated to fill the group's 100%.
+    """
+    if not salary_position:
+        return [fallback]
+    slots = [s.strip() for s in salary_position.split("/") if s.strip()]
+    return slots or [fallback]
+
+
+def _ownership_eligible_hitters(hitters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    The hitters who should actually compete for ownership on one team:
+    the (confirmed or projected) STARTING NINE, not the whole roster.
+
+    Each position group's softmax total is fixed at slots x 100%, so
+    before lineups confirm, letting every rostered hitter into the pool
+    split e.g. 300% of OF ownership across ~13 outfielders per team
+    instead of the ~6 who will actually play -- roughly halving every
+    real starter's number, then re-sharpening it unpredictably and
+    JUMPING when lineups locked. A bench bat nobody can roster in a
+    real lineup gets 0%, not a share.
+
+    Confirmed batting order wins; RotoWire's projected order stands in
+    before confirmation (the same fallback atbat_sim.py already uses);
+    a team with neither falls back to its top 9 by season plate
+    appearances -- playing time, not talent, since "who starts" is a
+    usage question.
+    """
+    in_lineup = [
+        h for h in hitters
+        if h.get("batting_order") is not None or h.get("projected_batting_order") is not None
+    ]
+    if in_lineup:
+        return in_lineup
+    by_pa = sorted(hitters, key=lambda h: (h.get("season") or {}).get("pa") or 0, reverse=True)
+    return by_pa[:9]
 
 
 async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: int) -> None:
@@ -317,7 +360,13 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
     if not inhouse:
         return
 
-    ownership_pool: list[dict[str, Any]] = []
+    # Keyed by player id rather than a flat list: on a DOUBLEHEADER day
+    # the same real player appears on two games' rosters, and letting
+    # both occurrences into the pool scored him twice -- diluting his
+    # groupmates' shares and (once multi-slot summing landed) double-
+    # counting his own. One entry per player, preferring the occurrence
+    # from the game that's actually in the loaded DK slate.
+    ownership_pool_by_id: dict[int, dict[str, Any]] = {}
     for g in out_games:
         for side in ("home", "away"):
             implied_runs = g[side]["implied_runs"]
@@ -328,14 +377,21 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
             opp_side = "away" if side == "home" else "home"
             opponent_pitcher = g[opp_side]["probable_pitcher"]
             opponent_pitcher_id = opponent_pitcher.get("id") if opponent_pitcher else None
-            for hitter in g[side]["hitters"]:
+            for hitter in _ownership_eligible_hitters(g[side]["hitters"]):
                 fpts = inhouse.get(hitter["id"])
                 salary_info = hitter.get("salary")
                 if fpts is not None and salary_info:
-                    ownership_pool.append(
+                    if hitter["id"] in ownership_pool_by_id and not g.get("in_slate"):
+                        continue
+                    ownership_pool_by_id[hitter["id"]] = (
                         {
                             "id": hitter["id"],
                             "position": _dk_slot_position(salary_info.get("position"), hitter["position"]),
+                            # Every eligible slot, not just the first --
+                            # see _dk_slot_positions. project_ownership
+                            # scores him in each group and reports the
+                            # sum, matching what %Drafted really means.
+                            "positions": _dk_slot_positions(salary_info.get("position"), hitter["position"]),
                             "salary": salary_info["salary"],
                             "fpts": fpts,
                             "implied_runs": implied_runs,
@@ -355,17 +411,20 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                 fpts = inhouse.get(pitcher["id"])
                 salary_info = pitcher.get("salary")
                 if fpts is not None and salary_info:
-                    ownership_pool.append(
-                        {
+                    # Same doubleheader dedupe as the hitters above --
+                    # keyed under a "P:"-prefixed id purely so a two-way
+                    # player's pitching entry can't clobber his hitting
+                    # one.
+                    if f"P:{pitcher['id']}" not in ownership_pool_by_id or g.get("in_slate"):
+                        ownership_pool_by_id[f"P:{pitcher['id']}"] = {
                             "id": pitcher["id"],
                             "position": "P",
                             "salary": salary_info["salary"],
                             "fpts": fpts,
                             "implied_runs": implied_runs,
                         }
-                    )
 
-    ownership = inhouse_projections.project_ownership(ownership_pool)
+    ownership = inhouse_projections.project_ownership(list(ownership_pool_by_id.values()))
     # Real, data-driven ceilings for the same batch -- the "upside" half
     # of a leverage score. Computed for everyone with an edge/composite
     # (not just the ones that made it into ownership_pool), so leverage
