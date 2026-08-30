@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { FieldSnapshot } from './FieldSnapshot'
 import { localTime } from '../format'
 
 /**
@@ -384,6 +385,8 @@ export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowir
           </button>
         )}
       </div>
+
+      <FieldSnapshot slate={slate} />
 
       {mode === 'generate' && (
       <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
