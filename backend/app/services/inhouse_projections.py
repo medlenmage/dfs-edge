@@ -73,7 +73,12 @@ from app.services.optimizer import SLOT_REQUIREMENTS
 # Recent form gets real, bounded weight -- a hot or cold last 15 games
 # matters, but shouldn't swamp a full season's signal the way a naive
 # last-N-only average would.
-_RECENT_WEIGHT = 0.4
+# 0.2, down from an original 0.4: over 15 games a hitter's DK-points
+# mean carries a standard error of roughly +/-2 around a true mean of
+# ~7-8, so 40% weight let pure noise dominate the baseline. Published
+# hot/cold-streak work finds little predictive value once you regress;
+# 0.15-0.20 keeps a real (small) recency signal without chasing it.
+_RECENT_WEIGHT = 0.2
 _RECENT_GAMES = 15
 
 
@@ -114,6 +119,95 @@ async def baseline_dk_points(player_id: int, position: str, season: int) -> floa
     return round(prior + (blended - prior) * trust, 2)
 
 
+# THE MATCHUP-ONLY PROJECTION MULTIPLIER (v3)
+# --------------------------------------------
+# v1/v2 multiplied the baseline by edge.composite -- but the baseline
+# is the player's OWN DK pts/game, which already fully contains how
+# good he is, and several composite components measure his ABSOLUTE
+# quality vs the league (platoon vs league OPS, contact quality vs
+# league, his own SB rate, recent form, home/road). Multiplying the two
+# double-counted talent: a stud got high-baseline x >1 composite, a
+# scrub low-baseline x <1, and the spread exaggerated at both ends.
+#
+# The projection multiplier is built from only the TODAY-SPECIFIC
+# components (Vegas team total, the opposing pitcher, park, bullpen +
+# its recent workload, weather, umpire, and the two market props),
+# renormalized over whichever are present -- exactly combine()'s
+# machinery, restricted. Platoon is re-based to the player's own
+# season OPS (vs-hand / overall = his actual split EDGE, centered on
+# 1.0 for a player with no split) instead of vs the league. Contact
+# quality, SB rate, form and home/road are deliberately excluded: the
+# baseline already contains his real results in all four (form
+# doubly so -- the baseline itself blends recent form).
+_PROJECTION_COMPONENTS = (
+    "team_total", "pitcher", "park", "bullpen", "bullpen_workload",
+    "weather", "home_run", "hit_probability", "umpire",
+)
+
+# How far the multiplier's deviation from 1.0 actually moves expected
+# DK points: mult = 1 + k * (raw - 1). FITTED, not guessed --
+# scripts/fit_projection_damping.py regressed real archived actual
+# FPTS (1,803 player-days across 10 contest dates, with look-ahead-safe
+# baselines built from each player's game log strictly before each
+# date) against baseline * (multiplier - 1): k = 2.34, SE 0.35,
+# 95% CI (1.65, 3.03). 2.0 sits on the CI's conservative side.
+#
+# That k AMPLIFIES rather than damps surprised us until the spread
+# explained it: stripped of the talent terms, the remaining matchup
+# multiplier is tight (p10-p90 of 0.92-1.08 on real slates -- the
+# component caps were tuned for the full fourteen-signal composite),
+# and scaling +/-8% by ~2 lands exactly in the +/-15-20% range real
+# single-game matchup effects actually span. The old full composite had
+# the opposite problem at the same root -- display-tuned units, never
+# FPTS units -- which is why the at-bat sim independently had to shrink
+# IT to 0.35 of itself. Neither number was wrong; neither was ever
+# calibrated until now.
+_PROJECTION_DAMPING = 2.0
+
+# The self-relative platoon ratio gets the same cap discipline as
+# scoring.py's own components (+/-45%) so one thin split can't run away.
+_PLATOON_CAP = 0.45
+
+
+def projection_multiplier(
+    components: dict[str, Any],
+    *,
+    season_ops: float | None = None,
+    vs_hand_ops: float | None = None,
+) -> float:
+    """
+    The RAW (undamped) matchup multiplier for one hitter today -- see
+    the block comment above for what's in, what's out, and why.
+    Callers apply _PROJECTION_DAMPING on top (project_fpts does).
+    """
+    total = 0.0
+    used = 0.0
+    for name in _PROJECTION_COMPONENTS:
+        comp = components.get(name)
+        weight = scoring.WEIGHTS.get(name)
+        if comp is None or weight is None:
+            continue
+        total += comp["value"] * weight
+        used += weight
+
+    # Platoon relative to HIS OWN overall line -- the actual edge of
+    # facing this hand, not a restatement of how good a hitter he is.
+    if season_ops and vs_hand_ops and season_ops > 0:
+        ratio = vs_hand_ops / season_ops
+        ratio = max(1 - _PLATOON_CAP, min(1 + _PLATOON_CAP, ratio))
+        weight = scoring.WEIGHTS["platoon"]
+        total += ratio * weight
+        used += weight
+
+    return total / used if used else 1.0
+
+
+def calibrated(multiplier: float) -> float:
+    """mult -> 1 + k(mult - 1): the raw multiplier rescaled into real
+    expected-FPTS units by the fitted k (see _PROJECTION_DAMPING)."""
+    return 1.0 + _PROJECTION_DAMPING * (multiplier - 1.0)
+
+
 def project_fpts(
     baseline: float,
     composite: float,
@@ -140,6 +234,34 @@ _BATTING_ORDER_PA_FACTOR = {
     1: 1.09, 2: 1.06, 3: 1.04, 4: 1.02, 5: 1.00,
     6: 0.98, 7: 0.96, 8: 0.94, 9: 0.91,
 }
+
+
+def batting_order_pa_factor(confirmed: int | None, projected: int | None) -> float:
+    """
+    PA-volume factor for TODAY'S slot relative to the player's USUAL
+    one -- not the absolute slot factor. The baseline was earned from
+    games where he batted in his normal spot, so it already contains
+    his normal PA volume; applying the absolute factor handed a
+    permanent leadoff hitter a free +9% every single day (and a
+    permanent 9-hole hitter a standing -9%) for information the
+    baseline already priced in. Only a CHANGE in slot moves real PA
+    expectation vs. his own history.
+
+    "Usual" is RotoWire's projected slot for him -- a projected lineup
+    is precisely a statement of a player's normal role -- so a player
+    confirmed exactly where he was projected gets 1.0, and a player
+    projected 8th but confirmed leadoff (a real role change) gets the
+    full ~+16% swing. With no projection loaded there's nothing to
+    compare against, and with no confirmed order there's nothing to
+    react to; both fall back to a neutral 1.0.
+    """
+    if confirmed is None or projected is None:
+        return 1.0
+    today = _BATTING_ORDER_PA_FACTOR.get(confirmed)
+    usual = _BATTING_ORDER_PA_FACTOR.get(projected)
+    if not today or not usual:
+        return 1.0
+    return today / usual
 
 
 async def pitcher_win_rate(player_id: int, season: int) -> float | None:
@@ -202,13 +324,26 @@ async def inhouse_fpts_batch(players: list[dict[str, Any]], season: int) -> dict
 
     result: dict[int, float] = {}
     for p, baseline in zip(ids, baselines):
-        composite = p["edge"]["composite"]
         if p["position"] == "P":
+            # Pitchers keep the full composite unscaled for now: the
+            # fitted k above was measured on the HITTER matchup
+            # multiplier's own (tight) spread, and applying it to the
+            # pitcher composite's much wider display-tuned spread would
+            # amplify it far past anything measured. Fitting a separate
+            # pitcher k needs more archived pitcher actuals than exist
+            # yet -- an honest open item, not an oversight.
             delta = win_ev_delta(p.get("win_probability_pct"), win_rates.get(p["id"]))
-            result[p["id"]] = project_fpts(baseline, composite, win_ev_delta=delta)
+            result[p["id"]] = project_fpts(baseline, p["edge"]["composite"], win_ev_delta=delta)
         else:
-            pa_factor = _BATTING_ORDER_PA_FACTOR.get(p.get("batting_order"), 1.0)
-            result[p["id"]] = project_fpts(baseline, composite, pa_factor=pa_factor)
+            raw = projection_multiplier(
+                (p.get("edge") or {}).get("components") or {},
+                season_ops=(p.get("season") or {}).get("ops"),
+                vs_hand_ops=(p.get("vs_hand") or {}).get("ops"),
+            )
+            pa_factor = batting_order_pa_factor(
+                p.get("batting_order"), p.get("projected_batting_order")
+            )
+            result[p["id"]] = project_fpts(baseline, calibrated(raw), pa_factor=pa_factor)
     return result
 
 
