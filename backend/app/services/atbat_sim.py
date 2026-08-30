@@ -1089,4 +1089,34 @@ async def simulate_slate_trials(
                 mlb_dk_points.pitcher_game_points(result["away_starter_line"])
             )
 
+    # Everyone else on a simulated game's two rosters is, by this
+    # slate's own batting orders, NOT starting -- so he takes no plate
+    # appearances and scores nothing. That's the simulation's own
+    # answer, not a fabricated stand-in: simulate_game() gives a
+    # non-participant no PAs, and DK gives no PAs no points.
+    #
+    # This matters because the contest generator's pool is built from
+    # salary and projection alone, so a cheap bench bat with a real DK
+    # price and a low RotoWire projection can legally land in a lineup.
+    # Without this, the whole batch was refused ("no simulated outcome
+    # for player id(s) ...") over a couple of players the model was
+    # already saying wouldn't play.
+    #
+    # Deliberately gated on the side having a usable order (which
+    # _side_ready already guarantees for every game reaching this
+    # point): "not in the order" then means the lineup data positively
+    # says he's benched, rather than that we failed to resolve him. A
+    # genuine resolution failure still surfaces as the loud error it
+    # should -- that's exactly how a real bug was caught, where two
+    # projected BOS starters were being dropped from the slate and the
+    # engine refused rather than silently scoring them zero.
+    zeros = [0.0] * num_trials
+    for g in games:
+        for side_key in ("home", "away"):
+            side = g.get(side_key) or {}
+            for hitter in side.get("hitters") or []:
+                pid = hitter.get("id")
+                if pid and pid not in player_trials:
+                    player_trials[pid] = list(zeros)
+
     return player_trials
