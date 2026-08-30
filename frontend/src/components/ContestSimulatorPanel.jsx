@@ -693,8 +693,11 @@ export function ContestSimulatorPanel({ date, batch, projectionSource = 'rotowir
                 {state.summary.avg_roi_pct}% avg ROI
               </span>
               <span className="badge">${state.summary.total_entry_cost.toLocaleString()} cost</span>
-              <span className="badge">
-                ${state.summary.total_expected_payout.toLocaleString()} expected payout
+              <span
+                className="badge"
+                title="Every lineup's own average payout, summed. Unlike a single lineup's average -- which is carried by rare hits and reads $0 in most trials -- a sum across thousands of lineups is a genuinely stable number: it lands on the prize pool, which is what the contest pays out by construction."
+              >
+                ${state.summary.total_expected_payout.toLocaleString()} avg total payout
               </span>
               <span className={`badge ${state.summary.estimated_net_profit >= 0 ? 'ok' : 'risk'}`}>
                 {state.summary.estimated_net_profit >= 0 ? '+' : ''}$
@@ -1006,7 +1009,12 @@ export function ContestSimulatorPanel({ date, batch, projectionSource = 'rotowir
                     <th className="num" title="How often this lineup finished in the top 10% of the whole simulated contest">
                       Top 10%
                     </th>
-                    <th className="num">Exp. payout</th>
+                    <th
+                      className="num"
+                      title="This lineup's MEAN payout across all simulated trials -- not what a typical run returns. Payouts are enormously right-skewed: a lineup cashing 29% of the time collects nothing in the other 71%, so its median payout is $0 and the average is carried entirely by the runs where it hits. Hover a cell for that lineup's own 10th-90th percentile range."
+                    >
+                      Avg payout
+                    </th>
                     <th
                       className="num"
                       title="(expected payout - entry fee) / entry fee, ± its Monte Carlo standard error. Top-heavy payouts make per-lineup ROI dominated by rare first-place hits, so a value smaller than its own ± is noise (greyed out) -- that's also why rows are ranked by Top 1% rather than ROI."
@@ -1040,7 +1048,17 @@ export function ContestSimulatorPanel({ date, batch, projectionSource = 'rotowir
                         <td className="num">{r ? `${r.first_place_pct}%` : '—'}</td>
                         <td className="num">{r ? `${r.top_1pct_pct}%` : '—'}</td>
                         <td className="num">{r ? `${r.top_10pct_pct}%` : '—'}</td>
-                        <td className="num">{r ? `$${r.expected_payout.toFixed(2)}` : '—'}</td>
+                        <td
+                          className="num"
+                          title={
+                            r
+                              ? `Mean of ${state.num_trials.toLocaleString()} simulated trials. ` +
+                                `10th-90th percentile: $${r.payout_p10.toFixed(2)} - $${r.payout_p90.toFixed(2)}.`
+                              : undefined
+                          }
+                        >
+                          {r ? `$${r.expected_payout.toFixed(2)}` : '—'}
+                        </td>
                         <td className="num">
                           {r ? (
                             <>
