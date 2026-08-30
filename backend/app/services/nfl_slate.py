@@ -268,7 +268,11 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
     if not all_players:
         return
 
-    inhouse = await nfl_inhouse_projections.inhouse_fpts_batch(all_players, nfl.PRIOR_SEASON)
+    # The slate's OWN season, not PRIOR_SEASON: the baseline now rolls
+    # prior season + current season to date internally (see
+    # nfl_inhouse_projections.rolling_game_log), so in-season games
+    # update projections instead of 2025 being pinned forever.
+    inhouse = await nfl_inhouse_projections.inhouse_fpts_batch(all_players, season)
     if not inhouse:
         return
 
@@ -279,6 +283,16 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
             for p in g[side]["players"] or []:
                 fpts = inhouse.get(p.get("dk_id"))
                 if fpts is None or p.get("salary") is None:
+                    continue
+                # Backups dilute every group's fixed softmax total the
+                # same way MLB bench bats did: 88 QBs on a real salary
+                # file, 32 starters. There's no depth-chart feed, but
+                # the projection itself already knows -- a backup's
+                # rolling baseline projects near zero -- so a
+                # positional FPTS floor keeps the pool to players the
+                # field could actually roster.
+                floor = nfl_inhouse_projections.OWNERSHIP_FPTS_FLOOR.get(p["position"])
+                if floor is not None and fpts < floor:
                     continue
                 ownership_pool.append(
                     {

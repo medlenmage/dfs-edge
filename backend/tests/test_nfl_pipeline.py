@@ -1097,6 +1097,51 @@ def main() -> int:
           "the exact real bug this guards against (matched != has a real line)",
           nfl_slate._fantasylabs_has_line(empty_but_matched_row) is False, "")
 
+    print("\nNFL rolling multi-season baseline + ownership floors")
+
+    check("_decayed_mean weights the newest games hardest -- a cold start with a hot recent "
+          "stretch reads above the flat average",
+          nfl_inhouse_projections._decayed_mean([2.0] * 10 + [20.0] * 4)
+          > sum([2.0] * 10 + [20.0] * 4) / 14,
+          str(nfl_inhouse_projections._decayed_mean([2.0] * 10 + [20.0] * 4)))
+    check("_decayed_mean of a flat series is exactly that value",
+          abs(nfl_inhouse_projections._decayed_mean([7.0] * 17) - 7.0) < 1e-9, "")
+
+    # rolling_game_log: prior season's Week 18 dropped, current season
+    # appended when it exists, and a not-yet-published current season
+    # (the normal pre-season case) degrades to prior-only.
+    _rolling_logs = {
+        ("p1", 2025): [{"week": w, "receptions": 5} for w in range(1, 19)],  # includes W18
+        ("p1", 2026): [{"week": 1, "receptions": 9}],
+    }
+
+    async def _fake_rolling_log(player_id, season, force=False):
+        if (player_id, season) == ("p2", 2026):
+            raise RuntimeError("stats_player_week_2026.csv not published yet")
+        return _rolling_logs.get((player_id, season), [])
+
+    _orig_log = nfl.get_player_game_log
+    nfl.get_player_game_log = _fake_rolling_log
+    rolled = asyncio.run(nfl_inhouse_projections.rolling_game_log("p1", 2026))
+    check("rolling_game_log spans the prior season plus the current season to date, in order",
+          len(rolled) == 18 and rolled[-1]["week"] == 1 and rolled[-1]["receptions"] == 9,
+          str((len(rolled), rolled[-1])))
+    check("the prior season's Week 18 is dropped -- clinched teams rest starters, so it's "
+          "systematically unrepresentative",
+          all(not (g["week"] == 18 and g["receptions"] == 5) for g in rolled[:-1]),
+          str([g["week"] for g in rolled]))
+    _rolling_logs[("p2", 2025)] = [{"week": w, "receptions": 4} for w in range(1, 18)]
+    rolled_pre = asyncio.run(nfl_inhouse_projections.rolling_game_log("p2", 2026))
+    check("a current season nflverse hasn't published yet degrades to prior-season-only "
+          "rather than raising -- the normal pre-season case",
+          len(rolled_pre) == 17, str(len(rolled_pre)))
+    nfl.get_player_game_log = _orig_log
+
+    check("the ownership FPTS floors match the review's own thresholds and leave DST unfloored "
+          "(only 32 real candidates, every one rosterable)",
+          nfl_inhouse_projections.OWNERSHIP_FPTS_FLOOR == {"QB": 8.0, "RB": 4.0, "WR": 4.0, "TE": 3.0},
+          str(nfl_inhouse_projections.OWNERSHIP_FPTS_FLOOR))
+
     print("\nNFL in-house projections + ownership (nfl_inhouse_projections.py)")
 
     # --- matchup multiplier -------------------------------------------
