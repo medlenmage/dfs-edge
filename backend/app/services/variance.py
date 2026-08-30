@@ -368,6 +368,67 @@ async def player_pools_for_entries(
 PITCHER_COUNT = SLOT_REQUIREMENTS["P"]
 
 
+# How wrong our own projection of a player's TRUE TALENT might be, as a
+# fraction of it -- drawn per player per trial and applied to entries
+# and the opponent field alike, so the simulator stops treating its own
+# inputs as gospel (without it, entries built by maximizing the same
+# numbers the sim is nudged by are by construction the lineups the sim
+# believes in most).
+#
+# DELIBERATELY 0.0 FOR NOW -- implemented, measured, and gated off,
+# because the current grading scheme can't absorb it honestly. An
+# entry is ranked per-trial against a SAMPLED field and read off a
+# fixed payout curve; the field's own payouts are never re-graded under
+# the same draws, so the scheme is not zero-sum -- symmetric extra
+# variance mints new rank-1 probability for a top lineup without taking
+# it from anyone, and a top-heavy curve converts that into free EV.
+# Measured directly on the rake sanity fixture: a zero-skill chalk
+# lineup went from -33% ROI to +60..+78% at sigma 0.10-0.20 (both
+# additive-on-mean and multiplicative forms), which is exactly the
+# implausible-ROI failure mode this app's own regression test guards.
+# Turning this on requires grading entries and field JOINTLY per trial
+# (real zero-sum ranks over the union) -- the review's own SS7.4-style
+# refactor -- and that has to come first. ~0.20 is the reviewer's
+# suggested scale once it can be used.
+PROJECTION_ERROR_STD = 0.0
+# One draw is clipped at +/-2.5 sigma so a single extreme draw can't
+# hand a player an absurd talent level (or a negative one).
+_PROJECTION_ERROR_CLIP = 2.5
+
+
+def apply_projection_error(
+    outcomes: "np.ndarray", rng: "np.random.Generator"
+) -> "np.ndarray":
+    """
+    Shift a (players x trials) outcome matrix by per-player, per-trial
+    projection-error draws, ADDITIVE on each player's own mean level --
+    outcome + eps * mean, eps ~ N(0, PROJECTION_ERROR_STD).
+
+    Additive-on-the-mean rather than multiplicative-on-the-outcome, and
+    the distinction genuinely matters: projection error is uncertainty
+    about a player's TRUE TALENT (the center of his distribution), not
+    about how big his big games are. A multiplicative version was tried
+    first and rewrote the right tail -- a 40-point outcome drawn at
+    +1.5x became 60 -- which in a top-heavy payout inflated every
+    chalk lineup's EV so hard it tripped the rake sanity check
+    (+69.9% ROI for a zero-skill chalk lineup). Shifting the center
+    leaves the shape of game-to-game variance where the real pools put
+    it. Draws are shared across every lineup in the batch (entries and
+    field alike): within one simulated reality a player has ONE true
+    talent, whoever rostered him. Results are floored at zero, since
+    DK Classic MLB hitter scoring has no negative outcomes.
+    """
+    if PROJECTION_ERROR_STD <= 0:
+        return outcomes
+    means = outcomes.mean(axis=1, keepdims=True)
+    error = np.clip(
+        rng.normal(0.0, PROJECTION_ERROR_STD, size=outcomes.shape),
+        -_PROJECTION_ERROR_CLIP * PROJECTION_ERROR_STD,
+        _PROJECTION_ERROR_CLIP * PROJECTION_ERROR_STD,
+    )
+    return np.maximum(outcomes + error * means, 0.0)
+
+
 def simulate_batch(
     entries: list[dict[str, Any]],
     player_pools: dict[int, list[float]],
@@ -509,6 +570,8 @@ def simulate_batch(
             jitter = rng.normal(0.0, JITTER_FRACTION * n, size=num_trials)
             idx = np.clip(np.round(target_idx + jitter).astype(int), 0, n - 1)
         outcomes[i] = pool[idx]
+
+    outcomes = apply_projection_error(outcomes, rng)
 
     lineup_indices = np.array(
         [[player_index[p["id"]] for p in players] for players in flattened]
