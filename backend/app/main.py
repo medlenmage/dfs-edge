@@ -36,7 +36,10 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     log.info("DFS Edge starting up")
     log.info("  betting lines : %s", "ON" if settings.has_odds else "off (no ODDS_API_KEY)")
-    log.info("  AI analysis   : %s", "ON" if settings.has_claude else "off (no ANTHROPIC_API_KEY)")
+    log.info(
+        "  AI analysis   : %s",
+        "ON" if settings.has_claude else "off (no Claude Code login or ANTHROPIC_API_KEY)",
+    )
     log.info("  cache db      : %s", settings.db_path)
     log.info("  lineup watch  : polling every %ds for scratches", settings.lineup_poll_interval_sec)
     cache.purge_expired()

@@ -179,8 +179,10 @@ export function AnalysisPanel({ date, enabled }) {
             <span className="dim" style={{ fontSize: 12 }}>
               {state.data.model} · {state.data.input_tokens?.toLocaleString()} in /{' '}
               {state.data.output_tokens?.toLocaleString()} out
-              {state.data.estimated_cost_usd != null &&
-                ` · ~$${state.data.estimated_cost_usd.toFixed(3)}`}
+              {state.data.billing === 'subscription'
+                ? ' · covered by your Claude subscription'
+                : state.data.estimated_cost_usd != null &&
+                  ` · ~$${state.data.estimated_cost_usd.toFixed(3)}`}
             </span>
           </div>
 
