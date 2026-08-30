@@ -5031,6 +5031,29 @@ async def main() -> int:
           all(r.get("roi_se_pct") is not None and r["roi_se_pct"] >= 0 for r in sim_batch["results"]),
           str([r.get("roi_se_pct") for r in sim_batch["results"][:5]]))
 
+    check("every simulated result carries expected_field_dupes -- how many identical copies of "
+          "this exact lineup the real field is expected to hold, whose payout shares it",
+          all(r.get("expected_field_dupes") is not None and r["expected_field_dupes"] >= 0
+              for r in sim_batch["results"]),
+          str([r.get("expected_field_dupes") for r in sim_batch["results"][:5]]))
+
+    # Projection-error machinery: implemented but deliberately gated at
+    # 0 (see variance.PROJECTION_ERROR_STD's own comment for the
+    # measured chalk-EV inflation that gates it) -- at 0 it must be an
+    # exact no-op, and at a real sigma it must actually move outcomes.
+    _pe_matrix = np_test.array([[10.0, 12.0, 8.0], [5.0, 5.0, 5.0]])
+    check("apply_projection_error is an exact no-op at the gated sigma=0 default",
+          variance.PROJECTION_ERROR_STD == 0.0
+          and (variance.apply_projection_error(_pe_matrix, np_test.random.default_rng(1)) == _pe_matrix).all(),
+          str(variance.PROJECTION_ERROR_STD))
+    _pe_saved = variance.PROJECTION_ERROR_STD
+    variance.PROJECTION_ERROR_STD = 0.2
+    _pe_shifted = variance.apply_projection_error(_pe_matrix, np_test.random.default_rng(1))
+    variance.PROJECTION_ERROR_STD = _pe_saved
+    check("at a real sigma the injection genuinely shifts outcomes (additive on each player's "
+          "own mean) and never below zero",
+          (_pe_shifted != _pe_matrix).any() and (_pe_shifted >= 0).all(), str(_pe_shifted))
+
     check("results come back ranked by top-1% rate (ROI as tiebreak), not raw ROI -- per-lineup "
           "ROI is dominated by rare first-place hits, so ranking by it ranks luck",
           all(

@@ -1606,10 +1606,21 @@ async def _simulate_lineups_atbat(
             "every rostered player must be part of a confirmed lineup on this slate."
         )
 
+    # The same per-player projection-error injection the bootstrap
+    # engine applies (see variance.apply_projection_error) -- the
+    # at-bat engine nudges every PA by the same composite the optimizer
+    # maximized, so without this it too validates its own inputs.
+    unique_ids = sorted({p["id"] for players in flattened for p in players})
+    id_index = {pid: i for i, pid in enumerate(unique_ids)}
+    outcome_matrix = np.array([player_trials[pid] for pid in unique_ids], dtype=float)
+    outcome_matrix = variance.apply_projection_error(
+        outcome_matrix, np.random.default_rng(seed)
+    )
+
     sim = np.zeros((len(lineups), num_trials))
     for i, players in enumerate(flattened):
         for p in players:
-            sim[i] += player_trials[p["id"]]
+            sim[i] += outcome_matrix[id_index[p["id"]]]
     return sim
 
 
@@ -1744,14 +1755,41 @@ async def evaluate_batch_simulated(
     top_1pct = final_rank <= top_1pct_threshold
     top_10pct = final_rank <= top_10pct_threshold
 
+    # Field-duplication model: a chalky build in a big contest is
+    # duplicated by the FIELD, not just within your own batch, and DK
+    # splits a rank's payout across every identical entry. The dupes
+    # estimate counts exact matches in the sampled field (the field's
+    # real joint structure) and floors it with the independence product
+    # implied by the lineup's own cumulative-ownership duplication_risk
+    # -- the count catches heavy chalk the product understates by an
+    # order of magnitude, and the product covers builds too rare to
+    # show up in a few-thousand-lineup sample. Not modeling this at all
+    # inflated ROI most for exactly the lineups the generator likes
+    # (high projection, high ownership).
+    field_signatures: dict[frozenset, int] = {}
+    for lu in field:
+        sig = lu.get("player_ids") or frozenset(p["id"] for p in lu["players"])
+        field_signatures[sig] = field_signatures.get(sig, 0) + 1
+
+    expected_field_dupes: list[float] = []
+    for entry in entries:
+        sig = entry.get("player_ids") or frozenset(p["id"] for p in entry["players"])
+        sampled_rate = field_signatures.get(sig, 0) / sample_size if sample_size else 0.0
+        risk = entry.get("duplication_risk")
+        independent_rate = math.exp(risk) if risk is not None else 0.0
+        expected_field_dupes.append(max(sampled_rate, independent_rate) * field_size)
+
     results = []
     for i in range(num_entries):
         row = entry_sim[i]
-        payout_row = payout_per_trial[i]
+        # Every payout is shared with the field's expected copies of
+        # this exact lineup -- they score identically by definition.
+        payout_row = payout_per_trial[i] / (1.0 + expected_field_dupes[i])
         expected_payout = float(payout_row.mean())
         results.append(
             {
                 "lineup_index": i,
+                "expected_field_dupes": round(expected_field_dupes[i], 2),
                 "cash_probability_pct": round(float(in_the_money[i].mean()) * 100, 1),
                 "first_place_pct": round(float(first_place[i].mean()) * 100, 2),
                 "top_1pct_pct": round(float(top_1pct[i].mean()) * 100, 2),
