@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { ScoreMeter } from './ScoreMeter'
 import { localTime } from '../format'
 
@@ -19,7 +19,11 @@ function avgOf(hitters, field) {
  * inning pays you multiple times. The stack score is the average matchup
  * score of a team's five best bats.
  */
-export function StackTable({ slate }) {
+export function StackTable({ slate, onSendToBuild }) {
+  // Which team row is expanded. One at a time: the detail panel is tall
+  // enough that two open at once loses the comparison the table exists
+  // for.
+  const [expanded, setExpanded] = useState(null)
   const [showGames, setShowGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
 
@@ -111,6 +115,26 @@ export function StackTable({ slate }) {
         // extra-inning game, and a bad one can happen to be rested.
         bullpenRecentOuts: (t.hitters || [])[0]?.edge?.components?.bullpen_workload?.outs ?? null,
         topBats: (t.hitters || []).slice(0, 4),
+        // The detail panel shows five and needs their own components,
+        // so it gets its own richer slice rather than reusing the
+        // 4-name summary line above.
+        detailBats: (t.hitters || []).slice(0, 5).map((b) => ({
+          id: b.id,
+          name: b.name,
+          position: b.salary?.position || b.position,
+          bats: b.bats,
+          score: b.edge?.score,
+          xwoba: b.edge?.components?.contact_quality?.xwoba,
+          ownership: b.projection?.ownership_pct,
+          inhouseOwnership: b.projection?.inhouse_ownership_pct,
+          boomPct: b.projection?.boom_pct,
+          bustPct: b.projection?.bust_pct,
+        })),
+        // "Why it ranks here" -- the same component details the score is
+        // actually built from, not a re-derivation.
+        platoonDetail: (t.hitters || [])[0]?.edge?.components?.platoon?.detail,
+        pitcherDetail: (t.hitters || [])[0]?.edge?.components?.pitcher?.detail,
+        teamId: t.team_id ?? null,
       })
     }
   }
@@ -193,11 +217,17 @@ export function StackTable({ slate }) {
             <th>Opposing starter</th>
             <th>Park / conditions</th>
             <th>Top bats</th>
+            <th style={{ width: 36 }} />
           </tr>
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.key}>
+            <Fragment key={r.key}>
+            <tr
+              className={expanded === r.key ? 'exp' : ''}
+              onClick={() => setExpanded(expanded === r.key ? null : r.key)}
+              style={{ cursor: 'pointer' }}
+            >
               <td>
                 <div className="name">
                   {r.team} <span className="dim">{r.isHome ? 'vs' : '@'} {r.opponent}</span>
@@ -297,7 +327,132 @@ export function StackTable({ slate }) {
                     .join(', ') || '—'}
                 </div>
               </td>
+              <td className="num">
+                <span className="expand">{expanded === r.key ? '▲' : '▼'}</span>
+              </td>
             </tr>
+
+            {expanded === r.key && (
+              <tr className="detail">
+                <td colSpan={11}>
+                  <div className="detail-grid">
+                    <div>
+                      <h4>Top bats</h4>
+                      <ul>
+                        {r.detailBats.map((b) => (
+                          <li key={b.id}>
+                            <span>
+                              {b.name}{' '}
+                              <span className="dim">
+                                {b.position}
+                                {b.bats ? ` · ${b.bats}` : ''}
+                              </span>
+                            </span>
+                            <span>
+                              {b.score != null ? Math.round(b.score) : '—'}
+                              {b.xwoba != null ? ` · ${b.xwoba.toFixed(3).slice(1)}` : ''}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div>
+                      <h4>Why it ranks here</h4>
+                      <ul>
+                        {r.pitcherDetail && (
+                          <li>
+                            <span>Opposing starter</span>
+                            <span>{r.pitcherDetail}</span>
+                          </li>
+                        )}
+                        {r.platoonDetail && (
+                          <li>
+                            <span>Platoon edge</span>
+                            <span>{r.platoonDetail}</span>
+                          </li>
+                        )}
+                        {r.bullpenEra != null && (
+                          <li>
+                            <span>Bullpen</span>
+                            <span>
+                              {r.bullpenEra.toFixed(2)} ERA
+                              {r.bullpenRecentOuts != null
+                                ? ` · ${(r.bullpenRecentOuts / 3).toFixed(1)} IP last 2d`
+                                : ''}
+                            </span>
+                          </li>
+                        )}
+                        <li>
+                          <span>Park HR factor</span>
+                          <span>{r.parkHr != null ? `${r.parkHr.toFixed(2)}×` : '—'}</span>
+                        </li>
+                        <li>
+                          <span>Vegas implied</span>
+                          <span>
+                            {r.impliedRuns != null ? r.impliedRuns.toFixed(1) : '—'}
+                            {r.liveImpliedRuns != null && r.liveImpliedRuns !== r.impliedRuns
+                              ? ` · live ${r.liveImpliedRuns.toFixed(1)}`
+                              : ''}
+                          </span>
+                        </li>
+                      </ul>
+                    </div>
+
+                    <div>
+                      <h4>Ownership &amp; upside</h4>
+                      <ul>
+                        <li>
+                          <span>Projected (RotoWire)</span>
+                          <span>
+                            {r.detailBats.some((b) => b.ownership != null)
+                              ? `${r.detailBats
+                                  .reduce((sum, b) => sum + (b.ownership || 0), 0)
+                                  .toFixed(1)}% across top 5`
+                              : '—'}
+                          </span>
+                        </li>
+                        <li>
+                          <span>In-house model</span>
+                          <span>
+                            {r.detailBats.some((b) => b.inhouseOwnership != null)
+                              ? `${r.detailBats
+                                  .reduce((sum, b) => sum + (b.inhouseOwnership || 0), 0)
+                                  .toFixed(1)}% across top 5`
+                              : <span className="dim">not built</span>}
+                          </span>
+                        </li>
+                        <li>
+                          <span>Stack boom / bust</span>
+                          <span>
+                            {r.boomPct != null ? `${r.boomPct}% / ${r.bustPct}%` : <span className="dim">needs in-house</span>}
+                          </span>
+                        </li>
+                      </ul>
+
+                      {onSendToBuild && (
+                        <div className="row-actions">
+                          {[5, 4, 3].map((n) => (
+                            <button
+                              key={n}
+                              className={n === 4 ? 'primary sm' : 'sm'}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onSendToBuild({ team: r.team, size: n })
+                              }}
+                              title={`Build a contest whose primary stack is ${n} ${r.team} bats`}
+                            >
+                              Add {n}-stack to build
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            )}
+            </Fragment>
           ))}
         </tbody>
       </table>

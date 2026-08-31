@@ -397,3 +397,105 @@ tbody tr:hover td { background: var(--surface-2); }
   .main { overflow: visible; }
   .content { padding: 14px 14px 60px; }
 }
+
+/* =========================================================
+   Expandable table rows (Stacks)
+   ========================================================= */
+
+tbody tr.exp td { background: var(--surface-2); }
+.expand { color: var(--text-muted); font-size: 11px; }
+
+tr.detail td {
+  background: #131c18;
+  white-space: normal;
+  padding: 14px 16px 16px 56px;
+}
+tr.detail:hover td { background: #131c18; }
+.detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; font-size: 12.5px; }
+.detail-grid h4 { margin: 0 0 6px; font-size: 11.5px; color: var(--text-muted); font-weight: 500; }
+.detail-grid ul { margin: 0; padding: 0; list-style: none; }
+.detail-grid li {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 4px 0; border-bottom: 1px dashed var(--gridline);
+}
+.detail-grid li:last-child { border-bottom: 0; }
+.detail-grid li > span:last-child { font-weight: 500; white-space: nowrap; }
+.row-actions { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+
+@media (max-width: 900px) {
+  .detail-grid { grid-template-columns: 1fr; }
+  tr.detail td { padding-left: 16px; }
+}
+
+/* =========================================================
+   Build workspace
+   ========================================================= */
+
+.stages { display: flex; border: 1px solid var(--gridline); border-radius: var(--radius); background: var(--surface-1); overflow: hidden; margin-bottom: 14px; }
+.stage {
+  flex: 1; padding: 10px 14px; display: flex; gap: 10px; align-items: center;
+  border-right: 1px solid var(--gridline); color: var(--text-muted); text-align: left;
+}
+.stage:last-child { border-right: 0; }
+.stage .k {
+  width: 22px; height: 22px; flex: none; border-radius: 50%;
+  border: 1.5px solid var(--border); display: grid; place-items: center;
+  font-size: 11.5px; font-weight: 600;
+}
+.stage.done .k { background: var(--edge); border-color: var(--edge); color: #05130d; }
+.stage.on { color: var(--text-primary); background: var(--surface-2); }
+.stage.on .k { border-color: var(--text-primary); color: var(--text-primary); }
+.stage .t { font-size: 13px; font-weight: 500; }
+.stage .s { font-size: 11.5px; }
+.stage.on .s { color: var(--text-secondary); }
+
+.build { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+.panel { background: var(--surface-1); border: 1px solid var(--gridline); border-radius: var(--radius); }
+.panel-h {
+  padding: 12px 14px; border-bottom: 1px solid var(--gridline);
+  font-weight: 600; font-size: 13.5px; display: flex; justify-content: space-between; align-items: center;
+}
+.field { padding: 10px 14px; border-bottom: 1px solid var(--gridline); }
+.field:last-child { border-bottom: 0; }
+.field > label { display: block; font-size: 11.5px; color: var(--text-muted); margin-bottom: 5px; }
+.field .two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.field .rowline { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; }
+.field .inp, .field select, .field input[type='number'], .field input[type='text'] { width: 100%; }
+.panel-foot { padding: 12px 14px; border-top: 1px solid var(--gridline); display: grid; gap: 8px; }
+.hint { font-size: 12px; color: var(--text-muted); line-height: 1.45; }
+
+/* Segmented control inside the settings rail */
+.seg { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg button { flex: 1; padding: 5px 0; font-size: 12.5px; color: var(--text-secondary); border: 0; border-right: 1px solid var(--border); border-radius: 0; background: none; }
+.seg button:last-child { border-right: 0; }
+.seg button:hover { background: var(--surface-2); }
+.seg button.on { background: var(--text-primary); color: var(--page); font-weight: 600; }
+
+/* KPI cards above the lineup grid */
+.sim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.stat { background: var(--surface-1); border: 1px solid var(--gridline); border-radius: var(--radius); padding: 12px 14px; }
+.stat span { display: block; font-size: 11.5px; color: var(--text-muted); }
+.stat b { display: block; font-size: 22px; font-weight: 600; margin-top: 2px; letter-spacing: -0.01em; line-height: 1.2; }
+.stat small { display: block; font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+
+/* Lineup cards */
+.lineups { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.lu { background: var(--surface-1); border: 1px solid var(--gridline); border-radius: var(--radius); padding: 12px 14px; }
+.lu-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.lu-h b { font-size: 13.5px; }
+.lu-h span { font-size: 12px; color: var(--text-muted); }
+.lu ul { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+.lu li { display: grid; grid-template-columns: 26px 1fr auto auto; gap: 8px; padding: 3px 0; align-items: center; }
+.lu li .pos { color: var(--text-muted); font-size: 11.5px; }
+.lu li .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu li .sal { color: var(--text-muted); }
+.lu li .pr { font-weight: 500; min-width: 34px; text-align: right; }
+.lu-f { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--gridline); font-size: 12px; color: var(--text-secondary); }
+.stack-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--edge-soft); color: var(--edge-ink); font-size: 11px; font-weight: 600; }
+
+@media (max-width: 1100px) {
+  .build { grid-template-columns: 1fr; }
+  .stages { flex-direction: column; }
+  .stage { border-right: 0; border-bottom: 1px solid var(--gridline); }
+  .stage:last-child { border-bottom: 0; }
+}

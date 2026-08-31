@@ -6,9 +6,7 @@ import { HitterTable } from './components/HitterTable'
 import { PitcherTable } from './components/PitcherTable'
 import { GameGrid } from './components/GameCard'
 import { AnalysisPanel } from './components/AnalysisPanel'
-import { LineupsPanel } from './components/LineupsPanel'
-import { ContestGeneratorPanel } from './components/ContestGeneratorPanel'
-import { ContestSimulatorPanel } from './components/ContestSimulatorPanel'
+import { BuildWorkspace } from './components/BuildWorkspace'
 import { ResultsPanel } from './components/ResultsPanel'
 import { NflPanel } from './components/NflPanel'
 import { ScoreLegend } from './components/ScoreMeter'
@@ -26,17 +24,35 @@ const NAV_GROUPS = [
   },
   {
     group: 'Build',
-    items: [
-      { id: 'lineups', label: 'Lineup optimizer' },
-      { id: 'contest', label: 'Contest generator' },
-      { id: 'simulator', label: 'Simulator' },
-    ],
+    items: [{ id: 'build', label: 'Lineups & sim' }],
   },
   {
     group: 'Review',
     items: [
       { id: 'results', label: 'Results' },
       { id: 'ai', label: 'AI read on the slate' },
+    ],
+  },
+]
+
+// NFL's own rail grouping. Its views are genuinely different from
+// MLB's (weekly, not daily; no in-house ownership model yet), so it
+// gets its own map rather than being forced through NAV_GROUPS.
+const NFL_NAV_GROUPS = [
+  {
+    group: 'Research',
+    items: [
+      { id: 'matchups', label: 'Matchups' },
+      { id: 'stacks', label: 'Stacks' },
+      { id: 'players', label: 'Players' },
+    ],
+  },
+  {
+    group: 'Build',
+    items: [
+      { id: 'lineups', label: 'Lineup optimizer' },
+      { id: 'contest', label: 'Contest generator' },
+      { id: 'simulator', label: 'Simulator' },
     ],
   },
 ]
@@ -56,17 +72,10 @@ const VIEW_HEADINGS = {
     title: 'Slate research',
     blurb: 'Rank stacks, hitters and pitchers by matchup edge, then send picks straight to the optimizer.',
   },
-  lineups: {
-    title: 'Lineup optimizer',
-    blurb: 'DraftKings Classic MLB — one provably optimal lineup per click.',
-  },
-  contest: {
-    title: 'Contest generator',
-    blurb: 'Build a whole contest: lineups only, no economics. Send it to the simulator to price it.',
-  },
-  simulator: {
-    title: 'Simulator',
-    blurb: 'Price a contest the generator already built — entry cost and payout curve are set here.',
+  build: {
+    title: 'Build',
+    blurb:
+      'One workspace: set your rules once, generate the contest, simulate it. Settings stay put between stages.',
   },
   results: {
     title: 'Results',
@@ -110,6 +119,11 @@ export default function App() {
   const [tab, setTab] = useState('slate')
   const [slateTab, setSlateTab] = useState('stacks')
   const [dataMenuOpen, setDataMenuOpen] = useState(false)
+  // "Add N-stack to build" from the Stacks table: {team, size}. Held
+  // here because it crosses views -- the Stacks table raises it, the
+  // Build workspace consumes it.
+  const [stackIntent, setStackIntent] = useState(null)
+  const [nflTab, setNflTab] = useState('matchups')
   const [hitterSubTab, setHitterSubTab] = useState('ALL')
   const [slate, setSlate] = useState(null)
   const [health, setHealth] = useState(null)
@@ -313,24 +327,28 @@ export default function App() {
           </button>
         </div>
 
-        {sport === 'mlb' &&
-          NAV_GROUPS.map((g) => (
-            <div key={g.group}>
-              <div className="group">{g.group}</div>
-              <nav>
-                {g.items.map((item) => (
+        {(sport === 'mlb' ? NAV_GROUPS : NFL_NAV_GROUPS).map((g) => (
+          <div key={g.group}>
+            <div className="group">{g.group}</div>
+            <nav>
+              {g.items.map((item) => {
+                const active = sport === 'mlb' ? tab === item.id : nflTab === item.id
+                return (
                   <button
                     key={item.id}
-                    className={tab === item.id ? 'on' : ''}
-                    onClick={() => setTab(item.id)}
+                    className={active ? 'on' : ''}
+                    onClick={() => (sport === 'mlb' ? setTab(item.id) : setNflTab(item.id))}
                   >
                     {item.label}
-                    {item.id === 'slate' && summary && <small>{summary.games.length} games</small>}
+                    {sport === 'mlb' && item.id === 'slate' && summary && (
+                      <small>{summary.games.length} games</small>
+                    )}
                   </button>
-                ))}
-              </nav>
-            </div>
-          ))}
+                )
+              })}
+            </nav>
+          </div>
+        ))}
 
         <div className="rail-foot">
           {health?.odds_api_credits?.remaining
@@ -497,7 +515,7 @@ export default function App() {
         )}
 
         <div className="content">
-      {sport === 'nfl' && <NflPanel />}
+      {sport === 'nfl' && <NflPanel tab={nflTab} onTabChange={setNflTab} />}
 
       {sport === 'mlb' && (
         <>
@@ -574,7 +592,13 @@ export default function App() {
 
       {slate && tab === 'slate' && slateTab === 'stacks' && (
         <section>
-          <StackTable slate={slate} />
+          <StackTable
+            slate={slate}
+            onSendToBuild={(intent) => {
+              setStackIntent(intent)
+              setTab('build')
+            }}
+          />
           <div style={{ marginTop: 10 }}>
             <ScoreLegend />
           </div>
@@ -620,35 +644,14 @@ export default function App() {
         </section>
       )}
 
-      {slate && tab === 'lineups' && (
-        <section>
-          <LineupsPanel date={date} slate={slate} projectionSource={projSource} />
-        </section>
-      )}
-
-      {slate && tab === 'contest' && (
-        <section>
-          <ContestGeneratorPanel
-            date={date}
-            slate={slate}
-            projectionSource={projSource}
-            onSimulate={(batch) => {
-              setContestBatch(batch)
-              setTab('simulator')
-            }}
-          />
-        </section>
-      )}
-
-      {slate && tab === 'simulator' && (
-        <section>
-          <ContestSimulatorPanel
-            date={date}
-            batch={contestBatch}
-            projectionSource={projSource}
-            onOpenGenerator={() => setTab('contest')}
-          />
-        </section>
+      {slate && tab === 'build' && (
+        <BuildWorkspace
+          date={date}
+          slate={slate}
+          projectionSource={projSource}
+          stackIntent={stackIntent}
+          onClearIntent={() => setStackIntent(null)}
+        />
       )}
 
       {slate && tab === 'results' && (
