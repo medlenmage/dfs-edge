@@ -265,6 +265,91 @@ async def build_slate(
     }
 
 
+def team_context_rows(slate: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    One row per team on a built slate: its Vegas implied runs, the game
+    total, and the starter it faces.
+
+    Pulled out as its own function so history_db can archive exactly
+    what project_ownership()'s team-stack layer consumes -- without
+    these, a historical rebuild feeds that layer None and it goes
+    neutral, which silently understates the model (see
+    history_db.archive_slate_team_context). Only teams with something
+    real to record are returned; a slate built before odds land yields
+    nothing rather than a row of nulls that would later look like
+    genuine zeros.
+    """
+    rows: list[dict[str, Any]] = []
+    for g in slate.get("games") or []:
+        for side in ("home", "away"):
+            t = g.get(side) or {}
+            opp = g.get("away" if side == "home" else "home") or {}
+            team = t.get("abbrev")
+            if not team:
+                continue
+            opp_pitcher = opp.get("probable_pitcher") or {}
+            implied = t.get("vegas_implied_runs_current") or t.get("implied_runs")
+            row = {
+                "team": team,
+                "opponent": opp.get("abbrev"),
+                "implied_runs": implied,
+                "implied_runs_open": t.get("vegas_implied_runs_open"),
+                "game_total": (g.get("betting") or {}).get("total"),
+                "opposing_pitcher_id": opp_pitcher.get("id"),
+                "opposing_pitcher_salary": (opp_pitcher.get("salary") or {}).get("salary"),
+                "lineup_confirmed": bool(t.get("lineup_confirmed")),
+            }
+            if any(
+                row[k] is not None
+                for k in ("implied_runs", "implied_runs_open", "game_total", "opposing_pitcher_id")
+            ):
+                rows.append(row)
+    return rows
+
+
+def inhouse_projection_rows(slate: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    One row per player carrying this slate's computed in-house FPTS and
+    ownership, keyed the way slate_projections is (normalized name +
+    team), for history_db.archive_inhouse_projections().
+
+    Only players that actually have an in-house number are returned --
+    a slate built without include_inhouse yields nothing, so calling
+    this unconditionally is safe.
+    """
+    from app.services import player_match
+
+    rows: list[dict[str, Any]] = []
+    for g in slate.get("games") or []:
+        for side in ("home", "away"):
+            t = g.get(side) or {}
+            team = t.get("abbrev")
+            if not team:
+                continue
+            people = list(t.get("hitters") or [])
+            pitcher = t.get("probable_pitcher")
+            if pitcher:
+                people.append(pitcher)
+            for pl in people:
+                proj = pl.get("projection") or {}
+                fpts = proj.get("inhouse_fpts")
+                own = proj.get("inhouse_ownership_pct")
+                if fpts is None and own is None:
+                    continue
+                name = pl.get("name")
+                if not name:
+                    continue
+                rows.append(
+                    {
+                        "normalized_name": player_match.normalize_name(name),
+                        "team": team,
+                        "inhouse_fpts": fpts,
+                        "inhouse_ownership_pct": own,
+                    }
+                )
+    return rows
+
+
 def _dk_slot_position(salary_position: str | None, fallback: str) -> str:
     """The first-listed DK roster-slot code from a multi-eligible salary
     string (e.g. "1B/3B" -> "1B"), or `fallback` if no salary CSV is
