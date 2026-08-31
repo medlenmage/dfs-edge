@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import cache
 from app.clients.http import close_client
 from app.config import get_settings
-from app.routers import mlb, nfl, system
+from app.routers import mlb, nfl, season, system
 from app.services import briefs, lineup_watch
 
 logging.basicConfig(
@@ -77,6 +77,7 @@ app.add_middleware(
 app.include_router(system.router)
 app.include_router(mlb.router)
 app.include_router(nfl.router)
+app.include_router(season.router)
 
 
 @app.get("/")
