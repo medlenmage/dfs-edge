@@ -363,16 +363,31 @@ def from_optimizer(result: dict[str, Any], lookup: dict[str, Any]) -> dict[str, 
 
 
 def from_dk_entries(
-    parsed: list[dict[str, Any]], lookup: dict[str, Any], *, contest_id: str | None = None
+    parsed: list[dict[str, Any]],
+    lookup: dict[str, Any],
+    *,
+    contest_id: str | None = None,
+    file_pool: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     A filled DraftKings bulk-entries CSV -> contest entries.
 
     This is the "manual lineups" path that costs nothing to use: the
-    file DK already gives you, with whatever lineups you have built in
+    file DK already gives you, with whatever lineups you have built on
     its own site, read back in. Entries with any blank roster cell are
     reservations that were never filled, so they are skipped rather than
     reported as broken.
+
+    `file_pool` is the player pool embedded in that same file
+    (dk_entries.pool_lookup), and it matters more than it sounds. A
+    roster cell holds a per-draft-group DRAFTABLE id, which is a
+    different number from the player id a DK salary CSV's own ID column
+    may carry -- so resolving the cell against the slate's own dk_id
+    index can miss every single player even though the file is perfectly
+    valid. The file's pool translates its own ids to names, which then
+    resolve against the slate the same way a typed-in lineup does. It is
+    the file describing itself, and it is the only thing that always
+    lines up.
     """
     rosters = []
     for e in parsed:
@@ -381,6 +396,12 @@ def from_dk_entries(
         picks = e.get("picks") or []
         if not picks or any(p is None for p in picks):
             continue
+        if file_pool:
+            # Hand the resolver a NAME wherever the file's own pool knows
+            # this id, so it never depends on two id spaces agreeing.
+            picks = [
+                (file_pool["by_dk_id"].get(str(pid)) or {}).get("name") or pid for pid in picks
+            ]
         rosters.append({"players": picks, "label": f"DK entry {e.get('entry_id')}"})
     if not rosters:
         return {
@@ -399,4 +420,38 @@ def from_dk_entries(
                 "from lineups built here -- use the entry filler under Daily briefs."
             ),
         }
-    return intake(rosters, lookup, source="dk-csv")
+    result = intake(rosters, lookup, source="dk-csv")
+    if file_pool:
+        _sharpen_rejections(result["rejected"], file_pool)
+    return result
+
+
+def _sharpen_rejections(rejected: list[dict[str, Any]], file_pool: dict[str, Any]) -> None:
+    """
+    Replace "not on this slate" with what is actually true, in place.
+
+    A player can be perfectly draftable in the contest you entered and
+    still be absent from this app's pool -- the commonest reason by far
+    being that he is NOT IN TODAY'S CONFIRMED LINEUP, since the slate
+    carries the nine confirmed starters once a lineup posts. Telling
+    someone their real entry references a player "not on this slate"
+    sends them looking for a missing upload; telling them he is benched
+    today is both true and the thing they would actually act on before
+    lock.
+    """
+    known = file_pool.get("by_name") or {}
+    for r in rejected:
+        fixed = []
+        for problem in r["problems"]:
+            name = None
+            if problem.startswith("'") and "is not on this slate" in problem:
+                name = problem.split("'")[1]
+            row = known.get(normalize_name(name)) if name else None
+            if row:
+                fixed.append(
+                    f"{name} ({row['team']}) is in the contest's player pool but not in this "
+                    "app's -- almost always because he is not in today's confirmed lineup"
+                )
+            else:
+                fixed.append(problem)
+        r["problems"] = fixed
