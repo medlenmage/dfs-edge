@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { ContestSimulatorPanel } from './ContestSimulatorPanel'
 import { LineupsPanel } from './LineupsPanel'
+import { MyLineupsCard } from './MyLineupsCard'
 
 /**
  * The Build workspace, from the v2 redesign: one page where you set
@@ -38,6 +39,12 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
   const [reroll, setReroll] = useState(0)
   const [build, setBuild] = useState({ status: 'idle' })
   const [collapsed, setCollapsed] = useState(false)
+  // Lineups the optimizer built this session, and whether the contest
+  // should be built AROUND the day's set-aside tray rather than
+  // generating the whole field.
+  const [optimizerLineups, setOptimizerLineups] = useState([])
+  const [useMyLineups, setUseMyLineups] = useState(false)
+  const [trayCount, setTrayCount] = useState(0)
 
   // Slate-game filter, same auto-detect pattern every other panel uses.
   const [showSlateGames, setShowSlateGames] = useState(false)
@@ -86,6 +93,7 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
         reroll: rerollOverride ?? reroll,
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
+        useMyLineups,
       })
       setBuild({ status: 'ready', ...result })
     } catch (err) {
@@ -117,7 +125,12 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
       </div>
 
       {mode === 'single' && (
-        <LineupsPanel date={date} slate={slate} projectionSource={projectionSource} />
+        <LineupsPanel
+          date={date}
+          slate={slate}
+          projectionSource={projectionSource}
+          onLineups={setOptimizerLineups}
+        />
       )}
 
       {mode === 'contest' && (
@@ -242,6 +255,31 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
                       </div>
                     )}
                   </div>
+
+                  <MyLineupsCard
+                    date={date}
+                    optimizerLineups={optimizerLineups}
+                    onChange={setTrayCount}
+                  />
+
+                  {trayCount > 0 && (
+                    <div className="field">
+                      <label className="rowline" style={{ cursor: 'pointer' }}>
+                        <span>Use my lineups</span>
+                        <input
+                          type="checkbox"
+                          checked={useMyLineups}
+                          onChange={(e) => setUseMyLineups(e.target.checked)}
+                        />
+                      </label>
+                      <div className="hint">
+                        Your {trayCount} lineup{trayCount === 1 ? '' : 's'} lead the batch; the
+                        generator builds the remaining {Math.max(contestSize - trayCount, 0).toLocaleString()}{' '}
+                        as the field they&rsquo;re simulated against. The build audit then scores
+                        yours instead of the field.
+                      </div>
+                    </div>
+                  )}
 
                   <div className="field">
                     <div className="hint">

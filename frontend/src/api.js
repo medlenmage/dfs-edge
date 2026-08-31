@@ -203,7 +203,7 @@ export const api = {
     date,
     contestType,
     contestSize,
-    { projectionSource = 'rotowire', includedGamePks = null, reroll = 0 } = {},
+    { projectionSource = 'rotowire', includedGamePks = null, reroll = 0, useMyLineups = false } = {},
   ) =>
     request('/api/mlb/contest-entries', {
       method: 'POST',
@@ -213,6 +213,7 @@ export const api = {
         contest_size: contestSize,
         projection_source: projectionSource,
         included_game_pks: includedGamePks,
+        use_my_lineups: useMyLineups,
         reroll,
       }),
     }),
@@ -383,6 +384,27 @@ export const api = {
   },
 
   contestResultsHistory: () => request('/api/mlb/contest-results/history'),
+
+  // Your own lineups for the day -- the tray the contest generator can
+  // build a field around (services/lineup_intake.py).
+  myLineups: (date) => request(`/api/mlb/my-lineups?date=${date}`),
+  addMyLineups: (date, lineups, { source = 'manual', replace = false, projectionSource = 'rotowire' } = {}) =>
+    request('/api/mlb/my-lineups', {
+      method: 'POST',
+      body: JSON.stringify({
+        date,
+        lineups,
+        source,
+        replace,
+        projection_source: projectionSource,
+      }),
+    }),
+  myLineupsFromDkEntries: (date, { contestId = null, replace = false } = {}) => {
+    const params = new URLSearchParams({ date, replace: String(replace) })
+    if (contestId) params.set('contest_id', contestId)
+    return request(`/api/mlb/my-lineups/from-dk-entries?${params.toString()}`, { method: 'POST' })
+  },
+  clearMyLineups: (date) => request(`/api/mlb/my-lineups?date=${date}`, { method: 'DELETE' }),
 
   // Process layer: post-contest audits, pre-entry build audit, and the
   // scheduled morning / pre-lock briefs (services/briefs.py).

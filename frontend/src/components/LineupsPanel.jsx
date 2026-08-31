@@ -50,7 +50,7 @@ function lineupToPicks(lineup) {
  * Generates one or many optimal DraftKings Classic MLB lineups from
  * whatever salary + projections CSVs are loaded for the date.
  */
-export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
+export function LineupsPanel({ date, slate, projectionSource = 'rotowire', onLineups }) {
   const [state, setState] = useState({ status: 'idle' })
   const [numLineups, setNumLineups] = useState(1)
   const [stackShape, setStackShape] = useState('no stack')
@@ -237,6 +237,9 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire' }) {
       setSelected(0)
       setLateSwapState({ status: 'idle' })
       setState({ status: 'ready', ...result })
+      // Hand the built lineups up so they can be set aside as the
+      // ones you'll actually enter (MyLineupsCard).
+      onLineups?.(result.lineups || [])
     } catch (err) {
       setState({ status: 'error', message: err.message })
     }

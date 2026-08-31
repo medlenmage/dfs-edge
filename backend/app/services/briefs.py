@@ -150,12 +150,24 @@ def remember_latest_batch(day: str, batch_id: str, entries: list[dict[str, Any]]
     contest build is a different question from an audit of the 20-150
     the user will enter, and the reshaped/kept portfolio is what
     lands here last."""
+    # Your OWN lineups always survive the 500-entry cap, whatever their
+    # simulated rank. Without this they are just 20 rows in a re-sorted
+    # 5,000-lineup batch, and a portfolio that happened to simulate
+    # poorly would silently drop out of the snapshot -- so the brief
+    # would audit the field and never mention the lineups you were
+    # actually about to enter. They lead the snapshot; the generated
+    # field fills the rest in its existing order.
+    mine = [e for e in entries if (e.get("source") or "generated") != "generated"]
+    rest = [e for e in entries if (e.get("source") or "generated") == "generated"]
+    snapshot = (mine + rest)[:500] if mine else entries[:500]
+
     cache.put(
         f"contest_batch_latest:{day}",
         {
             "batch_id": batch_id,
             "source": source,
-            "entries": entries[:500],
+            "entries": snapshot,
+            "num_injected": len(mine),
             "total_entries": len(entries),
             "saved_at": datetime.now(timezone.utc).isoformat(),
         },
