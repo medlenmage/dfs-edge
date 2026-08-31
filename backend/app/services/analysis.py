@@ -468,3 +468,57 @@ async def ask_about_slate(slate: dict[str, Any], question: str) -> dict[str, Any
     except Exception as exc:  # noqa: BLE001
         return {"available": False, "reason": str(exc)}
     return {"available": True, **result}
+
+
+async def complete(
+    prompt: str,
+    *,
+    system_prompt: str = SYSTEM_PROMPT,
+    max_tokens: int = 4000,
+) -> dict[str, Any]:
+    """
+    One plain completion on whichever billing path is configured --
+    the same provider resolution analyse_slate() uses (subscription-
+    billed Claude Code CLI first, API key as fallback), but with a
+    caller-supplied prompt and system prompt. services/briefs.py
+    builds its morning and pre-lock reads on this rather than
+    re-implementing the provider dance.
+
+    Raises RuntimeError when no provider is available; callers decide
+    whether that's fatal (a scheduled brief just logs and skips).
+    """
+    provider = _resolve_provider()
+    if provider is None:
+        raise RuntimeError(
+            "No Claude access configured (Claude Code login or ANTHROPIC_API_KEY)."
+        )
+    settings = get_settings()
+    if provider == "claude-code":
+        binary = find_claude_code()
+        if not binary:
+            raise RuntimeError("No Claude Code CLI found.")
+        return await asyncio.to_thread(
+            _run_claude_code, binary, prompt, system_prompt, settings.anthropic_model
+        )
+
+    from anthropic import AsyncAnthropic
+
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    message = await client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=max_tokens,
+        thinking={"type": "disabled"},
+        system=system_prompt,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = "".join(b.text for b in message.content if getattr(b, "type", "") == "text")
+    return {
+        "text": text,
+        "model": settings.anthropic_model,
+        "provider": "api",
+        "input_tokens": message.usage.input_tokens,
+        "output_tokens": message.usage.output_tokens,
+        "estimated_cost_usd": round(
+            message.usage.input_tokens / 1_000_000 * 3 + message.usage.output_tokens / 1_000_000 * 15, 4
+        ),
+    }

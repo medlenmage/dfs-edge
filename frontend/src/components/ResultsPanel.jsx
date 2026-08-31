@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { renderMarkdown } from '../markdown'
 
 /**
  * Upload real, completed DraftKings contest-standings exports (the
@@ -121,6 +122,15 @@ export function ResultsPanel({ date }) {
                 <>No EntryId/handle given, so your own entry wasn't identified -- this contest's ownership/FPTS data still archived.</>
               )
             )}
+          </div>
+        )}
+        {upload.status === 'ready' && upload.audit?.markdown && (
+          <div className="card" style={{ marginTop: 12 }}>
+            <div className="sub-line" style={{ marginBottom: 8 }}>
+              Process audit -- your entries in this contest, scored against the rules, next to the
+              field and the top 1%. Tomorrow's morning brief opens with this.
+            </div>
+            <div className="analysis" dangerouslySetInnerHTML={{ __html: renderMarkdown(upload.audit.markdown) }} />
           </div>
         )}
       </div>

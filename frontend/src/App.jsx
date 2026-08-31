@@ -8,6 +8,7 @@ import { GameGrid } from './components/GameCard'
 import { AnalysisPanel } from './components/AnalysisPanel'
 import { BuildWorkspace } from './components/BuildWorkspace'
 import { ResultsPanel } from './components/ResultsPanel'
+import { BriefsPanel } from './components/BriefsPanel'
 import { NflPanel } from './components/NflPanel'
 import { ScoreLegend } from './components/ScoreMeter'
 import { DkSlatePicker } from './components/DkSlatePicker'
@@ -29,6 +30,7 @@ const NAV_GROUPS = [
   {
     group: 'Review',
     items: [
+      { id: 'briefs', label: 'Daily briefs' },
       { id: 'results', label: 'Results' },
       { id: 'ai', label: 'AI read on the slate' },
     ],
@@ -80,6 +82,11 @@ const VIEW_HEADINGS = {
   results: {
     title: 'Results',
     blurb: 'Upload a DraftKings standings export to archive real ownership and track how your entries did.',
+  },
+  briefs: {
+    title: 'Daily briefs',
+    blurb:
+      'Two scheduled reads a day: a morning slate brief and a pre-lock audit of your latest contest build, both scored against your process rules.',
   },
   ai: {
     title: 'AI read on the slate',
@@ -652,6 +659,12 @@ export default function App() {
           stackIntent={stackIntent}
           onClearIntent={() => setStackIntent(null)}
         />
+      )}
+
+      {slate && tab === 'briefs' && (
+        <section>
+          <BriefsPanel date={date} enabled={!!features.ai_analysis} />
+        </section>
       )}
 
       {slate && tab === 'results' && (

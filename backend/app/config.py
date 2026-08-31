@@ -102,6 +102,19 @@ class Settings:
         # poll is never wasted work re-fetching something still fresh.
         self.lineup_poll_interval_sec: int = _int("LINEUP_POLL_INTERVAL_SEC", 300)
 
+        # --- Scheduled briefs (services/briefs.py) ---
+        # Two automatic Claude reads a day: a morning slate read and a
+        # pre-lock audit of the latest contest build, both timed in the
+        # owner's local zone. BRIEFS_ENABLED=false turns the timer off;
+        # the same briefs stay runnable on demand from the Briefs tab.
+        self.briefs_enabled: bool = _bool("BRIEFS_ENABLED", True)
+        self.brief_timezone: str = os.getenv("BRIEF_TIMEZONE", "").strip() or "America/Chicago"
+        self.brief_morning_local_time: str = os.getenv("BRIEF_MORNING_LOCAL_TIME", "").strip() or "11:00"
+        self.brief_prelock_lead_min: int = _int("BRIEF_PRELOCK_LEAD_MIN", 60)
+        # Your DraftKings handle -- how the post-contest audit finds
+        # YOUR entries in a standings export when no EntryIds are given.
+        self.dk_handle: str = os.getenv("DK_HANDLE", "").strip()
+
         # --- Storage ---
         db_path = os.getenv("DB_PATH", "data/dfsedge.db").strip()
         self.db_path: Path = (
