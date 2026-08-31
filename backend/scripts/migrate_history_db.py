@@ -35,6 +35,37 @@ CREATE TABLE IF NOT EXISTS slate_projections (
 );
 CREATE INDEX IF NOT EXISTS idx_slate_projections_date ON slate_projections(date);
 
+-- One row per TEAM per slate: the day's market and matchup context.
+--
+-- Exists because backtesting ownership from the archive alone was
+-- silently scoring a crippled model. project_ownership()'s heaviest
+-- signal by far is the team-stack layer (weight 4.0), which needs each
+-- team's Vegas implied run total and the starter it faces -- and
+-- neither was archived anywhere, so any historical rebuild fed it
+-- None and the layer went neutral. Measured cost of that: the same
+-- dates scored rho 0.36-0.43 reconstructed versus 0.54-0.75 on the
+-- live pipeline, which is a big enough gap to invert a conclusion
+-- about whether the model beats RotoWire (it did invert one).
+--
+-- Team-level rather than a column on slate_projections because that is
+-- what these facts actually are -- one implied total per team, not one
+-- per player -- so this avoids duplicating them across ~13 rows a team
+-- and going stale in some of them.
+CREATE TABLE IF NOT EXISTS slate_team_context (
+    date                     DATE NOT NULL,
+    team                     TEXT NOT NULL,
+    opponent                 TEXT,
+    implied_runs             NUMERIC,
+    implied_runs_open        NUMERIC,
+    game_total               NUMERIC,
+    opposing_pitcher_id      INTEGER,
+    opposing_pitcher_salary  INTEGER,
+    lineup_confirmed         BOOLEAN,
+    archived_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (date, team)
+);
+CREATE INDEX IF NOT EXISTS idx_slate_team_context_date ON slate_team_context(date);
+
 -- One row per player per real game once it's final -- the ground-truth
 -- DK points a projection model gets graded against. Not archived yet
 -- as of this migration (see README); the table exists so Phase 5's
@@ -152,7 +183,7 @@ async def main() -> None:
         await conn.close()
 
     print(
-        "Migration complete: slate_projections, player_game_results, "
+        "Migration complete: slate_projections, slate_team_context, player_game_results, "
         "player_actual_results, contest_player_results, contest_uploads, "
         "contest_stack_results"
     )

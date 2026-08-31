@@ -81,25 +81,32 @@ async def archived_rows(day):
         rows = await conn.fetch(
             """
             SELECT normalized_name, name, team, position, salary,
-                   rotowire_fpts, rotowire_ownership_pct
+                   rotowire_fpts, rotowire_ownership_pct, inhouse_fpts
             FROM slate_projections
-            WHERE date = $1 AND salary IS NOT NULL AND rotowire_fpts IS NOT NULL
+            WHERE date = $1 AND salary IS NOT NULL
+              AND (rotowire_fpts IS NOT NULL OR inhouse_fpts IS NOT NULL)
             """,
             date_cls.fromisoformat(day),
         )
     return [dict(r) for r in rows]
 
 
-def build_pool(rows):
+def build_pool(rows, context=None):
     """slate_projections rows -> project_ownership()'s input shape.
 
-    implied_runs is left None: historical Vegas totals aren't in the
-    archive, and the model degrades to a neutral team score rather than
-    failing. That understates the team-stack layer, so the team-stack
-    MAE below is a PESSIMISTIC read of the live model rather than a
-    flattering one -- worth stating outright rather than quietly
-    scoring a handicapped version.
+    `context` is that day's archived slate_team_context (team ->
+    implied runs, opposing starter). It matters enormously: without it
+    implied_runs is None, project_ownership()'s team-stack layer -- its
+    heaviest signal at weight 4.0 -- goes neutral, and the whole
+    backtest silently scores a crippled model. That gap was measured at
+    rho 0.36-0.43 reconstructed versus 0.54-0.75 live, which is enough
+    to invert a conclusion about whether the model beats RotoWire.
+
+    A date with no archived context predates the archiver; it is
+    reported as handicapped rather than quietly scored as if the
+    numbers were comparable.
     """
+    context = context or {}
     out = []
     for i, r in enumerate(rows):
         raw = (r["position"] or "").upper()
@@ -118,8 +125,21 @@ def build_pool(rows):
                 "position": pos,
                 "positions": positions,
                 "salary": r["salary"],
-                "fpts": float(r["rotowire_fpts"]),
-                "implied_runs": None,
+                # The in-house projection when it was archived, RotoWire's
+                # otherwise -- the model runs on in-house live, and it is
+                # the more accurate input (5.80 MAE vs 6.17 against real
+                # actuals), so scoring it on RotoWire's numbers would
+                # handicap it exactly the way the missing team context
+                # used to.
+                "fpts": float(
+                    r["inhouse_fpts"] if r.get("inhouse_fpts") is not None else r["rotowire_fpts"]
+                ),
+                "implied_runs": (
+                    float(ctx["implied_runs"])
+                    if (ctx := context.get(r["team"])) and ctx.get("implied_runs") is not None
+                    else None
+                ),
+                "opponent_pitcher_id": (context.get(r["team"]) or {}).get("opposing_pitcher_id"),
                 "team": r["team"],
                 "rotowire_ownership_pct": r["rotowire_ownership_pct"],
             }
@@ -167,7 +187,9 @@ async def main():
         if not rows:
             skipped.append(day)
             continue
-        pool = build_pool(rows)
+        context = await history_db.get_archived_team_context(day)
+        pool = build_pool(rows, context)
+        n_implied = sum(1 for p in pool if p.get("implied_runs") is not None)
         real = real_by_date[day]
         own = inhouse_projections.project_ownership(pool)
 
@@ -202,9 +224,10 @@ async def main():
             if b
             else f"{'-':>6} {'-':>6} {'-':>6} {'-':>7}"
         )
+        flag = "" if n_implied else "  <- NO archived team context: stack layer neutral, understated"
         print(
             f"{day:11} {a['n']:>4} | {a['spearman']:>6.3f} {a['mae']:>6.2f} "
-            f"{a['chalk_mae']:>6.2f} {a['stack_mae']:>7.2f} | {rw_txt}"
+            f"{a['chalk_mae']:>6.2f} {a['stack_mae']:>7.2f} | {rw_txt}{flag}"
         )
 
     print()

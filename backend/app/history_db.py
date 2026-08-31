@@ -91,6 +91,141 @@ async def archive_slate_projections(day: str, rows: list[dict[str, Any]]) -> Non
         log.exception("Failed to archive slate_projections for %s", day)
 
 
+async def archive_inhouse_projections(day: str, rows: list[dict[str, Any]]) -> None:
+    """
+    Fill in the in-house half of slate_projections for one day --
+    inhouse_fpts and inhouse_ownership_pct, on rows the RotoWire
+    archiver already created.
+
+    Those two columns have existed since the original migration but
+    nothing ever wrote them, which quietly handicapped every historical
+    backtest: rebuilding a past slate had only RotoWire's projection to
+    feed project_ownership(), even though the in-house projection is
+    the more accurate input (measured 5.80 MAE vs 6.17 against real
+    archived actuals). Fitting the ownership weights against a model
+    running on the worse of its two available projections would fit the
+    wrong optimum.
+
+    Deliberately an UPDATE, not an upsert: this only annotates players
+    the day's real DK/RotoWire upload already established. A player
+    with no such row isn't part of that day's real slate, and inventing
+    one from a later slate rebuild would put a player in the archive
+    who was never actually on the board.
+    """
+    pool = await _get_pool()
+    if pool is None or not rows:
+        return
+    try:
+        parsed_day = date_cls.fromisoformat(day)
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                """
+                UPDATE slate_projections
+                SET inhouse_fpts = COALESCE($4, inhouse_fpts),
+                    inhouse_ownership_pct = COALESCE($5, inhouse_ownership_pct),
+                    archived_at = now()
+                WHERE date = $1 AND normalized_name = $2 AND team = $3
+                """,
+                [
+                    (
+                        parsed_day,
+                        r.get("normalized_name"),
+                        r.get("team"),
+                        r.get("inhouse_fpts"),
+                        r.get("inhouse_ownership_pct"),
+                    )
+                    for r in rows
+                    if r.get("normalized_name") and r.get("team")
+                ],
+            )
+    except Exception:
+        log.exception("Failed to archive in-house projections for %s", day)
+
+
+async def archive_slate_team_context(day: str, rows: list[dict[str, Any]]) -> None:
+    """
+    Archive one day's per-team market/matchup context permanently --
+    each team's Vegas implied runs, the game total, and the starter it
+    faces.
+
+    This is what makes a historical ownership backtest honest. Without
+    it, rebuilding a past slate from the archive hands
+    project_ownership() implied_runs=None, which neutralises the
+    team-stack layer -- the module's heaviest signal at weight 4.0 --
+    and the resulting numbers understate the real model badly enough to
+    reverse conclusions drawn from them.
+
+    Upserts on (date, team) so re-running a slate as lines move
+    overwrites rather than duplicates, keeping the LAST seen values for
+    the day (closest to lock, which is what the field actually saw).
+    """
+    pool = await _get_pool()
+    if pool is None or not rows:
+        return
+    try:
+        parsed_day = date_cls.fromisoformat(day)
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO slate_team_context
+                    (date, team, opponent, implied_runs, implied_runs_open,
+                     game_total, opposing_pitcher_id, opposing_pitcher_salary,
+                     lineup_confirmed)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (date, team) DO UPDATE SET
+                    opponent = EXCLUDED.opponent,
+                    implied_runs = COALESCE(EXCLUDED.implied_runs, slate_team_context.implied_runs),
+                    implied_runs_open = COALESCE(EXCLUDED.implied_runs_open, slate_team_context.implied_runs_open),
+                    game_total = COALESCE(EXCLUDED.game_total, slate_team_context.game_total),
+                    opposing_pitcher_id = COALESCE(EXCLUDED.opposing_pitcher_id, slate_team_context.opposing_pitcher_id),
+                    opposing_pitcher_salary = COALESCE(EXCLUDED.opposing_pitcher_salary, slate_team_context.opposing_pitcher_salary),
+                    lineup_confirmed = EXCLUDED.lineup_confirmed,
+                    archived_at = now()
+                """,
+                [
+                    (
+                        parsed_day,
+                        r.get("team"),
+                        r.get("opponent"),
+                        r.get("implied_runs"),
+                        r.get("implied_runs_open"),
+                        r.get("game_total"),
+                        r.get("opposing_pitcher_id"),
+                        r.get("opposing_pitcher_salary"),
+                        r.get("lineup_confirmed"),
+                    )
+                    for r in rows
+                    if r.get("team")
+                ],
+            )
+    except Exception:
+        log.exception("Failed to archive slate_team_context for %s", day)
+
+
+async def get_archived_team_context(day: str) -> dict[str, dict[str, Any]]:
+    """team -> that day's archived market/matchup context. Empty when
+    the day predates the archiver (see archive_slate_team_context) --
+    callers must treat a miss as "unknown", not as zero."""
+    pool = await _get_pool()
+    if pool is None:
+        return {}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT team, opponent, implied_runs, implied_runs_open, game_total,
+                       opposing_pitcher_id, opposing_pitcher_salary, lineup_confirmed
+                FROM slate_team_context
+                WHERE date = $1
+                """,
+                date_cls.fromisoformat(day),
+            )
+        return {r["team"]: dict(r) for r in rows}
+    except Exception:
+        log.exception("Failed to read archived team context for %s", day)
+        return {}
+
+
 async def archive_contest_results(
     day: str,
     contest_id: str,
@@ -261,7 +396,8 @@ async def get_archived_salaries(day: str) -> dict[str, dict[str, Any]]:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT normalized_name, name, team, position, salary, rotowire_fpts
+                SELECT normalized_name, name, team, position, salary, rotowire_fpts,
+                       inhouse_fpts, inhouse_ownership_pct
                 FROM slate_projections
                 WHERE date = $1 AND salary IS NOT NULL
                 """,

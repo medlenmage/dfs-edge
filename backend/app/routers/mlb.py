@@ -84,9 +84,24 @@ async def get_slate(
     """
     day = date or date_cls.today().isoformat()
     try:
-        return await mlb_slate.build_slate(
+        slate = await mlb_slate.build_slate(
             day, force_refresh=refresh, include_hitters=hitters, include_inhouse=inhouse
         )
+        # Archive this day's per-team market context permanently, so a
+        # future backtest can rebuild the slate with the team-stack
+        # layer's real inputs instead of neutralising it. Fire and
+        # forget, exactly like the projections archiver -- it must never
+        # delay or break a dashboard load.
+        rows = mlb_slate.team_context_rows(slate)
+        if rows:
+            asyncio.create_task(history_db.archive_slate_team_context(day, rows))
+        # Same for the in-house numbers, whenever they were computed --
+        # so a future backtest can rebuild the slate on the projection
+        # the model actually runs on rather than RotoWire's.
+        ih_rows = mlb_slate.inhouse_projection_rows(slate)
+        if ih_rows:
+            asyncio.create_task(history_db.archive_inhouse_projections(day, ih_rows))
+        return slate
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
