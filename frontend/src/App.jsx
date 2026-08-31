@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
-import { SlateTiles } from './components/StatTile'
+import { slateSummary } from './components/StatTile'
 import { StackTable } from './components/StackTable'
 import { HitterTable } from './components/HitterTable'
 import { PitcherTable } from './components/PitcherTable'
@@ -14,17 +14,69 @@ import { NflPanel } from './components/NflPanel'
 import { ScoreLegend } from './components/ScoreMeter'
 import { DkSlatePicker } from './components/DkSlatePicker'
 
-const TABS = [
+// The rail's grouped navigation, from the v2 redesign: research the
+// slate, build against it, review what happened. The four research
+// views (Stacks/Hitters/Pitchers/Games) collapse into one "Slate" nav
+// entry with its own segmented sub-tabs, which is what stopped the top
+// of the app being a nine-item tab strip.
+const NAV_GROUPS = [
+  {
+    group: 'Research',
+    items: [{ id: 'slate', label: 'Slate' }],
+  },
+  {
+    group: 'Build',
+    items: [
+      { id: 'lineups', label: 'Lineup optimizer' },
+      { id: 'contest', label: 'Contest generator' },
+      { id: 'simulator', label: 'Simulator' },
+    ],
+  },
+  {
+    group: 'Review',
+    items: [
+      { id: 'results', label: 'Results' },
+      { id: 'ai', label: 'AI read on the slate' },
+    ],
+  },
+]
+
+// Sub-tabs inside the Slate view.
+const SLATE_TABS = [
   { id: 'stacks', label: 'Stacks' },
   { id: 'hitters', label: 'Hitters' },
   { id: 'pitchers', label: 'Pitchers' },
   { id: 'games', label: 'Games' },
-  { id: 'lineups', label: 'Lineups' },
-  { id: 'contest', label: 'Contest Generator' },
-  { id: 'simulator', label: 'Simulator' },
-  { id: 'results', label: 'Results' },
-  { id: 'ai', label: 'AI analysis' },
 ]
+
+// One title/blurb per view, so every page opens the same way instead of
+// each panel inventing its own heading.
+const VIEW_HEADINGS = {
+  slate: {
+    title: 'Slate research',
+    blurb: 'Rank stacks, hitters and pitchers by matchup edge, then send picks straight to the optimizer.',
+  },
+  lineups: {
+    title: 'Lineup optimizer',
+    blurb: 'DraftKings Classic MLB — one provably optimal lineup per click.',
+  },
+  contest: {
+    title: 'Contest generator',
+    blurb: 'Build a whole contest: lineups only, no economics. Send it to the simulator to price it.',
+  },
+  simulator: {
+    title: 'Simulator',
+    blurb: 'Price a contest the generator already built — entry cost and payout curve are set here.',
+  },
+  results: {
+    title: 'Results',
+    blurb: 'Upload a DraftKings standings export to archive real ownership and track how your entries did.',
+  },
+  ai: {
+    title: 'AI read on the slate',
+    blurb: "Claude's narrative summary of everything the tables show.",
+  },
+}
 
 // DK Classic MLB roster-slot positions, in DK's own order, as sub-tabs
 // under Hitters -- the same nested-tab shape NflPanel.jsx uses for the
@@ -55,15 +107,15 @@ function today() {
 export default function App() {
   const [sport, setSport] = useState('mlb')
   const [date, setDate] = useState(today())
-  const [tab, setTab] = useState('stacks')
+  const [tab, setTab] = useState('slate')
+  const [slateTab, setSlateTab] = useState('stacks')
+  const [dataMenuOpen, setDataMenuOpen] = useState(false)
   const [hitterSubTab, setHitterSubTab] = useState('ALL')
   const [slate, setSlate] = useState(null)
   const [health, setHealth] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [theme, setTheme] = useState(
-    () => document.documentElement.dataset.theme || 'auto',
-  )
+
   const [projectionMsg, setProjectionMsg] = useState(null)
   const [rotowireLoading, setRotowireLoading] = useState(false)
   // Every Classic slate window the last RotoWire scrape actually found,
@@ -230,109 +282,246 @@ export default function App() {
     }
   }
 
-  function cycleTheme() {
-    const next = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'
-    setTheme(next)
-    if (next === 'auto') delete document.documentElement.dataset.theme
-    else document.documentElement.dataset.theme = next
-  }
-
   const features = health?.features || {}
 
+  const summary = slateSummary(slate)
+  const rotowireChoices = rotowireSlates.filter((s) => s.players)
+  const activeNav = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === tab)
+  const heading = VIEW_HEADINGS[tab]
+
+  function stepDate(days) {
+    const d = new Date(`${date}T12:00:00`)
+    d.setDate(d.getDate() + days)
+    setDate(d.toISOString().slice(0, 10))
+  }
+
   return (
-    <div className="app">
-      <header className="header">
-        <h1>DFS Edge</h1>
-        <div className="tabs" style={{ marginBottom: 0 }}>
-          <button className={`tab ${sport === 'mlb' ? 'active' : ''}`} onClick={() => setSport('mlb')}>
+    <div className="shell">
+      {/* ---------------------------------------------- rail */}
+      <aside className="rail">
+        <div className="brand">
+          <strong>DFS Edge</strong>
+          <span>v2</span>
+        </div>
+
+        <div className="sport" role="tablist" aria-label="Sport">
+          <button className={sport === 'mlb' ? 'on' : ''} onClick={() => setSport('mlb')}>
             MLB
           </button>
-          <button className={`tab ${sport === 'nfl' ? 'active' : ''}`} onClick={() => setSport('nfl')}>
+          <button className={sport === 'nfl' ? 'on' : ''} onClick={() => setSport('nfl')}>
             NFL
           </button>
         </div>
-        <div className="spacer" />
-        <div className="controls">
-          {sport === 'mlb' && (
-            <>
-              <input
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-              />
-              <button
-                onClick={() => load(true)}
-                disabled={loading}
-                title="Reload matchup data -- scores, park/weather, betting lines, lineups. Does not touch DraftKings salaries; use DkSlatePicker's own refresh for those"
-              >
-                {loading ? 'Loading…' : 'Refresh matchups'}
-              </button>
-              <DkSlatePicker date={date} onLoaded={() => load(true)} />
-              <input
-                ref={projectionInputRef}
-                type="file"
-                accept=".csv"
-                onChange={handleProjectionUpload}
-                style={{ display: 'none' }}
-              />
-              <button
-                onClick={() => projectionInputRef.current?.click()}
-                title="Upload a RotoWire FPTS/ownership projections CSV for this date"
-              >
-                Upload projections
-              </button>
-              <button
-                onClick={() => refreshFromRotowire()}
-                disabled={rotowireLoading}
-                title="Pull RotoWire's own live optimizer player pool directly -- salary, position, opponent, projected/confirmed batting order, FPTS, and rostership% -- with no manual CSV download/upload. Scrapes EVERY Classic slate window RotoWire has live in one go (All, Early, Afternoon, Turbo, Night, Late Night), skipping any that aren't running today. Always bypasses the cache for genuinely live data (newly confirmed lineups, late scratches). Stored under that slate's own real date, switching the date picker to match if it differs."
-              >
-                {rotowireLoading ? 'Loading…' : 'Refresh from RotoWire'}
-              </button>
-              {rotowireSlates.filter((s) => s.players).length > 1 && (
-                <label className="dim" style={{ fontSize: 13 }}>
-                  Slate{' '}
-                  <select
-                    value={activeRotowireSlate || ''}
-                    disabled={rotowireLoading}
-                    onChange={(e) => refreshFromRotowire(e.target.value)}
-                    title="Which of the scraped RotoWire windows is active for this date. Everything downstream (tables, optimizer, contest generator) reads one slate per date, so switching replaces the loaded pool -- but the rows are already cached, so it needs no new fetch."
-                  >
-                    {rotowireSlates
-                      .filter((s) => s.players)
-                      .map((s) => (
-                        <option key={s.slate_name} value={s.slate_name}>
-                          {s.slate_name} ({s.players})
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              )}
-              <button
-                onClick={() => loadInhouse()}
-                disabled={inhouseLoading}
-                title="Compute this app's own in-house FPTS/ownership projections for this date (real per-player game-log fetches -- takes a few seconds)"
-              >
-                {inhouseLoading ? 'Computing…' : 'Load in-house projections'}
-              </button>
-              <label className="dim" style={{ fontSize: 13 }}>
-                Optimizer/generator source{' '}
-                <select value={projSource} onChange={(e) => setProjSource(e.target.value)}>
-                  <option value="rotowire">RotoWire</option>
-                  <option value="inhouse">In-house</option>
-                </select>
-              </label>
-            </>
-          )}
-          <button onClick={cycleTheme} title="Theme">
-            {theme === 'auto' ? 'Auto' : theme === 'light' ? 'Light' : 'Dark'}
-          </button>
-        </div>
-      </header>
 
+        {sport === 'mlb' &&
+          NAV_GROUPS.map((g) => (
+            <div key={g.group}>
+              <div className="group">{g.group}</div>
+              <nav>
+                {g.items.map((item) => (
+                  <button
+                    key={item.id}
+                    className={tab === item.id ? 'on' : ''}
+                    onClick={() => setTab(item.id)}
+                  >
+                    {item.label}
+                    {item.id === 'slate' && summary && <small>{summary.games.length} games</small>}
+                  </button>
+                ))}
+              </nav>
+            </div>
+          ))}
+
+        <div className="rail-foot">
+          {health?.odds_api_credits?.remaining
+            ? `${Number(health.odds_api_credits.remaining).toLocaleString()} odds credits`
+            : 'DFS Edge'}
+          <br />
+          MLB Stats · Open-Meteo · FantasyLabs · The Odds API
+        </div>
+      </aside>
+
+      {/* ---------------------------------------------- main */}
+      <div className="main">
+        {sport === 'mlb' && (
+          <header className="slatebar">
+            <div className="datestep">
+              <button onClick={() => stepDate(-1)} aria-label="Previous day">
+                ‹
+              </button>
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              <button onClick={() => stepDate(1)} aria-label="Next day">
+                ›
+              </button>
+            </div>
+
+            {rotowireChoices.length > 1 && (
+              <select
+                value={activeRotowireSlate || ''}
+                disabled={rotowireLoading}
+                onChange={(e) => refreshFromRotowire(e.target.value)}
+                title="Which scraped RotoWire window is active for this date. Everything downstream reads one slate per date, so switching replaces the loaded pool."
+              >
+                {rotowireChoices.map((s) => (
+                  <option key={s.slate_name} value={s.slate_name}>
+                    {s.slate_name} ({s.players})
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {summary && (
+              <div className="kpis" aria-label="Slate summary">
+                <div className="kpi">
+                  <b>{summary.avgTotal ?? '—'}</b>
+                  <span>avg total</span>
+                </div>
+                <div className="kpi">
+                  <b>
+                    {summary.bestTeam
+                      ? `${summary.bestTeam.name} ${summary.bestTeam.runs.toFixed(1)}`
+                      : '—'}
+                  </b>
+                  <span>top implied</span>
+                </div>
+                <div className="kpi">
+                  <b>
+                    {summary.bestStack
+                      ? `${summary.bestStack.name} ${Math.round(summary.bestStack.score)}`
+                      : '—'}
+                  </b>
+                  <span>best stack</span>
+                </div>
+                <div className="kpi">
+                  <b>
+                    {summary.confirmed}/{summary.games.length * 2}
+                  </b>
+                  <span>confirmed</span>
+                </div>
+              </div>
+            )}
+
+            <div className="grow" />
+
+            <div className="status">
+              <span className={`dot ${loading ? 'warn' : ''}`} />
+              {loading ? 'Loading…' : 'Data loaded'}
+            </div>
+
+            {/* Every load/refresh/upload control lives in here now. The
+                header used to carry six buttons, two selects and a file
+                input in one row; they are the same actions, just no
+                longer competing with the slate itself for attention. */}
+            <div className="menu-wrap">
+              <button onClick={() => setDataMenuOpen((v) => !v)} aria-expanded={dataMenuOpen}>
+                Data ▾
+              </button>
+              {dataMenuOpen && (
+                <div className="menu" role="menu" onMouseLeave={() => setDataMenuOpen(false)}>
+                  <div className="menu-row">
+                    <div>
+                      <div className="t">Matchups &amp; lineups</div>
+                      <div className="s">Scores, park/weather, betting lines, confirmed lineups</div>
+                    </div>
+                    <button className="sm" onClick={() => load(true)} disabled={loading}>
+                      {loading ? 'Loading…' : 'Refresh'}
+                    </button>
+                  </div>
+
+                  <div className="menu-row">
+                    <div>
+                      <div className="t">DraftKings salaries</div>
+                      <div className="s">Pull a real live DK slate — no manual CSV</div>
+                    </div>
+                    <DkSlatePicker date={date} onLoaded={() => load(true)} />
+                  </div>
+
+                  <div className="menu-row">
+                    <div>
+                      <div className="t">RotoWire projections</div>
+                      <div className="s">
+                        Scrapes every live Classic window and auto-matches the loaded DK slate
+                      </div>
+                    </div>
+                    <button
+                      className="sm"
+                      onClick={() => refreshFromRotowire()}
+                      disabled={rotowireLoading}
+                    >
+                      {rotowireLoading ? 'Loading…' : 'Refresh'}
+                    </button>
+                  </div>
+
+                  <div className="menu-row">
+                    <div>
+                      <div className="t">In-house projections</div>
+                      <div className="s">
+                        Also fills the Boom%/Bust% columns — loads automatically in the background
+                      </div>
+                    </div>
+                    <button className="sm" onClick={() => loadInhouse()} disabled={inhouseLoading}>
+                      {inhouseLoading ? 'Computing…' : 'Rebuild'}
+                    </button>
+                  </div>
+
+                  <div className="menu-row">
+                    <div>
+                      <div className="t">Upload a projections CSV</div>
+                      <div className="s">A RotoWire FPTS/ownership export for this date</div>
+                    </div>
+                    <button className="sm" onClick={() => projectionInputRef.current?.click()}>
+                      Choose file
+                    </button>
+                  </div>
+
+                  <div className="menu-sep" />
+                  <div className="menu-foot">
+                    <span>Optimizer uses</span>
+                    <select value={projSource} onChange={(e) => setProjSource(e.target.value)}>
+                      <option value="rotowire">RotoWire</option>
+                      <option value="inhouse">In-house</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <input
+              ref={projectionInputRef}
+              type="file"
+              accept=".csv"
+              onChange={handleProjectionUpload}
+              style={{ display: 'none' }}
+            />
+          </header>
+        )}
+
+        <div className="content">
       {sport === 'nfl' && <NflPanel />}
 
       {sport === 'mlb' && (
         <>
+          {heading && (
+            <div className="ph">
+              <div>
+                <h1>{heading.title}</h1>
+                <p>{heading.blurb}</p>
+              </div>
+              {tab === 'slate' && (
+                <div className="subtabs">
+                  {SLATE_TABS.map((t) => (
+                    <button
+                      key={t.id}
+                      className={slateTab === t.id ? 'on' : ''}
+                      onClick={() => setSlateTab(t.id)}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
       {projectionMsg && (
         <div className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
           {projectionMsg}
@@ -370,22 +559,6 @@ export default function App() {
         </details>
       )}
 
-      <section>
-        <SlateTiles slate={slate} />
-      </section>
-
-      <div className="tabs">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            className={`tab ${tab === t.id ? 'active' : ''}`}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
       {loading && !slate && (
         <div className="card">
           <div className="skeleton" style={{ width: '40%', marginBottom: 12 }} />
@@ -399,14 +572,8 @@ export default function App() {
         </div>
       )}
 
-      {slate && tab === 'stacks' && (
+      {slate && tab === 'slate' && slateTab === 'stacks' && (
         <section>
-          <div className="section-head">
-            <h2>Best offences to stack</h2>
-            <span className="hint">
-              average matchup score of each team’s five best bats
-            </span>
-          </div>
           <StackTable slate={slate} />
           <div style={{ marginTop: 10 }}>
             <ScoreLegend />
@@ -414,17 +581,13 @@ export default function App() {
         </section>
       )}
 
-      {slate && tab === 'hitters' && (
+      {slate && tab === 'slate' && slateTab === 'hitters' && (
         <section>
-          <div className="section-head">
-            <h2>Every hitter, ranked</h2>
-            <span className="hint">click a column heading to re-sort</span>
-          </div>
-          <div className="tabs" style={{ marginBottom: 14 }}>
+          <div className="subtabs">
             {HITTER_SUB_TABS.map((t) => (
               <button
                 key={t.id}
-                className={`tab ${hitterSubTab === t.id ? 'active' : ''}`}
+                className={hitterSubTab === t.id ? 'on' : ''}
                 onClick={() => setHitterSubTab(t.id)}
               >
                 {t.label}
@@ -442,12 +605,8 @@ export default function App() {
         </section>
       )}
 
-      {slate && tab === 'pitchers' && (
+      {slate && tab === 'slate' && slateTab === 'pitchers' && (
         <section>
-          <div className="section-head">
-            <h2>Top pitchers</h2>
-            <span className="hint">today's probable starters, ranked by matchup edge</span>
-          </div>
           <PitcherTable slate={slate} />
           <div style={{ marginTop: 10 }}>
             <ScoreLegend />
@@ -455,32 +614,20 @@ export default function App() {
         </section>
       )}
 
-      {slate && tab === 'games' && (
+      {slate && tab === 'slate' && slateTab === 'games' && (
         <section>
-          <div className="section-head">
-            <h2>Game environments</h2>
-            <span className="hint">park, weather and the betting line</span>
-          </div>
           <GameGrid slate={slate} />
         </section>
       )}
 
       {slate && tab === 'lineups' && (
         <section>
-          <div className="section-head">
-            <h2>Lineup optimizer</h2>
-            <span className="hint">DraftKings Classic MLB — one optimal lineup per click</span>
-          </div>
           <LineupsPanel date={date} slate={slate} projectionSource={projSource} />
         </section>
       )}
 
       {slate && tab === 'contest' && (
         <section>
-          <div className="section-head">
-            <h2>Contest generator</h2>
-            <span className="hint">builds a whole contest — lineups only, economics live in the Simulator</span>
-          </div>
           <ContestGeneratorPanel
             date={date}
             slate={slate}
@@ -495,12 +642,6 @@ export default function App() {
 
       {slate && tab === 'simulator' && (
         <section>
-          <div className="section-head">
-            <h2>Contest simulator</h2>
-            <span className="hint">
-              prices a contest the generator already built — entry cost and payout curve set here
-            </span>
-          </div>
           <ContestSimulatorPanel
             date={date}
             batch={contestBatch}
@@ -512,19 +653,12 @@ export default function App() {
 
       {slate && tab === 'results' && (
         <section>
-          <div className="section-head">
-            <h2>Your contest results</h2>
-            <span className="hint">upload real DK contest-standings exports to track results and archive market ownership data</span>
-          </div>
           <ResultsPanel date={date} />
         </section>
       )}
 
       {slate && tab === 'ai' && (
         <section>
-          <div className="section-head">
-            <h2>Claude’s read on the slate</h2>
-          </div>
           <AnalysisPanel date={date} enabled={!!features.ai_analysis} />
         </section>
       )}
@@ -541,6 +675,8 @@ export default function App() {
       </footer>
         </>
       )}
+        </div>
+      </div>
     </div>
   )
 }

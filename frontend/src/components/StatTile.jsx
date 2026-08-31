@@ -8,47 +8,35 @@ export function StatTile({ label, value, sub }) {
   )
 }
 
-export function SlateTiles({ slate }) {
+/**
+ * The slate's headline numbers, computed once and shared by both the
+ * tile row and the redesign's slate-bar KPI strip -- two renderings of
+ * the same facts, so they can't drift apart.
+ */
+export function slateSummary(slate) {
   const allGames = slate?.games || []
   if (!allGames.length) return null
 
-  // Same auto-detect-from-the-loaded-DK-slate pattern already used by
-  // the Stacks/Hitters/Pitchers tabs' own Games checklists: once a DK
-  // slate is loaded, these headline numbers should reflect just that
-  // slate (e.g. picking the "Early" 4-game slate shouldn't still show
-  // stats averaged across the whole day's 15 games) -- falling back to
-  // every game when nothing's detected as in-slate yet, same "showing
-  // everything beats silently showing nothing" reasoning those tabs use.
+  // Same auto-detect-from-the-loaded-DK-slate pattern the tables use:
+  // once a DK slate is loaded these should reflect just that slate,
+  // falling back to every game when nothing is flagged in-slate yet.
   const inSlateGames = allGames.filter((g) => g.in_slate !== false)
   const games = inSlateGames.length ? inSlateGames : allGames
 
-  const totals = games
-    .map((g) => g.betting?.total)
-    .filter((t) => typeof t === 'number')
-
+  const totals = games.map((g) => g.betting?.total).filter((t) => typeof t === 'number')
   const avgTotal = totals.length
     ? (totals.reduce((a, b) => a + b, 0) / totals.length).toFixed(1)
     : null
 
-  // Highest implied team total on the slate - the single best pointer
-  // toward where the runs are expected to come from.
   let bestTeam = null
-  for (const g of games) {
-    for (const side of ['home', 'away']) {
-      const t = g[side]
-      if (t.implied_runs == null) continue
-      if (!bestTeam || t.implied_runs > bestTeam.runs) {
-        bestTeam = { name: t.abbrev || t.name, runs: t.implied_runs, venue: g.venue.name }
-      }
-    }
-  }
-
   let bestStack = null
   for (const g of games) {
     for (const side of ['home', 'away']) {
       const t = g[side]
-      if (t.stack_score == null) continue
-      if (!bestStack || t.stack_score > bestStack.score) {
+      if (t.implied_runs != null && (!bestTeam || t.implied_runs > bestTeam.runs)) {
+        bestTeam = { name: t.abbrev || t.name, runs: t.implied_runs, venue: g.venue?.name }
+      }
+      if (t.stack_score != null && (!bestStack || t.stack_score > bestStack.score)) {
         bestStack = { name: t.abbrev || t.name, score: t.stack_score }
       }
     }
@@ -58,6 +46,13 @@ export function SlateTiles({ slate }) {
     (n, g) => n + (g.home.lineup_confirmed ? 1 : 0) + (g.away.lineup_confirmed ? 1 : 0),
     0,
   )
+  return { games, avgTotal, bestTeam, bestStack, confirmed }
+}
+
+export function SlateTiles({ slate }) {
+  const summary = slateSummary(slate)
+  if (!summary) return null
+  const { games, avgTotal, bestTeam, bestStack, confirmed } = summary
 
   return (
     <div className="tiles">
