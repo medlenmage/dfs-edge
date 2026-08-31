@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.services import projections, salaries
 from app.services.lineup_export import players_in_slot_order, stack_info
 from app.services.optimizer import (
     ROSTER_SIZE,
@@ -48,6 +49,7 @@ from app.services.optimizer import (
     SLOT_TYPES,
     build_player_pool,
 )
+from app.services.optimizer import _eligible_slots as eligible_slots
 from app.services.player_match import normalize_name, normalize_team
 
 log = logging.getLogger(__name__)
@@ -69,6 +71,7 @@ def build_lookup(
     *,
     projection_source: str = "rotowire",
     included_game_pks: list[int] | None = None,
+    include_bench: bool = False,
 ) -> dict[str, Any]:
     """
     Index this slate's optimizable pool so a lineup can identify its
@@ -96,6 +99,17 @@ def build_lookup(
     unmatchable here rather than entering the sim with no way to score
     him.
 
+    `include_bench` widens that for lineups you have ALREADY ENTERED.
+    The slate carries a team's confirmed starting nine, so a lineup
+    built before lineups posted can reference a player who is now on the
+    bench -- real, draftable, with a salary and a projection, just not
+    starting. Refusing the whole lineup is the wrong answer there: the
+    entry exists on DraftKings whether this app likes it or not, and the
+    useful thing is to take it in, mark the benched player, and let late
+    swap deal with him. Benched players are tagged `bench=True` and are
+    only ever reachable through this flag -- the optimizer's own pool is
+    untouched, so nothing can DRAFT one.
+
     Names are indexed only when UNAMBIGUOUS across the slate. Two
     players who normalize to the same name are both dropped from the
     name index rather than one silently winning -- a lineup that names
@@ -112,6 +126,9 @@ def build_lookup(
             "No optimizable players on this slate -- a DraftKings salary file and a "
             "projections file both need to be loaded before lineups can be brought in."
         )
+
+    if include_bench:
+        pool = pool + _bench_pool(slate, pool, projection_source=projection_source)
 
     by_dk: dict[str, dict[str, Any]] = {}
     by_id: dict[int, dict[str, Any]] = {}
@@ -133,6 +150,86 @@ def build_lookup(
         "by_name": {n: hits[0] for n, hits in name_hits.items() if len(hits) == 1},
         "ambiguous_names": {n for n, hits in name_hits.items() if len(hits) > 1},
     }
+
+
+def _bench_pool(
+    slate: dict[str, Any],
+    starters: list[dict[str, Any]],
+    *,
+    projection_source: str,
+) -> list[dict[str, Any]]:
+    """
+    Draftable players on this slate's teams who are NOT in the optimizer
+    pool -- overwhelmingly, bats sitting tonight.
+
+    Built from the two uploads that already describe them: the DK salary
+    file (salary, DK position eligibility, team) and the projections
+    file (projected points, ownership). Both cover the whole draft
+    group, not just tonight's starters, which is why a benched player
+    can be reconstructed at all.
+
+    The MLB player id is taken from the slate where the team's roster
+    happens to include him, and left None otherwise. That is honest
+    rather than convenient: without a real id the Monte Carlo engine has
+    no game log to sample, so a lineup holding him can be STORED and
+    AUDITED but not meaningfully simulated -- which is exactly what
+    `bench=True` is there to let callers see.
+    """
+    known = {p["id"] for p in starters}
+    known_names = {normalize_name(p["name"] or "") for p in starters}
+
+    teams: dict[str, int | None] = {}
+    for g in slate.get("games") or []:
+        for side in ("home", "away"):
+            t = g.get(side) or {}
+            if t.get("abbrev"):
+                teams[normalize_team(t["abbrev"])] = g.get("game_pk")
+    if not teams:
+        return []
+
+    fpts_key = "inhouse_fpts" if projection_source == "inhouse" else "fpts"
+    own_key = "inhouse_ownership_pct" if projection_source == "inhouse" else "ownership_pct"
+    day = slate.get("date")
+    salary_rows = salaries.load(day) or []
+    proj_by_name = {
+        r["normalized_name"]: r for r in (projections.load(day) or []) if r.get("normalized_name")
+    }
+
+    out: list[dict[str, Any]] = []
+    for row in salary_rows:
+        team = normalize_team(row.get("team") or "")
+        if team not in teams:
+            continue
+        name_norm = row.get("normalized_name") or normalize_name(row.get("name") or "")
+        if name_norm in known_names:
+            continue
+        proj = proj_by_name.get(name_norm) or {}
+        fpts = proj.get(fpts_key)
+        if fpts is None or not row.get("salary"):
+            continue
+        slots = eligible_slots(row.get("position") or "")
+        if not slots:
+            continue
+        out.append(
+            {
+                "id": None,
+                "name": row.get("name"),
+                "team": team,
+                "opponent": None,
+                "game_pk": teams[team],
+                "dk_id": row.get("dk_id") or "",
+                "salary": row["salary"],
+                "projected_fpts": float(fpts),
+                "ownership_pct": proj.get(own_key) or 0,
+                "slots": slots,
+                "edge_composite": None,
+                # The flag every consumer keys off: he is rosterable on
+                # DraftKings, but he is not in a confirmed lineup, so
+                # nothing here should treat him as a normal pool player.
+                "bench": True,
+            }
+        )
+    return [p for p in out if p["id"] not in known]
 
 
 def resolve_player(
@@ -258,8 +355,15 @@ def _to_entry(players: list[dict[str, Any]], source: str, label: str | None) -> 
     from app.services.contest import _duplication_risk
 
     stack_type, stack = stack_info({"players": players})
+    bench = [p["name"] for p in players if p.get("bench")]
     return {
         "salary_used": sum(p["salary"] for p in players),
+        # Players on this entry who are not in a confirmed lineup today.
+        # Empty for anything the optimizer built; non-empty means the
+        # entry is live on DraftKings with a bat that is sitting, which
+        # is a late-swap job and is why the entry was accepted rather
+        # than rejected.
+        "non_starters": bench,
         "stack_type": stack_type,
         "stack": stack,
         "projected_points": round(sum(p["projected_fpts"] for p in players), 2),
@@ -278,11 +382,32 @@ def _to_entry(players: list[dict[str, Any]], source: str, label: str | None) -> 
                 "edge_composite": p.get("edge_composite"),
                 "dk_id": p.get("dk_id") or "",
                 "game_pk": p.get("game_pk"),
+                "bench": bool(p.get("bench")),
             }
             for p in players
         ],
-        "player_ids": frozenset(p["id"] for p in players),
+        # Identity-keyed, not id-keyed: bench players have no MLB id, and
+        # collapsing them all onto None would make two different lineups
+        # look like duplicates of each other.
+        "player_ids": frozenset(_identity(p) for p in players),
     }
+
+
+def _identity(player: dict[str, Any]) -> Any:
+    """
+    A stable identity for one rostered player.
+
+    Bench players carry no MLB id (they have no confirmed lineup spot,
+    so there is nothing to look one up from), and comparing on a bare
+    `id` would make every pair of them look like the same person -- a
+    real false "rostered twice" on any lineup holding two bats that are
+    sitting. Falls back to the DK id, then the name.
+    """
+    if player.get("id") is not None:
+        return ("mlb", player["id"])
+    if player.get("dk_id"):
+        return ("dk", str(player["dk_id"]))
+    return ("name", normalize_name(player.get("name") or ""))
 
 
 def _validate(players: list[dict[str, Any]]) -> list[str]:
@@ -293,9 +418,9 @@ def _validate(players: list[dict[str, Any]]) -> list[str]:
         problems.append(f"{len(players)} players, needs exactly {ROSTER_SIZE}")
         return problems
 
-    ids = [p["id"] for p in players]
+    ids = [_identity(p) for p in players]
     if len(set(ids)) != len(ids):
-        dupes = sorted({p["name"] for p in players if ids.count(p["id"]) > 1})
+        dupes = sorted({p["name"] for p in players if ids.count(_identity(p)) > 1})
         problems.append("same player rostered twice: " + ", ".join(dupes))
 
     salary = sum(p["salary"] for p in players)

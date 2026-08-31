@@ -154,6 +154,15 @@ export function MyLineupsCard({ date, onChange }) {
           ))}
         </div>
       )}
+
+      {tray.entries_with_non_starters > 0 && (
+        <div className="notice" style={{ marginTop: 8, fontSize: 12 }}>
+          <strong>{tray.entries_with_non_starters}</strong> of these entries roster a player who
+          is <strong>not in tonight&rsquo;s confirmed lineup</strong>: {tray.non_starters.join(', ')}.
+          They were kept rather than dropped — they&rsquo;re live on DraftKings either way — but
+          they need a late swap, and their simulated scores will read low until they get one.
+        </div>
+      )}
     </div>
   )
 }

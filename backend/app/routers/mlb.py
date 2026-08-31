@@ -1509,7 +1509,13 @@ def get_my_lineups(day: str) -> list[dict[str, Any]]:
     return cache.get(_my_lineups_key(day)) or []
 
 
-async def _intake_lookup(day: str, projection_source: str, included_game_pks: list[int] | None):
+async def _intake_lookup(
+    day: str,
+    projection_source: str,
+    included_game_pks: list[int] | None,
+    *,
+    include_bench: bool = False,
+):
     slate = await mlb_slate.build_slate(
         day, include_inhouse=(projection_source == "inhouse")
     )
@@ -1518,6 +1524,11 @@ async def _intake_lookup(day: str, projection_source: str, included_game_pks: li
             slate,
             projection_source=projection_source,
             included_game_pks=included_game_pks,
+            # Lineups you have already entered can hold a bat that is
+            # sitting tonight. Those entries are live on DraftKings
+            # whether or not this app likes them, so take them in and
+            # flag the player rather than refusing the lineup.
+            include_bench=include_bench,
         )
     except lineup_intake.IntakeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1597,6 +1608,14 @@ def _pool_payload(day: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
         # Reuses the contest generator's own exposure report, so the
         # pool's chalk is measured exactly the way a built contest's is.
         "exposure": contest.field_exposure(entries, top_n=30) if entries else [],
+        # Players on pooled lineups who are not in a confirmed lineup
+        # today. These entries are live on DraftKings with a bat that is
+        # sitting -- a late-swap job, and the reason they were accepted
+        # rather than refused.
+        "non_starters": sorted(
+            {n for e in entries for n in (e.get("non_starters") or [])}
+        ),
+        "entries_with_non_starters": sum(1 for e in entries if e.get("non_starters")),
         "entries": entries,
     }
 
@@ -1712,7 +1731,7 @@ async def add_my_lineups_from_dk(
             status_code=404,
             detail="No DK entries file uploaded for that date -- upload one via POST /dk-entries first.",
         )
-    _, lookup = await _intake_lookup(day, projection_source, None)
+    _, lookup = await _intake_lookup(day, projection_source, None, include_bench=True)
     result = lineup_intake.from_dk_entries(
         dk_entries.parse_entries_csv(text),
         lookup,
