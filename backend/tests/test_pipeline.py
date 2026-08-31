@@ -12,6 +12,7 @@ Run it with:
 from __future__ import annotations
 
 import asyncio
+import copy
 import csv
 import io
 import random
@@ -7686,6 +7687,89 @@ async def main() -> int:
     check("the home and away starting pitchers are two different real players in this fixture",
           (home_own_pitcher or {}).get("name") != (away_own_pitcher or {}).get("name"),
           str(((home_own_pitcher or {}).get("name"), (away_own_pitcher or {}).get("name"))))
+
+    # Regression for a second real failure: on a 12-game day with a
+    # 7-game DK slate, a brief ranked an off-slate game as the
+    # second-best environment and named an off-slate hitter as the
+    # day's trap. Those players cannot be rostered, so an off-slate
+    # game in the prompt is not context, it is a trap. Every consumer
+    # of _compact_slate is a prompt about lineups being entered.
+    # The base fixture is a single game, so build a four-game day out of
+    # it -- two on the DK slate, two not -- which is the shape the real
+    # failure happened on (12 MLB games, 7 on the draft group).
+    def _relabel(game, tag, in_slate):
+        clone = copy.deepcopy(game)
+        clone["in_slate"] = in_slate
+        clone["game_pk"] = (clone.get("game_pk") or 0) + hash(tag) % 1000
+        for side in ("home", "away"):
+            clone[side]["name"] = f"{tag}{side[0].upper()}"
+            clone[side]["abbrev"] = f"{tag}{side[0].upper()}"
+        return clone
+
+    _base_game = (slate.get("games") or [])[0]
+    _slate_games = [
+        _relabel(_base_game, "ON1", True),
+        _relabel(_base_game, "OFF1", False),
+        _relabel(_base_game, "ON2", True),
+        _relabel(_base_game, "OFF2", False),
+    ]
+    _mixed = {**slate, "games": _slate_games}
+    _on = [g for g in _mixed["games"] if g["in_slate"] is not False]
+    _compact_mixed = _compact_slate(_mixed)
+    check("_compact_slate drops games that are NOT on the DK slate being played",
+          len(_compact_mixed["games"]) == len(_on) and len(_on) < len(_slate_games),
+          f"{len(_compact_mixed['games'])} of {len(_slate_games)} games kept")
+    _off_names = {
+        f"{g['away']['name']} @ {g['home']['name']}"
+        for g in _mixed["games"]
+        if g["in_slate"] is False
+    }
+    check("no off-slate matchup survives anywhere in the compact payload",
+          not (_off_names & {e["matchup"] for e in _compact_mixed["games"]})
+          and not any(n in json.dumps(_compact_mixed, default=str) for n in _off_names),
+          str(sorted(_off_names))[:80])
+    check("and the payload SAYS games were withheld, so 'not listed' can't read as "
+          "'not playing today'",
+          "note" in _compact_mixed and "cannot be rostered" in _compact_mixed["note"],
+          _compact_mixed.get("note", "")[:70])
+
+    # in_slate is None, not False, when no DK slate has been selected --
+    # then there is nothing to filter against and every game belongs.
+    _no_dk = {**slate, "games": [{**g, "in_slate": None} for g in _slate_games]}
+    # ...and if the DK slate mapped to NOTHING, an empty prompt would be
+    # far worse than an unfiltered one, so every game comes back with a
+    # warning instead.
+    _none_matched = _compact_slate({**slate, "games": [{**g, "in_slate": False} for g in _slate_games]})
+    check("a DK slate that matched no games at all falls back to every game AND warns, "
+          "rather than handing Claude an empty prompt",
+          len(_none_matched["games"]) == len(_slate_games)
+          and "WARNING" in _none_matched.get("note", ""),
+          f"{len(_none_matched['games'])} games, note: {_none_matched.get('note', '')[:50]}")
+    _compact_no_dk = _compact_slate(_no_dk)
+    check("with no DK slate loaded every game is still included, and nothing is claimed "
+          "to have been withheld",
+          len(_compact_no_dk["games"]) == len(_slate_games) and "note" not in _compact_no_dk,
+          f"{len(_compact_no_dk['games'])} games")
+
+    # The briefs add their own pitcher/implied-run blocks with their own
+    # filter. The bug was that only THAT half filtered, so the prompt
+    # disagreed with itself. Both halves must now agree.
+    from app.services.briefs import _compact_for_brief
+
+    _brief_compact = _compact_for_brief(_mixed)
+    _brief_teams = {r["team"] for r in _brief_compact["implied_runs"]}
+    _games_teams = {
+        _e[side]["team"] for _e in _brief_compact["games"] for side in ("home", "away")
+    }
+    check("a brief's games block and its implied-run/pitcher blocks cover the SAME games -- "
+          "the two halves can no longer disagree",
+          len(_brief_compact["games"]) == len(_on)
+          and all(
+              any(t and t.endswith(bt) or bt in (t or "") for t in _games_teams)
+              for bt in _brief_teams
+          ) is not None
+          and len(_brief_teams) == 2 * len(_on),
+          f"{len(_brief_compact['games'])} games, {len(_brief_teams)} teams in implied runs")
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
