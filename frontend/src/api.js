@@ -404,6 +404,11 @@ export const api = {
     if (contestId) params.set('contest_id', contestId)
     return request(`/api/mlb/my-lineups/from-dk-entries?${params.toString()}`, { method: 'POST' })
   },
+  removeMyLineups: (date, entryIds) =>
+    request(
+      `/api/mlb/my-lineups?date=${date}&entry_ids=${encodeURIComponent(entryIds.join(','))}`,
+      { method: 'DELETE' },
+    ),
   clearMyLineups: (date) => request(`/api/mlb/my-lineups?date=${date}`, { method: 'DELETE' }),
 
   // Process layer: post-contest audits, pre-entry build audit, and the
