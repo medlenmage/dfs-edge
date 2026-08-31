@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 
 /**
@@ -21,6 +21,7 @@ import { api } from '../api'
  */
 
 export function MyLineupsCard({ date, onChange }) {
+  const fileRef = useRef(null)
   const [tray, setTray] = useState({ status: 'loading' })
   const [busy, setBusy] = useState(null)
   const [message, setMessage] = useState(null)
@@ -41,6 +42,7 @@ export function MyLineupsCard({ date, onChange }) {
 
   function report(result) {
     const bits = [`${result.accepted} added`]
+    if (result.duplicates_skipped) bits.push(`${result.duplicates_skipped} already in the pool`)
     if (result.rejected?.length) bits.push(`${result.rejected.length} rejected`)
     setMessage({
       text: bits.join(', '),
@@ -51,11 +53,20 @@ export function MyLineupsCard({ date, onChange }) {
     })
   }
 
-  async function addFromDk() {
+  // Take the file here rather than expecting one to have been uploaded
+  // somewhere else first. The button says "upload", so it uploads: pick
+  // the CSV, it is stored for the date the same way the Data menu
+  // stores it, and its lineups are read straight back out in one step.
+  async function uploadAndImport(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
     setBusy('dk')
     setMessage(null)
     try {
-      report(await api.myLineupsFromDkEntries(date))
+      await api.uploadDkEntries(date, file)
+      const result = await api.myLineupsFromDkEntries(date)
+      report(result)
       await load()
     } catch (err) {
       setMessage({ text: err.message, rejected: [] })
@@ -92,12 +103,19 @@ export function MyLineupsCard({ date, onChange }) {
       <div className="controls" style={{ gap: 6 }}>
         <button
           className="sm"
-          onClick={addFromDk}
+          onClick={() => fileRef.current?.click()}
           disabled={busy}
-          title="Read lineups you already built on DraftKings out of an uploaded entries CSV"
+          title="Upload a DraftKings bulk-entries CSV whose lineups you've already filled in on DK"
         >
-          {busy === 'dk' ? 'Reading…' : 'From DK entries file'}
+          {busy === 'dk' ? 'Reading…' : 'Upload DK entries file'}
         </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".csv"
+          onChange={uploadAndImport}
+          style={{ display: 'none' }}
+        />
         {count > 0 && (
           <button className="sm" onClick={clear} disabled={busy}>
             Clear

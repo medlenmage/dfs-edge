@@ -386,6 +386,17 @@ def from_dk_entries(
         return {
             "entries": [],
             "rejected": [],
-            "note": "No filled lineups in that entries file -- every entry row is still blank.",
+            # Worth spelling out, because a blank template is the NORMAL
+            # state of the file DraftKings hands you: it is the thing you
+            # fill in, so an unfilled one is not an error, it just has
+            # nothing to import. The other path -- filling a blank
+            # template FROM this app -- is the build audit's entry
+            # filler, which is the opposite direction.
+            "note": (
+                "That file's entry rows are all still blank, so there are no lineups in it to "
+                "import. This path is for a file whose lineups you already built on DraftKings' "
+                "own site and then re-exported. To go the other way -- fill a blank template "
+                "from lineups built here -- use the entry filler under Daily briefs."
+            ),
         }
     return intake(rosters, lookup, source="dk-csv")
