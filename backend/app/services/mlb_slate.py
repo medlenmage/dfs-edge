@@ -506,9 +506,39 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                     for h in top5
                 )
             )
+            stack_projections = [
+                h["projection"].get("fpts") or h["projection"]["inhouse_fpts"] for h in top5
+            ]
+            # RECENTERED on today's projections, unlike the per-player
+            # boom/bust above -- and the difference is deliberate,
+            # because the two answer different questions.
+            #
+            # A single player's boom% asks "how often has HIS OWN real
+            # history cleared what he's being asked for today", so it
+            # must read his raw pool; that gap IS the signal.
+            #
+            # A stack's boom% asks the conditional question "GIVEN this
+            # projection, how likely is this offense to blow past it" --
+            # so the simulated outcomes have to be centered on the same
+            # projection the threshold is derived from, or the answer is
+            # just the level gap compounded five times over. Measured on
+            # a real slate, that is exactly what it had become: boom%
+            # tracked the pool-vs-projection gap almost perfectly and
+            # nothing else (ATL, whose top-5 pools sit 33% under their
+            # projections, read 1.5% boom / 32.3% bust, versus DET at
+            # +3% reading 19.6% / 16.2%). Most of that gap is pool
+            # dilution -- rest days and pinch-hit appearances are in a
+            # hitter's pool, while today's projection knows he's
+            # starting -- not real information about the offense.
+            # Recentered, the column varies on what actually differs
+            # between stacks: the SHAPE of those five bats' outcome
+            # distributions (KC 20.4% vs MIL 15.2%).
             result = variance.stack_boom_bust(
-                [sorted(pool) for pool in pools],
-                [h["projection"].get("fpts") or h["projection"]["inhouse_fpts"] for h in top5],
+                [
+                    sorted(variance.recenter_pool(pool, projection))
+                    for pool, projection in zip(pools, stack_projections)
+                ],
+                stack_projections,
                 [(h.get("edge") or {}).get("composite") for h in top5],
             )
             if result:

@@ -7313,6 +7313,30 @@ async def main() -> int:
           and stack["bust_pct"] > 100 * _indep_bust / 4000,
           str((stack, round(100 * _indep_boom / 4000, 1), round(100 * _indep_bust / 4000, 1))))
 
+    # A stack's boom% must answer the CONDITIONAL question "given this
+    # projection, how likely to blow past it" -- so the pools feeding it
+    # are recentered on those projections (mlb_slate.py's call site).
+    # Without that it degenerates into the pool-vs-projection level gap
+    # compounded five times over: measured on a real slate, ATL (top-5
+    # pools sitting 33% under their projections, mostly pool dilution
+    # from rest days rather than real information) read 1.5% boom /
+    # 32.3% bust, while DET at +3% read 19.6% / 16.2%. Recentered, both
+    # land in a believable band and vary on what actually differs --
+    # the SHAPE of those five bats' distributions.
+    _low_pool = sorted([0.0, 2.0, 4.0, 6.0, 9.0] * 20)      # mean 4.2
+    _stack_projs = [10.0] * 5                                # projected far above it
+    _raw_stack = variance.stack_boom_bust([_low_pool] * 5, _stack_projs, [None] * 5, trials=3000, seed=5)
+    _rc_stack = variance.stack_boom_bust(
+        [sorted(variance.recenter_pool(_low_pool, 10.0))] * 5, _stack_projs, [None] * 5,
+        trials=3000, seed=5,
+    )
+    check("a stack whose raw pools sit far BELOW today's projections reads a near-zero boom "
+          "purely from the level gap -- the degenerate behavior recentering exists to prevent",
+          _raw_stack["boom_pct"] < 1.0 and _raw_stack["bust_pct"] > 60.0, str(_raw_stack))
+    check("...and recentering on those same projections restores a real, believable boom/bust "
+          "that reflects the pools' SHAPE rather than their level",
+          5.0 < _rc_stack["boom_pct"] < 40.0 and 5.0 < _rc_stack["bust_pct"] < 45.0, str(_rc_stack))
+
     check("stack_boom_bust is deterministic for a fixed seed -- the Stacks tab must not flicker",
           variance.stack_boom_bust([bb_sorted] * 5, [10.0] * 5, [None] * 5, trials=1000, seed=3)
           == variance.stack_boom_bust([bb_sorted] * 5, [10.0] * 5, [None] * 5, trials=1000, seed=3), "")
