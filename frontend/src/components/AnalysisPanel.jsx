@@ -1,58 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
-
-/**
- * Renders Claude's written read on the slate.
- *
- * Deliberately a tiny markdown renderer rather than pulling in a library
- * -- the model only ever emits headings, paragraphs, lists and bold, and
- * one fewer dependency is one fewer thing to maintain.
- */
-function renderMarkdown(text) {
-  const blocks = []
-  let list = null
-
-  const inline = (s) =>
-    s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      .replace(/`(.+?)`/g, '<code>$1</code>')
-
-  const flush = () => {
-    if (list) {
-      blocks.push(`<ul>${list.join('')}</ul>`)
-      list = null
-    }
-  }
-
-  for (const raw of (text || '').split('\n')) {
-    const line = raw.trim()
-    if (!line) {
-      flush()
-      continue
-    }
-    if (line.startsWith('###')) {
-      flush()
-      blocks.push(`<h2>${inline(line.replace(/^#+\s*/, ''))}</h2>`)
-    } else if (line.startsWith('##')) {
-      flush()
-      blocks.push(`<h2>${inline(line.replace(/^#+\s*/, ''))}</h2>`)
-    } else if (/^[-*]\s+/.test(line)) {
-      list = list || []
-      list.push(`<li>${inline(line.replace(/^[-*]\s+/, ''))}</li>`)
-    } else if (/^\d+\.\s+/.test(line)) {
-      list = list || []
-      list.push(`<li>${inline(line.replace(/^\d+\.\s+/, ''))}</li>`)
-    } else {
-      flush()
-      blocks.push(`<p>${inline(line)}</p>`)
-    }
-  }
-  flush()
-  return blocks.join('')
-}
+import { renderMarkdown } from '../markdown'
 
 export function AnalysisPanel({ date, enabled }) {
   const [state, setState] = useState({ status: 'idle' })

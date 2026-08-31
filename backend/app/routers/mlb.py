@@ -13,8 +13,12 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, Response, Uploa
 import asyncio
 
 from app import cache, history_db
+from app.config import get_settings
 from app.clients import draftkings, rotowire
 from app.services import (
+    briefs,
+    build_audit,
+    contest_audit,
     analysis,
     contest,
     contest_results,
@@ -869,6 +873,7 @@ async def build_contest_entries(
         },
         _CONTEST_BATCH_TTL,
     )
+    briefs.remember_latest_batch(day, batch_id, full_entries, source="build")
 
     result["batch_id"] = batch_id
     result["sample_entries"] = full_entries[:200]
@@ -967,6 +972,7 @@ async def simulate_contest_batch(
         },
         _CONTEST_BATCH_TTL,
     )
+    briefs.remember_latest_batch(day, new_batch_id, full_entries, source="simulate")
 
     result["batch_id"] = new_batch_id
     result["source_batch_id"] = batch_id
@@ -1109,6 +1115,7 @@ async def build_contest_entries_simulated(
         },
         _CONTEST_BATCH_TTL,
     )
+    briefs.remember_latest_batch(day, batch_id, full_entries, source="build")
 
     result["batch_id"] = batch_id
     result["results"] = full_results[:200]
@@ -1250,6 +1257,7 @@ async def late_swap_contest_entries(
         },
         _CONTEST_BATCH_TTL,
     )
+    briefs.remember_latest_batch(day, new_batch_id, entries, source="late-swap")
 
     return {
         "date": day,
@@ -1435,6 +1443,10 @@ async def reshape_contest_entries(
         {"entries": reshaped["entries"], "results": reshaped["results"]},
         _CONTEST_BATCH_TTL,
     )
+    # A reshape has no date of its own -- it inherits the day the source
+    # batch was built for, which briefs recorded alongside it.
+    _src_day = (briefs.day_of_batch(batch_id) or date_cls.today().isoformat())
+    briefs.remember_latest_batch(_src_day, new_batch_id, reshaped["entries"], source="reshape")
 
     return {
         "batch_id": new_batch_id,
@@ -1642,13 +1654,43 @@ async def upload_contest_results(
         )
     )
 
+    # Process audit of ALL of your entries in this contest (not just
+    # the one identified above), scored against data/process_rules.py.
+    # Team mapping comes from the MLB Stats API slate for that date so
+    # stacks resolve even for dates whose salary cache has expired.
+    audit = await _audit_standings(parsed, day, name, handle=my_handle, entry_id=my_entry_id)
+
     return {
         "date": day,
         "contest_id": cid,
         "field_size": len(parsed["entries"]),
         "players_found": len(parsed["player_pool"]),
         "my_entry": my_entry,
+        "audit": audit,
     }
+
+
+async def _audit_standings(
+    parsed: dict[str, Any], day: str, contest_name: str, *, handle: str | None, entry_id: str | None
+) -> dict[str, Any]:
+    settings = get_settings()
+    handle = handle or settings.dk_handle or None
+    try:
+        slate = await mlb_slate.build_slate(day, include_hitters=True)
+        team_by_name = contest_audit.team_map_from_slate(slate)
+    except Exception:  # noqa: BLE001
+        team_by_name = None
+    audit = contest_audit.audit_contest(
+        parsed, handle=handle, entry_ids=[entry_id] if entry_id else None, team_by_name=team_by_name
+    )
+    audit["contest_name"] = contest_name
+    audit["markdown"] = contest_audit.audit_to_markdown(audit, contest_name=contest_name)
+    # Keep the day's audits where the next morning's brief can find them.
+    key = f"contest_audits:{day}"
+    existing = [a for a in (cache.get(key) or []) if a.get("contest_name") != contest_name]
+    existing.insert(0, {k: v for k, v in audit.items() if k != "profiles"})
+    cache.put(key, existing[:12], 14 * 24 * 3600)
+    return audit
 
 
 @router.get("/contest-results/history")
@@ -1661,3 +1703,103 @@ async def get_contest_results_history() -> dict[str, Any]:
         "total_entries": len(contests),
         "total_cost": round(sum(float(c.get("entry_fee") or 0) for c in contests), 2),
     }
+
+
+# ---------------------------------------------------------------------------
+# Process audits and scheduled briefs (services/contest_audit.py,
+# services/build_audit.py, services/briefs.py)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/contest-audit")
+async def audit_contest_standings(
+    date: str | None = Query(None, description="Date the contest was played, defaults to today"),
+    contest_name: str | None = Query(None),
+    my_handle: str | None = Query(None, description="Your DK handle; defaults to DK_HANDLE in .env"),
+    my_entry_id: str | None = Query(None),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Process-audit a DK contest-standings export WITHOUT archiving it
+    -- the same audit /contest-results runs, for a file you only want
+    the read on."""
+    raw = await file.read()
+    try:
+        text = contest_results.extract_csv_text(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Couldn't read that file: {exc}") from exc
+    parsed = contest_results.parse_contest_standings(text)
+    if not parsed["entries"]:
+        raise HTTPException(status_code=400, detail="No contest entries found in that file.")
+    day = date or date_cls.today().isoformat()
+    return await _audit_standings(parsed, day, contest_name or "Contest", handle=my_handle, entry_id=my_entry_id)
+
+
+@router.get("/contest-audits")
+async def list_contest_audits(date: str | None = Query(None)) -> dict[str, Any]:
+    day = date or date_cls.today().isoformat()
+    return {"date": day, "audits": cache.get(f"contest_audits:{day}") or []}
+
+
+@router.post("/build-audit")
+async def audit_build(
+    date: str | None = Query(None),
+    batch_id: str | None = Query(None, description="A contest batch id; defaults to the latest batch built for the date"),
+    target_count: int | None = Query(None, description="How many entries you actually intend to play"),
+) -> dict[str, Any]:
+    """Pre-entry process audit of a generated batch against the rules --
+    pitcher core, stack conviction, batting order, filler, salary --
+    with a keep/cut verdict per entry."""
+    day = date or date_cls.today().isoformat()
+    if batch_id:
+        cached = cache.get(f"contest_batch:{batch_id}")
+        if not cached:
+            raise HTTPException(status_code=404, detail="That batch has expired or was never built.")
+        entries = cached["entries"]
+    else:
+        latest = briefs.latest_batch(day)
+        if not latest:
+            raise HTTPException(status_code=404, detail="No contest batch has been built for that date yet.")
+        batch_id, entries = latest["batch_id"], latest["entries"]
+    slate = await mlb_slate.build_slate(day, include_hitters=True)
+    audit = build_audit.audit_batch(entries, slate, target_count=target_count)
+    audit["markdown"] = build_audit.audit_to_markdown(audit)
+    return {"date": day, "batch_id": batch_id, **audit}
+
+
+@router.get("/briefs")
+async def get_briefs_index() -> dict[str, Any]:
+    """Every stored brief (last two weeks) plus what the scheduler will
+    do next."""
+    return {"briefs": briefs.list_briefs(), "schedule": await briefs.schedule_status()}
+
+
+@router.get("/briefs/{kind}")
+async def get_brief(kind: str, date: str | None = Query(None)) -> dict[str, Any]:
+    if kind not in (briefs.MORNING, briefs.PRELOCK):
+        raise HTTPException(status_code=404, detail="kind must be 'morning' or 'prelock'")
+    day = date or date_cls.today().isoformat()
+    brief = briefs.get_brief(day, kind)
+    if not brief:
+        return {"available": False, "date": day, "kind": kind}
+    return {"available": True, **brief}
+
+
+@router.post("/briefs/{kind}/run")
+async def run_brief(
+    kind: str,
+    date: str | None = Query(None),
+    force: bool = Query(True, description="Regenerate even if one exists for the day"),
+    target_count: int | None = Query(None, description="Pre-lock only: entries you intend to play"),
+) -> dict[str, Any]:
+    """Run a brief now rather than waiting for the timer."""
+    if kind not in (briefs.MORNING, briefs.PRELOCK):
+        raise HTTPException(status_code=404, detail="kind must be 'morning' or 'prelock'")
+    day = date or date_cls.today().isoformat()
+    try:
+        if kind == briefs.MORNING:
+            brief = await briefs.run_morning(day, force=force)
+        else:
+            brief = await briefs.run_prelock(day, force=force, target_count=target_count)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"available": True, **brief}

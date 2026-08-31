@@ -21,7 +21,7 @@ from app import cache
 from app.clients.http import close_client
 from app.config import get_settings
 from app.routers import mlb, nfl, system
-from app.services import lineup_watch
+from app.services import briefs, lineup_watch
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,9 +45,11 @@ async def lifespan(app: FastAPI):
     cache.purge_expired()
     watch_task = asyncio.create_task(lineup_watch._poll_loop())
     housekeeping_task = asyncio.create_task(cache._housekeeping_loop())
+    briefs_task = asyncio.create_task(briefs._schedule_loop())
     yield
     watch_task.cancel()
     housekeeping_task.cancel()
+    briefs_task.cancel()
     await close_client()
     log.info("DFS Edge shut down")
 
@@ -89,6 +91,7 @@ async def root() -> dict[str, object]:
             "/api/mlb/hitters",
             "/api/mlb/stacks",
             "/api/mlb/analysis",
+            "/api/mlb/briefs",
             "/api/nfl/slate",
             "/api/nfl/lineups",
         ],

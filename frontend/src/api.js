@@ -384,6 +384,23 @@ export const api = {
 
   contestResultsHistory: () => request('/api/mlb/contest-results/history'),
 
+  // Process layer: post-contest audits, pre-entry build audit, and the
+  // scheduled morning / pre-lock briefs (services/briefs.py).
+  contestAudits: (date) => request(`/api/mlb/contest-audits?date=${date}`),
+  buildAudit: (date, { batchId = null, targetCount = null } = {}) => {
+    const params = new URLSearchParams({ date })
+    if (batchId) params.set('batch_id', batchId)
+    if (targetCount != null) params.set('target_count', targetCount)
+    return request(`/api/mlb/build-audit?${params.toString()}`, { method: 'POST' })
+  },
+  briefs: () => request('/api/mlb/briefs'),
+  brief: (kind, date) => request(`/api/mlb/briefs/${kind}?date=${date}`),
+  runBrief: (kind, date, { targetCount = null } = {}) => {
+    const params = new URLSearchParams({ date, force: 'true' })
+    if (targetCount != null) params.set('target_count', targetCount)
+    return request(`/api/mlb/briefs/${kind}/run?${params.toString()}`, { method: 'POST' })
+  },
+
   simulateDkEntries: (
     date,
     contestId,
