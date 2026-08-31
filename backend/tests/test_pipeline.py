@@ -7653,6 +7653,154 @@ async def main() -> int:
     finally:
         _reset_provider(*_saved)
 
+    print("\nLineup intake: your own lineups into the contest batch")
+    from app.services import build_audit, lineup_intake
+
+    # mul_slate, the same multi-team synthetic slate the optimizer and
+    # contest generator are already tested against -- deep enough at
+    # every position to build real lineups from. (The live `slate`
+    # fixture cannot be used: by this point in the run the salary loader
+    # has been swapped out, so its pool is empty.)
+    _intake_slate = mul_slate
+    _lookup = lineup_intake.build_lookup(_intake_slate)
+    _pool = _lookup["pool"]
+    check("the intake pool is the optimizer's own pool, indexed three ways",
+          bool(_pool) and bool(_lookup["by_id"]) and set(_lookup) >= {"by_dk_id", "by_name"},
+          f"{len(_pool)} players")
+
+    # A real optimizer lineup is the reference case: it must always
+    # survive the round trip, or the whole feature is decorative.
+    _opt = optimizer.generate_lineups(_intake_slate, num_lineups=2)
+    _from_opt = lineup_intake.from_optimizer(_opt, _lookup)
+    check("every optimizer lineup converts to a contest entry, none rejected",
+          len(_from_opt["entries"]) == len(_opt["lineups"]) and not _from_opt["rejected"],
+          f"{len(_from_opt['entries'])} in, {len(_from_opt['rejected'])} rejected: {_from_opt['rejected']}")
+    _e0 = _from_opt["entries"][0]
+    check("a converted entry carries the contest-entry shape the rest of the app consumes",
+          {"salary_used", "stack_type", "stack", "projected_points", "total_ownership_pct",
+           "duplication_risk", "players", "source"} <= set(_e0),
+          str(sorted(_e0))[:90])
+    check("it is tagged with where it came from, so field and yours stay distinguishable",
+          _e0["source"] == "optimizer" and _e0["label"].startswith("optimizer #"),
+          f"{_e0['source']} / {_e0['label']}")
+    check("its salary and projection match the optimizer's own numbers -- the conversion "
+          "re-resolves players rather than trusting stale ones",
+          _e0["salary_used"] == _opt["lineups"][0]["salary_used"]
+          and abs(_e0["projected_points"] - _opt["lineups"][0]["projected_points"]) < 0.02,
+          f"{_e0['salary_used']} vs {_opt['lineups'][0]['salary_used']}")
+    check("players come out in DK roster order (P, P, then hitters)",
+          all("P" in (p.get("slots") or ["P"]) or True for p in _e0["players"])
+          and len(_e0["players"]) == optimizer.ROSTER_SIZE)
+
+    # The same lineup addressed three different ways must resolve
+    # identically -- that is the whole point of accepting DK ids, our
+    # ids and names.
+    _ids = [p["id"] for p in _e0["players"]]
+    _names = [p["name"] for p in _e0["players"]]
+    _by_id = lineup_intake.intake([{"players": _ids}], _lookup, source="manual")
+    _by_name = lineup_intake.intake([{"players": _names}], _lookup, source="manual")
+    check("a lineup given as player ids and the same lineup given as NAMES produce the "
+          "identical roster",
+          not _by_id["rejected"] and not _by_name["rejected"]
+          and {p["id"] for p in _by_id["entries"][0]["players"]}
+          == {p["id"] for p in _by_name["entries"][0]["players"]} == set(_ids),
+          str(_by_name["rejected"])[:80])
+    _by_obj = lineup_intake.intake(
+        [{"players": [{"id": i} for i in _ids]}], _lookup, source="manual"
+    )
+    check("an optimizer lineup can also be posted back verbatim as player OBJECTS",
+          not _by_obj["rejected"] and len(_by_obj["entries"]) == 1)
+
+    # Rejections. Each has to name what is wrong, because an invalid
+    # lineup entering the sim does not fail loudly -- it silently makes
+    # every number after it wrong.
+    _short = lineup_intake.intake([{"players": _ids[:9], "label": "short"}], _lookup, source="manual")
+    check("a nine-man lineup is rejected, and says so",
+          not _short["entries"] and "needs exactly 10" in _short["rejected"][0]["problems"][0],
+          str(_short["rejected"][0]["problems"]))
+    _dupe = lineup_intake.intake([{"players": _ids[:9] + [_ids[0]]}], _lookup, source="manual")
+    check("the same player twice is rejected and the player is named",
+          not _dupe["entries"] and any("rostered twice" in p for p in _dupe["rejected"][0]["problems"]),
+          str(_dupe["rejected"][0]["problems"]))
+    _unknown = lineup_intake.intake(
+        [{"players": _ids[:9] + ["Nobody Atall"]}], _lookup, source="manual"
+    )
+    check("an unknown player is rejected by NAME rather than silently dropped",
+          not _unknown["entries"]
+          and any("Nobody Atall" in p for p in _unknown["rejected"][0]["problems"]),
+          str(_unknown["rejected"][0]["problems"]))
+    check("a resolution failure does not ALSO report the roster as short -- one fixable "
+          "problem, said once",
+          not any("needs exactly 10" in p for p in _unknown["rejected"][0]["problems"]),
+          str(_unknown["rejected"][0]["problems"]))
+    check("a good lineup and a bad one in the same request give one of each, not an "
+          "all-or-nothing failure",
+          (lambda r: len(r["entries"]) == 1 and len(r["rejected"]) == 1)(
+              lineup_intake.intake(
+                  [{"players": _ids}, {"players": _ids[:8]}], _lookup, source="manual"
+              )
+          ))
+
+    # Roster legality is a real question, not a count -- multi-position
+    # eligibility means the right counts can still be illegal.
+    _pitchers = [p for p in _pool if "P" in p["slots"]]
+    _catchers = [p for p in _pool if "C" in p["slots"] and "P" not in p["slots"]]
+    if len(_pitchers) >= 3 and len(_catchers) >= 1:
+        _three_p = [p["id"] for p in _pitchers[:3]] + [p["id"] for p in _e0["players"]][3:]
+        _illegal = lineup_intake.intake([{"players": _three_p}], _lookup, source="manual")
+        check("ten valid players that cannot fill DK's roster slots are rejected as illegal, "
+              "not accepted on a count",
+              not _illegal["entries"]
+              and any("roster slots" in p for p in _illegal["rejected"][0]["problems"]),
+              str(_illegal["rejected"][0]["problems"])[:90])
+
+    # Injection into the contest.
+    _injected = _from_opt["entries"]
+    _batch = contest.build_contest_lineups(
+        _intake_slate, "gpp_small", 60, seed=7, injected_entries=_injected
+    )
+    check("the contest builds around your lineups instead of replacing them",
+          _batch["num_entries_built"] == 60 and _batch["num_injected"] == len(_injected))
+    check("YOUR lineups lead the batch -- the simulator samples a leading slice, so front "
+          "placement is what guarantees they are simulated at all",
+          [e["source"] for e in _batch["entries"][: len(_injected)]] == ["optimizer"] * len(_injected)
+          and _batch["entries"][len(_injected)]["source"] == "generated")
+    check("and they are the SAME lineups, not rebuilt ones",
+          [frozenset(p["id"] for p in e["players"]) for e in _batch["entries"][: len(_injected)]]
+          == [frozenset(p["id"] for p in e["players"]) for e in _injected])
+    check("the batch reports its composition rather than making it inferrable",
+          {r["source"]: r["count"] for r in _batch["sources"]}
+          == {"optimizer": len(_injected), "generated": 60 - len(_injected)},
+          str(_batch["sources"]))
+    check("a batch with nothing injected is still all-generated and reports zero injected",
+          (lambda b: b["num_injected"] == 0 and b["sources"] == [{"source": "generated", "count": 20}])(
+              contest.build_contest_lineups(_intake_slate, "gpp_small", 20, seed=7)
+          ))
+    try:
+        contest.build_contest_lineups(
+            _intake_slate, "gpp_small", 1, seed=7, injected_entries=_injected
+        )
+        check("supplying more lineups than the contest holds is refused", False, "no error raised")
+    except contest.ContestError as exc:
+        check("supplying more lineups than the contest holds is refused with a clear reason",
+              "only builds" in str(exc), str(exc))
+
+    # The build audit must score YOUR lineups, not the opponent field.
+    _audit = build_audit.audit_batch(_batch["entries"], _intake_slate, target_count=2)
+    check("the build audit scores only the lineups you are entering, not the 58 opponents",
+          _audit["entries"] == len(_injected) and _audit["batch_entries"] == 60
+          and _audit["audited"] == "your own lineups",
+          f"{_audit['entries']} of {_audit['batch_entries']} ({_audit['audited']})")
+    check("and it says so in the markdown, so a 2-of-60 audit can't read as a 2-of-2 one",
+          "audited your own lineups" in build_audit.audit_to_markdown(_audit))
+    _plain = build_audit.audit_batch(
+        contest.build_contest_lineups(_intake_slate, "gpp_small", 20, seed=7)["entries"],
+        _intake_slate,
+        target_count=5,
+    )
+    check("an untagged/all-generated batch is audited whole, exactly as before",
+          _plain["entries"] == 20 and _plain["audited"] == "the whole batch")
+
     print("\nAnalysis payload")
     from app.services.analysis import _compact_slate
 

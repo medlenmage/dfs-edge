@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import zlib
+from collections import Counter
 from datetime import date as date_cls
 from typing import Any
 from uuid import uuid4
@@ -26,6 +27,7 @@ from app.services import (
     dk_entry_manager,
     late_swap as late_swap_service,
     lineup_export,
+    lineup_intake,
     mlb_slate,
     optimizer,
     player_match,
@@ -825,6 +827,16 @@ async def build_contest_entries(
     included_game_pks: list[int] | None = Body(
         None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
     ),
+    use_my_lineups: bool = Body(
+        False,
+        embed=True,
+        description=(
+            "Lead the batch with the lineups you set aside for the day (GET /my-lineups) and "
+            "fill the rest of the field around them, instead of generating the whole contest. "
+            "This is how a portfolio that OBEYS the process rules gets simulated and audited, "
+            "rather than one the generator was merely steered toward."
+        ),
+    ),
     reroll: int = Body(
         0,
         embed=True,
@@ -859,6 +871,15 @@ async def build_contest_entries(
     # comment above; the pool needs a real ownership fallback wherever
     # RotoWire's export doesn't cover a player.
     slate = await mlb_slate.build_slate(day, include_inhouse=True)
+    injected = get_my_lineups(day) if use_my_lineups else []
+    if use_my_lineups and not injected:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No lineups set aside for that date. Build some in the optimizer, or read "
+                "them out of an uploaded DK entries file, before asking the contest to use them."
+            ),
+        )
     try:
         result = contest.build_contest_lineups(
             slate,
@@ -866,6 +887,10 @@ async def build_contest_entries(
             contest_size,
             projection_source=projection_source,
             included_game_pks=included_game_pks,
+            # Your own lineups lead the batch; the generator fills the
+            # field behind them. See lineup_intake.py for why the two
+            # engines are used together rather than one or the other.
+            injected_entries=injected,
             # Identical settings reproduce the identical contest (see
             # _sim_seed); `reroll` bumps into a genuinely new draw.
             seed=_sim_seed(day, contest_type, projection_source, "build", reroll),
@@ -1467,6 +1492,174 @@ async def reshape_contest_entries(
         "exposure": reshaped["exposure"],
         "sample_entries": reshaped["entries"][:200],
         "results": reshaped["results"][:200],
+    }
+
+
+# Your own lineups for the day, kept where every downstream step can
+# find them. One hour is the contest-batch TTL; this is a slate-day
+# working set, so it matches the salary/projection uploads instead.
+_MY_LINEUPS_TTL = 60 * 60 * 12
+
+
+def _my_lineups_key(day: str) -> str:
+    return f"my_lineups:{day}"
+
+
+def get_my_lineups(day: str) -> list[dict[str, Any]]:
+    return cache.get(_my_lineups_key(day)) or []
+
+
+async def _intake_lookup(day: str, projection_source: str, included_game_pks: list[int] | None):
+    slate = await mlb_slate.build_slate(
+        day, include_inhouse=(projection_source == "inhouse")
+    )
+    try:
+        return slate, lineup_intake.build_lookup(
+            slate,
+            projection_source=projection_source,
+            included_game_pks=included_game_pks,
+        )
+    except lineup_intake.IntakeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _store_my_lineups(day: str, entries: list[dict[str, Any]], *, replace: bool) -> list[dict[str, Any]]:
+    """
+    Append to (or replace) the day's tray, dropping exact repeats.
+
+    De-duped on the roster itself rather than on the label, because the
+    same ten players arriving twice -- once from the optimizer, once out
+    of a DK entries file you already filled from it -- is one lineup you
+    are entering once, and counting it twice would misstate both the
+    portfolio size and its cost.
+    """
+    existing = [] if replace else get_my_lineups(day)
+    seen = {frozenset(p["id"] for p in e["players"]) for e in existing}
+    merged = list(existing)
+    for e in entries:
+        key = frozenset(p["id"] for p in e["players"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(e)
+    cache.put(_my_lineups_key(day), merged, _MY_LINEUPS_TTL)
+    return merged
+
+
+@router.get("/my-lineups")
+async def list_my_lineups(date: str | None = Query(None)) -> dict[str, Any]:
+    """
+    The lineups you have set aside to actually enter today.
+
+    These are YOURS -- built by the optimizer, read out of a filled
+    DraftKings entries file, or typed in -- as opposed to the contest
+    generator's field. Build a contest with `use_my_lineups=true` and
+    they lead the batch, so the simulator prices them against that
+    field and the build audit selects a portfolio from them rather than
+    from thousands of randomly-constructed opponents.
+    """
+    day = date or date_cls.today().isoformat()
+    entries = get_my_lineups(day)
+    return {
+        "date": day,
+        "count": len(entries),
+        "sources": [
+            {"source": src, "count": n}
+            for src, n in Counter(e.get("source") for e in entries).most_common()
+        ],
+        "entries": entries,
+    }
+
+
+@router.delete("/my-lineups")
+async def clear_my_lineups(date: str | None = Query(None)) -> dict[str, Any]:
+    day = date or date_cls.today().isoformat()
+    cache.put(_my_lineups_key(day), [], _MY_LINEUPS_TTL)
+    return {"date": day, "count": 0, "entries": []}
+
+
+@router.post("/my-lineups")
+async def add_my_lineups(
+    date: str | None = Body(None, embed=True),
+    lineups: list[dict[str, Any]] = Body(
+        ...,
+        embed=True,
+        description=(
+            "One object per lineup: {players: [...], label?}. Each player may be a "
+            "DraftKings id, this app's player id, a name, or a player object carrying "
+            "any of those -- so an optimizer lineup can be posted back verbatim."
+        ),
+    ),
+    source: str = Body("manual", embed=True, description="manual or optimizer"),
+    replace: bool = Body(False, embed=True, description="Replace the day's tray instead of adding to it"),
+    projection_source: str = Body("rotowire", embed=True),
+    included_game_pks: list[int] | None = Body(None, embed=True),
+) -> dict[str, Any]:
+    """
+    Add lineups you built yourself to the day's tray.
+
+    Every lineup is validated against this slate before it is accepted:
+    ten players, no repeats, all on the slate with a salary and a
+    projection, a legal assignment to DK's roster slots, and inside the
+    salary cap. Anything that fails comes back in `rejected` with the
+    reason -- an invalid lineup is never silently dropped or repaired,
+    because a bad roster in the sim doesn't fail loudly, it just quietly
+    makes every number that follows wrong.
+    """
+    day = date or date_cls.today().isoformat()
+    if source not in lineup_intake.SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"source must be one of {', '.join(lineup_intake.SOURCES)}.",
+        )
+    _, lookup = await _intake_lookup(day, projection_source, included_game_pks)
+    result = lineup_intake.intake(lineups, lookup, source=source)
+    merged = _store_my_lineups(day, result["entries"], replace=replace)
+    return {
+        "date": day,
+        "accepted": len(result["entries"]),
+        "rejected": result["rejected"],
+        "count": len(merged),
+        "entries": merged,
+    }
+
+
+@router.post("/my-lineups/from-dk-entries")
+async def add_my_lineups_from_dk(
+    date: str | None = Query(None),
+    contest_id: str | None = Query(None, description="Only read entries for this contest"),
+    replace: bool = Query(False),
+    projection_source: str = Query("rotowire"),
+) -> dict[str, Any]:
+    """
+    Read the lineups you have already built inside DraftKings back in,
+    from the same bulk-entries CSV you upload for the entry filler.
+
+    This is the zero-effort manual path: no new format to learn and no
+    retyping -- if you built lineups on DK's own site, export the
+    entries file and they become your tray. Still-blank entry rows are
+    reservations, not lineups, so they are skipped rather than reported
+    as broken.
+    """
+    day = date or date_cls.today().isoformat()
+    text = dk_entries.load(day)
+    if not text:
+        raise HTTPException(
+            status_code=404,
+            detail="No DK entries file uploaded for that date -- upload one via POST /dk-entries first.",
+        )
+    _, lookup = await _intake_lookup(day, projection_source, None)
+    result = lineup_intake.from_dk_entries(
+        dk_entries.parse_entries_csv(text), lookup, contest_id=contest_id
+    )
+    merged = _store_my_lineups(day, result["entries"], replace=replace)
+    return {
+        "date": day,
+        "accepted": len(result["entries"]),
+        "rejected": result["rejected"],
+        "note": result.get("note"),
+        "count": len(merged),
+        "entries": merged,
     }
 
 

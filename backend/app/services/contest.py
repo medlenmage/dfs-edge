@@ -2199,6 +2199,7 @@ def build_contest_lineups(
     projection_source: str = "rotowire",
     included_game_pks: list[int] | None = None,
     seed: int | None = None,
+    injected_entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Build a whole CONTEST -- and nothing else.
@@ -2234,6 +2235,22 @@ def build_contest_lineups(
     Duplicates are always allowed, because a real contest field
     genuinely contains them -- especially on a short slate, where the
     distinct-lineup space runs out well before the entry count does.
+
+    `injected_entries` are lineups you built yourself -- from the
+    optimizer, a filled DK entries file, or by hand (see
+    services/lineup_intake.py) -- placed at the FRONT of the batch, with
+    generated lineups filling the rest of the field behind them. This is
+    the difference between steering the sampler toward the process rules
+    and simply obeying them: the optimizer can be TOLD a stack shape, an
+    ownership bound and a salary floor, where the generator can only be
+    weighted and hoped at. Every entry carries a `source`, so the
+    simulator, the build audit and the daily brief can all tell the
+    lineups you are entering from the field you are entering against --
+    a distinction this pipeline previously had no way to express.
+
+    Front placement is deliberate and load-bearing: the simulator
+    samples a batch bigger than MAX_SAMPLE_SIZE by taking a leading
+    slice, so anything at the front is guaranteed to be simulated.
     """
     if contest_type not in CONTEST_TYPES:
         raise ContestError(
@@ -2246,9 +2263,16 @@ def build_contest_lineups(
     contest["field_size"] = contest_size
     num_lineups = min(contest_size, MAX_USER_LINEUPS)
 
-    entries = generate_entries(
+    injected = list(injected_entries or [])
+    if len(injected) > num_lineups:
+        raise ContestError(
+            f"{len(injected)} lineups were supplied but this contest only builds "
+            f"{num_lineups}. Raise the contest size or supply fewer."
+        )
+
+    generated = generate_entries(
         slate,
-        num_lineups,
+        num_lineups - len(injected),
         projection_source=projection_source,
         included_game_pks=included_game_pks,
         min_salary=0,
@@ -2256,6 +2280,9 @@ def build_contest_lineups(
         allow_duplicates=True,
         seed=seed,
     )
+    for e in generated:
+        e.setdefault("source", "generated")
+    entries = injected + generated
 
     salaries = sorted(e["salary_used"] for e in entries)
     points = [e["projected_points"] for e in entries]
@@ -2266,6 +2293,13 @@ def build_contest_lineups(
         "field_size": contest_size,
         "num_entries_requested": num_lineups,
         "num_entries_built": len(entries),
+        "num_injected": len(injected),
+        # Which lineups are YOURS rather than field, most common source
+        # first. A batch with nothing injected is all "generated".
+        "sources": [
+            {"source": src, "count": n}
+            for src, n in Counter(e.get("source") or "generated" for e in entries).most_common()
+        ],
         "num_distinct_entries": len(
             {frozenset(pl["id"] for pl in e["players"]) for e in entries}
         ),
@@ -2294,11 +2328,18 @@ def build_contest_lineups(
         "exposure": field_exposure(entries, top_n=20),
         "entries": entries,
         "note": (
-            "Lineups only -- no simulation has been run yet. Each is built by fast "
-            "randomized construction weighted toward projected points and toward "
-            "spending the salary cap, deliberately allowing the duplicates a real "
-            "contest field contains. Send the batch to the simulator for cash "
-            "probability, payouts and ROI."
+            (
+                f"{len(injected)} lineup(s) you built yourself lead the batch; the other "
+                f"{len(generated)} are the field they will be simulated against. "
+            )
+            if injected
+            else ""
+        )
+        + (
+            "Field lineups are built by fast randomized construction weighted toward "
+            "projected points and toward spending the salary cap, deliberately allowing "
+            "the duplicates a real contest field contains. No simulation has been run "
+            "yet -- send the batch to the simulator for cash probability, payouts and ROI."
         ),
     }
 
@@ -2558,6 +2599,84 @@ async def build_contest_entries_simulated(
     )
 
 
+def _source_breakout(
+    entries: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    contest: dict[str, Any],
+) -> dict[str, Any] | None:
+    """
+    Split a simulated batch into the lineups you are entering and the
+    field you are entering against, and summarize each.
+
+    Only meaningful once something has been injected -- a pure generated
+    contest is all field by definition, and reporting a "yours" section
+    covering the whole batch would be a lie of framing. Returns None in
+    that case rather than a section that says nothing.
+
+    `entry_cost` counts only YOUR entries: the field lineups are
+    opponents, not entries you paid for, so including them would
+    overstate what the portfolio costs by three orders of magnitude.
+    """
+    mine = [
+        (e, r) for e, r in zip(entries, results) if (e.get("source") or "generated") != "generated"
+    ]
+    if not mine:
+        return None
+    field = [
+        (e, r) for e, r in zip(entries, results) if (e.get("source") or "generated") == "generated"
+    ]
+
+    def roll(rows: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any] | None:
+        if not rows:
+            return None
+        n = len(rows)
+        return {
+            "count": n,
+            "avg_cash_probability_pct": round(sum(r["cash_probability_pct"] for _, r in rows) / n, 1),
+            "avg_first_place_pct": round(sum(r["first_place_pct"] for _, r in rows) / n, 2),
+            "avg_top_1pct_pct": round(sum(r["top_1pct_pct"] for _, r in rows) / n, 2),
+            "avg_top_10pct_pct": round(sum(r["top_10pct_pct"] for _, r in rows) / n, 2),
+            "avg_roi_pct": round(sum(r["roi_pct"] for _, r in rows) / n, 1),
+            "avg_projected_points": round(sum(e["projected_points"] for e, _ in rows) / n, 2),
+            "avg_total_ownership_pct": round(sum(e["total_ownership_pct"] for e, _ in rows) / n, 1),
+        }
+
+    yours = roll(mine)
+    expected = round(sum(r["expected_payout"] for _, r in mine), 2)
+    cost = round(len(mine) * contest["entry_fee"], 2)
+    return {
+        **yours,
+        "sources": [
+            {"source": src, "count": n}
+            for src, n in Counter(e.get("source") for e, _ in mine).most_common()
+        ],
+        "total_entry_cost": cost,
+        "total_expected_payout": expected,
+        "estimated_net_profit": round(expected - cost, 2),
+        "field": roll(field),
+        "lineup_indexes": [r["lineup_index"] for _, r in mine],
+        # Said out loud because the number is otherwise very easy to
+        # misread. Optimizer-built lineups maximize PROJECTED points,
+        # and variance.py recenters every player's outcome distribution
+        # on that same projection -- so a lineup selected for the
+        # highest projection is being graded by a simulator that treats
+        # the projection as truth. Measured on a real slate: 20
+        # optimizer lineups came out at +175% simulated ROI against a
+        # field at -12.7% (which is just the rake). The gap is real
+        # ONLY to the extent the projections are; it is not a measured
+        # edge, and it is not comparable to a backtest against actual
+        # results.
+        "caveat": (
+            "Your lineups are scored by a simulator whose player distributions are centered "
+            "on the same projections they were built to maximize, so their simulated ROI is "
+            "optimistic by construction. Read it as a structural comparison against the "
+            "field -- ownership, stack shape, exposure -- not as expected profit."
+        )
+        if any((e.get("source") or "") == "optimizer" for e, _ in mine)
+        else None,
+    }
+
+
 def _rank_and_summarize_simulated(
     entries: list[dict[str, Any]],
     evaluation: dict[str, Any],
@@ -2649,6 +2768,15 @@ def _rank_and_summarize_simulated(
                 sum(e["duplication_risk"] for e in entries) / len(entries), 3
             ),
         },
+        # When the batch contains lineups you built yourself (see
+        # lineup_intake.py), the batch-wide averages above answer the
+        # wrong question -- they are dominated by the thousands of field
+        # lineups you are not entering. This is the same roll-up over
+        # only YOUR entries, plus the field's, so the comparison that
+        # actually matters is stated rather than left to be eyeballed.
+        # None when nothing was injected, since then the batch summary
+        # already is the answer.
+        "your_entries": _source_breakout(entries, evaluation["results"], contest),
         "field_baseline": _field_baseline(
             contest["payout_pct"], evaluation["prize_pool"], contest["entry_fee"], evaluation["field_size"]
         ),
@@ -2733,9 +2861,16 @@ async def simulate_contest_batch(
 
     A batch bigger than MAX_SAMPLE_SIZE is simulated as a
     MAX_SAMPLE_SIZE-lineup slice of itself, projected back onto the real
-    field size -- entries come out of the generator in build order (no
-    ranking applied yet), so a leading slice is an unbiased sample of
+    field size. Generated entries come out in build order with no
+    ranking applied, so a leading slice of them is an unbiased sample of
     the batch rather than its best or worst end.
+
+    Lineups you injected yourself sit at the FRONT of the batch
+    (build_contest_lineups), which means the slice always contains all
+    of them -- deliberate, since simulating a contest while leaving out
+    the entries you are actually going to play would be useless. The
+    field portion of the slice stays an unbiased sample of the
+    generated remainder.
     """
     if not entries:
         raise ContestError("Nothing to simulate -- build a contest first.")

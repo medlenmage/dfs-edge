@@ -487,7 +487,23 @@ def audit_batch(
     a 20-entry portfolio is a different question); defaults to the
     batch size.
     """
+    batch_size = len(entries)
     lookup = slate_lookup(slate) if slate else {}
+
+    # A batch can now hold BOTH the lineups you are entering (built by
+    # the optimizer, read out of a DK entries file, or typed in -- see
+    # services/lineup_intake.py) and the generated field they will be
+    # simulated against. Only the former are yours to audit: scoring a
+    # 3,000-lineup opponent field against your process rules answers a
+    # question nobody asked, and selecting a portfolio out of it would
+    # hand back lineups you never built. When a batch carries no source
+    # tags at all -- every batch before this existed, and any pure
+    # generated contest -- the whole thing is audited, exactly as before.
+    mine = [e for e in entries if (e.get("source") or "generated") != "generated"]
+    audited_source = "your own lineups" if mine else "the whole batch"
+    if mine:
+        entries = mine
+
     per_entry = [audit_entry(e, lookup) for e in entries]
     n = len(entries)
     n_play = target_count or n
@@ -653,6 +669,10 @@ def audit_batch(
     return {
         "entries": n,
         "target_count": n_play,
+        # What was audited, and how much of the batch that was -- so a
+        # 20-of-3,000 audit can never be mistaken for a 20-of-20 one.
+        "audited": audited_source,
+        "batch_entries": batch_size,
         "pitchers": {
             "distinct": p_distinct,
             "recommended_max": p_max,
@@ -719,8 +739,14 @@ def audit_to_markdown(audit: dict[str, Any], *, max_verdicts: int = 40) -> str:
     if not audit.get("entries"):
         return "_No entries to audit._\n"
     p, s, h, sal = audit["pitchers"], audit["stacks"], audit["hitters"], audit["salary"]
+    scope = (
+        f" (audited {audit['audited']}, {audit['entries']} of {audit['batch_entries']} in the batch)"
+        if audit.get("audited") and audit.get("batch_entries", 0) != audit["entries"]
+        else ""
+    )
     lines = [
-        f"**Batch:** {audit['entries']} entries, playing {audit['target_count']}. Keep {audit['keep']}, cut {audit['cut']}.",
+        f"**Batch:** {audit['entries']} entries, playing {audit['target_count']}. "
+        f"Keep {audit['keep']}, cut {audit['cut']}.{scope}",
         "",
         f"- Pitchers: {p['distinct']} distinct (target <= {p['recommended_max']}); "
         + ", ".join(f"{u['name']} x{u['entries']}" for u in p["usage"][:8])

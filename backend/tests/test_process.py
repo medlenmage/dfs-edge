@@ -499,6 +499,27 @@ async def main() -> int:
     latest = briefs.latest_batch("2026-08-30")
     check("a later reshape replaces it and caps stored entries at 500", latest["batch_id"] == "def456" and len(latest["entries"]) == 500 and latest["total_entries"] == 700)
 
+    # Your own lineups have to survive the snapshot cap whatever their
+    # simulated rank -- otherwise a portfolio that simulated badly just
+    # vanishes, and the brief audits the opponent field while never
+    # mentioning the lineups you were about to enter.
+    _mine = [{**good1, "source": "optimizer"}, {**good2, "source": "optimizer"}]
+    _field = [{**bad1, "source": "generated"} for _ in range(600)]
+    briefs.remember_latest_batch("2026-08-30", "mixed1", _field + _mine, source="simulate")
+    _snap = briefs.latest_batch("2026-08-30")
+    check("your own lineups lead the brief's snapshot even when they sit at the very end "
+          "of a re-sorted 600+ lineup batch",
+          [e.get("source") for e in _snap["entries"][:2]] == ["optimizer", "optimizer"]
+          and _snap["num_injected"] == 2,
+          f"{_snap['num_injected']} injected, snapshot {len(_snap['entries'])}")
+    check("the snapshot is still capped, and still reports the real batch size",
+          len(_snap["entries"]) == 500 and _snap["total_entries"] == 602,
+          f"{len(_snap['entries'])} of {_snap['total_entries']}")
+    briefs.remember_latest_batch("2026-08-30", "plain1", _field, source="build")
+    check("a batch with nothing of yours in it snapshots exactly as before",
+          briefs.latest_batch("2026-08-30")["num_injected"] == 0)
+
+
     print("\n== briefs: scheduler (fake clock, stubbed Claude)")
     tz = ZoneInfo("America/Chicago")
     calls: list[str] = []
