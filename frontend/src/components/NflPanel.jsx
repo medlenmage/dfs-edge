@@ -100,13 +100,18 @@ function NflMatchups({ slate }) {
  * calendar date, so this manages its own state rather than sharing
  * App.jsx's date-driven slate fetch.
  */
-export function NflPanel() {
+export function NflPanel({ tab: controlledTab, onTabChange }) {
   const [season, setSeason] = useState('')
   const [week, setWeek] = useState('')
   const [slate, setSlate] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [tab, setTab] = useState('matchups')
+  // Tab state is CONTROLLED when App drives it from the rail, and
+  // internal otherwise -- so this panel still works standalone (and in
+  // isolation) without the rail having to exist.
+  const [internalTab, setInternalTab] = useState('matchups')
+  const tab = controlledTab ?? internalTab
+  const setTab = onTabChange ?? setInternalTab
   const [playerSubTab, setPlayerSubTab] = useState('QB')
   // The contest the generator last built, handed to the Simulator tab.
   // Lives here rather than inside either panel because it's the one
@@ -292,7 +297,7 @@ export function NflPanel() {
 
       {slate && (
         <>
-          <div className="tabs">
+          <div className="tabs" style={onTabChange ? { display: 'none' } : undefined}>
             <button className={`tab ${tab === 'matchups' ? 'active' : ''}`} onClick={() => setTab('matchups')}>
               Matchups
             </button>
