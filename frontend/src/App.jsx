@@ -83,6 +83,41 @@ export default function App() {
   const [contestBatch, setContestBatch] = useState(null)
   const [inhouseLoading, setInhouseLoading] = useState(false)
 
+  // The in-house pass is what carries in-house FPTS/ownership, leverage,
+  // AND the Boom%/Bust% columns -- all four come from the same real
+  // per-player game-log fetch across the whole slate. It's genuinely
+  // slow the first time each day (measured: 0.5s for the plain slate,
+  // ~4.5s warm with in-house, ~17s cold), which is why it can't just be
+  // folded into the initial load.
+  //
+  // So it runs automatically in the BACKGROUND instead: the dashboard
+  // renders instantly off the fast slate, then this fills the in-house
+  // and boom/bust columns in behind it a few seconds later. Before this,
+  // those columns simply read "—" forever unless you happened to know
+  // about the "Load in-house projections" button -- and any Refresh,
+  // date change or projections upload silently wiped them back out,
+  // since every one of those reloads went through the fast path.
+  const loadInhouse = useCallback(
+    async ({ background = false } = {}) => {
+      if (!background) setInhouseLoading(true)
+      try {
+        const data = await api.slate(date, { inhouse: true })
+        // Only adopt it if the user hasn't since moved to another date
+        // -- a slow background response must never overwrite a newer
+        // slate with stale data.
+        setSlate((prev) => (prev && prev.date !== data.date ? prev : data))
+      } catch (err) {
+        // A background failure is not worth an error banner over the
+        // whole dashboard: the fast slate is already rendered and
+        // perfectly usable, just without the in-house columns.
+        if (!background) setError(err.message)
+      } finally {
+        if (!background) setInhouseLoading(false)
+      }
+    },
+    [date],
+  )
+
   const load = useCallback(
     async (refresh = false) => {
       setLoading(true)
@@ -95,24 +130,13 @@ export default function App() {
       } finally {
         setLoading(false)
       }
+      // Fill the in-house/boom-bust columns in behind the fast render,
+      // every time the slate reloads -- so they survive a Refresh or a
+      // projections upload instead of vanishing.
+      loadInhouse({ background: true })
     },
-    [date],
+    [date, loadInhouse],
   )
-
-  // In-house FPTS/ownership are opt-in on the backend (a real per-player
-  // game-log fetch for every hitter/pitcher on the slate) -- fetched only
-  // when explicitly asked for, not on every plain dashboard load.
-  const loadInhouse = useCallback(async () => {
-    setInhouseLoading(true)
-    try {
-      const data = await api.slate(date, { inhouse: true })
-      setSlate(data)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setInhouseLoading(false)
-    }
-  }, [date])
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth(null))
@@ -284,7 +308,7 @@ export default function App() {
                 </label>
               )}
               <button
-                onClick={loadInhouse}
+                onClick={() => loadInhouse()}
                 disabled={inhouseLoading}
                 title="Compute this app's own in-house FPTS/ownership projections for this date (real per-player game-log fetches -- takes a few seconds)"
               >
