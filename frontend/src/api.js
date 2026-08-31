@@ -393,6 +393,16 @@ export const api = {
     if (targetCount != null) params.set('target_count', targetCount)
     return request(`/api/mlb/build-audit?${params.toString()}`, { method: 'POST' })
   },
+  // The build audit as a spreadsheet. A plain URL, like the other CSV
+  // downloads -- 'keep' is the portfolio to enter, 'all' also carries
+  // every cut lineup and the reason it was cut.
+  buildAuditCsvUrl: (date, { batchId = null, targetCount = null, include = 'keep' } = {}) => {
+    const params = new URLSearchParams({ date, include })
+    if (batchId) params.set('batch_id', batchId)
+    if (targetCount != null) params.set('target_count', targetCount)
+    return `${BASE}/api/mlb/build-audit/csv?${params.toString()}`
+  },
+  dkEntries: (date) => request(`/api/mlb/dk-entries?date=${date}`),
   briefs: () => request('/api/mlb/briefs'),
   brief: (kind, date) => request(`/api/mlb/briefs/${kind}?date=${date}`),
   runBrief: (kind, date, { targetCount = null } = {}) => {

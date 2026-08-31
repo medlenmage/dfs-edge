@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { renderMarkdown } from '../markdown'
+import { AuditPortfolio } from './AuditPortfolio'
 
 /**
  * The two scheduled Claude reads a day (services/briefs.py) -- a morning
@@ -21,7 +22,7 @@ function Severity({ level }) {
   return <span className={cls}>{level}</span>
 }
 
-function BriefCard({ kind, title, blurb, date, initial, targetCount }) {
+function BriefCard({ kind, title, blurb, date, initial, targetCount, showPortfolio }) {
   const [state, setState] = useState(initial ? { status: 'ready', data: initial } : { status: 'empty' })
 
   useEffect(() => {
@@ -81,6 +82,15 @@ function BriefCard({ kind, title, blurb, date, initial, targetCount }) {
       )}
       {data?.text && (
         <div className="analysis" style={{ marginTop: 14 }} dangerouslySetInnerHTML={{ __html: renderMarkdown(data.text) }} />
+      )}
+      {showPortfolio && data?.audit && (
+        <AuditPortfolio
+          date={date}
+          audit={data.audit}
+          entries={data.keep_entries}
+          keepBatchId={data.keep_batch_id}
+          targetCount={targetCount}
+        />
       )}
     </div>
   )
@@ -167,8 +177,10 @@ export function BriefsPanel({ date, enabled }) {
           <div>
             <div style={{ fontWeight: 600 }}>Build audit</div>
             <div className="sub-line">
-              Scores the latest contest build against the process rules -- pitcher core, stack
-              conviction, batting order, filler, salary -- with a keep/cut per entry. The pre-lock brief
+              Picks the portfolio to enter out of the latest contest build: it chooses the pitcher
+              core and the stacks first, then fills them with that build's strongest lineups, so the
+              set you enter obeys the rules rather than just being the least-bad lineups. Download it
+              as a CSV, or fill a DraftKings entries template with it directly. The pre-lock brief
               runs this automatically.
             </div>
           </div>
@@ -187,7 +199,23 @@ export function BriefsPanel({ date, enabled }) {
         </div>
         {audit.status === 'error' && <div className="notice error" style={{ marginTop: 10 }}>{audit.message}</div>}
         {audit.status === 'ready' && (
-          <div className="analysis" style={{ marginTop: 12 }} dangerouslySetInnerHTML={{ __html: renderMarkdown(audit.data.markdown) }} />
+          <>
+            <AuditPortfolio
+              date={date}
+              audit={audit.data}
+              entries={audit.data.keep_entries}
+              keepBatchId={audit.data.keep_batch_id}
+              targetCount={targetCount ? Number(targetCount) : null}
+            />
+            <details style={{ marginTop: 14 }}>
+              <summary style={{ cursor: 'pointer', fontSize: 13 }}>Full written audit</summary>
+              <div
+                className="analysis"
+                style={{ marginTop: 10 }}
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(audit.data.markdown) }}
+              />
+            </details>
+          </>
         )}
       </div>
 
@@ -198,6 +226,7 @@ export function BriefsPanel({ date, enabled }) {
         date={date}
         initial={prelock}
         targetCount={targetCount ? Number(targetCount) : null}
+        showPortfolio
       />
 
       {index.briefs?.length > 0 && (

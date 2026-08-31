@@ -1312,11 +1312,7 @@ async def download_contest_entries_csv(batch_id: str) -> Response:
     csv_text = lineup_export.lineups_to_csv(
         cached["entries"], results=cached.get("results") or None
     )
-    return Response(
-        content=csv_text,
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="contest-entries-{batch_id}.csv"'},
-    )
+    return _spreadsheet_csv(csv_text, f"contest-entries-{batch_id}.csv")
 
 
 @router.get("/dk-entries/fill")
@@ -1755,30 +1751,165 @@ async def list_contest_audits(date: str | None = Query(None)) -> dict[str, Any]:
     return {"date": day, "audits": cache.get(f"contest_audits:{day}") or []}
 
 
+def _spreadsheet_csv(text: str, filename: str, **headers: str) -> Response:
+    """
+    A CSV download meant to be opened in a spreadsheet.
+
+    Prefixed with a UTF-8 byte-order mark, because Excel on Windows
+    otherwise reads a BOM-less file as the system codepage and renders
+    every accented name wrong -- "Rodriguez" comes out as "RodrÃ­guez".
+    The BOM lives here rather than in lineup_export.lineups_to_csv() so
+    the function's output stays clean for programmatic callers; only the
+    file handed to a human carries it. The DraftKings entry filler is a
+    different path and deliberately gets no BOM -- DK parses that file.
+    """
+    return Response(
+        content="\ufeff" + text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', **headers},
+    )
+
+
+async def _audit_source(day: str, batch_id: str | None) -> tuple[str, list[dict[str, Any]]]:
+    """The batch to audit: an explicit id (the full cached batch), else
+    the last one built for the day."""
+    if batch_id:
+        cached = cache.get(f"contest_batch:{batch_id}")
+        if not cached:
+            raise HTTPException(status_code=404, detail="That batch has expired or was never built.")
+        return batch_id, cached["entries"]
+    latest = briefs.latest_batch(day)
+    if not latest:
+        raise HTTPException(status_code=404, detail="No contest batch has been built for that date yet.")
+    # The day's pointer stores only the first 500 entries (it exists so
+    # the scheduled brief has something to read even after a restart).
+    # Those 500 are in build order, not the best 500, so selecting a
+    # portfolio out of them would be picking from an arbitrary slice of
+    # a 3,000-lineup contest. Prefer the full cached batch and fall back
+    # to the snapshot only once it has expired.
+    full = cache.get(f"contest_batch:{latest['batch_id']}")
+    if full and full.get("entries"):
+        return latest["batch_id"], full["entries"]
+    return latest["batch_id"], latest["entries"]
+
+
+async def _run_build_audit(
+    day: str, batch_id: str | None, target_count: int | None
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    source_id, entries = await _audit_source(day, batch_id)
+    slate = await mlb_slate.build_slate(day, include_hitters=True)
+    audit = build_audit.audit_batch(entries, slate, target_count=target_count)
+    return source_id, entries, audit
+
+
+def _selected_entries(entries: list[dict[str, Any]], audit: dict[str, Any]) -> list[dict[str, Any]]:
+    """The audit's chosen portfolio as real lineups, strongest first --
+    the same order the DK entries filler will write them in."""
+    return [entries[i] for i in (audit.get("selection") or {}).get("indices", []) if i < len(entries)]
+
+
 @router.post("/build-audit")
 async def audit_build(
     date: str | None = Query(None),
     batch_id: str | None = Query(None, description="A contest batch id; defaults to the latest batch built for the date"),
     target_count: int | None = Query(None, description="How many entries you actually intend to play"),
 ) -> dict[str, Any]:
-    """Pre-entry process audit of a generated batch against the rules --
-    pitcher core, stack conviction, batting order, filler, salary --
-    with a keep/cut verdict per entry."""
+    """
+    Pre-entry process audit of a generated batch against the rules --
+    pitcher core, stack conviction, batting order, filler, salary.
+
+    The useful half is the SELECTED PORTFOLIO: the specific entries to
+    play, constructed so the surviving set obeys the portfolio rules
+    rather than just dropping bad lineups. Those entries are cached as
+    their own batch under `keep_batch_id`, which means every tool that
+    already takes a batch id works on them unchanged -- download it via
+    GET /contest-entries/{keep_batch_id}/csv, or push it straight into
+    a DraftKings entries template via GET /dk-entries/fill.
+    """
     day = date or date_cls.today().isoformat()
-    if batch_id:
-        cached = cache.get(f"contest_batch:{batch_id}")
-        if not cached:
-            raise HTTPException(status_code=404, detail="That batch has expired or was never built.")
-        entries = cached["entries"]
-    else:
-        latest = briefs.latest_batch(day)
-        if not latest:
-            raise HTTPException(status_code=404, detail="No contest batch has been built for that date yet.")
-        batch_id, entries = latest["batch_id"], latest["entries"]
-    slate = await mlb_slate.build_slate(day, include_hitters=True)
-    audit = build_audit.audit_batch(entries, slate, target_count=target_count)
+    source_id, entries, audit = await _run_build_audit(day, batch_id, target_count)
     audit["markdown"] = build_audit.audit_to_markdown(audit)
-    return {"date": day, "batch_id": batch_id, **audit}
+
+    keep_batch_id = None
+    kept = _selected_entries(entries, audit)
+    if kept:
+        keep_batch_id = uuid4().hex
+        # Cached in exactly the shape every other batch consumer expects,
+        # so the CSV download and the DK entry filler need no special
+        # case for an audited portfolio. No results: the selection is a
+        # process decision, not a simulated one, and attaching the
+        # source batch's ranks would misalign them to these rows.
+        cache.put(
+            f"contest_batch:{keep_batch_id}",
+            {"entries": kept, "results": None},
+            _CONTEST_BATCH_TTL,
+        )
+        # Deliberately NOT remember_latest_batch(): that pointer means
+        # "the build the user is about to play", and pointing it at the
+        # audit's own output makes the next audit audit its own 20-lineup
+        # answer instead of the real 500-lineup build -- a feedback loop
+        # that silently shrinks the portfolio every run. The keep batch
+        # is addressable by id; it is not the day's build.
+        cache.put(f"contest_batch_day:{keep_batch_id}", day, _CONTEST_BATCH_TTL)
+
+    audit = build_audit.trim_for_response(audit)
+    return {
+        "date": day,
+        "batch_id": source_id,
+        "keep_batch_id": keep_batch_id,
+        # The whole selected portfolio, not a preview -- this is what the
+        # UI tables and it is bounded by target_count, which is how many
+        # entries a human is going to type in.
+        "keep_entries": kept[:500],
+        **audit,
+    }
+
+
+@router.get("/build-audit/csv")
+async def download_build_audit_csv(
+    date: str | None = Query(None),
+    batch_id: str | None = Query(None, description="A contest batch id; defaults to the latest batch built for the date"),
+    target_count: int | None = Query(None, description="How many entries you actually intend to play"),
+    include: str = Query(
+        "keep",
+        description="'keep' (default) for just the portfolio to enter, 'all' for every audited lineup with its verdict",
+    ),
+) -> Response:
+    """
+    The audit as a spreadsheet rather than prose: one row per lineup
+    with every roster slot, the salary/projection/ownership totals, and
+    the audit's own columns -- verdict, the order to enter them in, and
+    the reason in the language of the rules.
+
+    'keep' is the file to work from. 'all' is for seeing what was cut
+    and why, which is the question the written brief cannot answer at
+    500 lineups.
+    """
+    day = date or date_cls.today().isoformat()
+    source_id, entries, audit = await _run_build_audit(day, batch_id, target_count)
+    verdicts = audit.get("verdicts") or []
+
+    if include == "keep":
+        rows = [(v, entries[v["index"]]) for v in verdicts if v["verdict"] == "keep" and v["index"] < len(entries)]
+        rows.sort(key=lambda r: r[0]["keep_rank"] if r[0]["keep_rank"] is not None else 10**6)
+    else:
+        rows = [(v, entries[v["index"]]) for v in verdicts if v["index"] < len(entries)]
+
+    csv_text = lineup_export.lineups_to_csv(
+        [e for _, e in rows],
+        extra_columns=[
+            {
+                "verdict": v["verdict"],
+                "enter_order": (v["keep_rank"] + 1) if v["keep_rank"] is not None else "",
+                "audit_reason": v["reason"],
+                "source_lineup": v["index"] + 1,
+            }
+            for v, _ in rows
+        ],
+    )
+    return _spreadsheet_csv(
+        csv_text, f"build-audit-{include}-{day}.csv", **{"X-Source-Batch": source_id}
+    )
 
 
 @router.get("/briefs")
