@@ -7836,6 +7836,56 @@ async def main() -> int:
               and any("roster slots" in p for p in _illegal["rejected"][0]["problems"]),
               str(_illegal["rejected"][0]["problems"])[:90])
 
+    # Lineups you have ALREADY ENTERED can hold a bat that is sitting
+    # tonight -- the slate carries a team's confirmed starting nine, so a
+    # lineup built before lineups posted references a player the pool no
+    # longer has. Refusing the whole entry is the wrong answer: it is
+    # live on DraftKings either way, and the useful move is to take it
+    # in, flag the player, and let late swap deal with him.
+    # Stand in for the player he replaces, so the roster stays legal --
+    # the point under test is the bench flag, not slot eligibility.
+    _replaced_id = _e0["players"][0]["id"]
+    _replaced = next(p for p in _pool if p["id"] == _replaced_id)
+    _benched = {**_replaced, "id": None, "name": "Benched Bat", "bench": True}
+    _bench_lookup = {
+        **_lookup,
+        "by_name": {**_lookup["by_name"], "benched bat": _benched},
+        "by_team_name": {
+            **_lookup["by_team_name"],
+            (_benched["team"], "benched bat"): _benched,
+        },
+    }
+    _with_bench = lineup_intake.intake(
+        [{"players": ["Benched Bat"] + [p["name"] for p in _e0["players"]][1:]}],
+        _bench_lookup,
+        source="dk-csv",
+    )
+    check("an entry holding a benched player is ACCEPTED, not rejected -- it exists on "
+          "DraftKings whether this app likes it or not",
+          len(_with_bench["entries"]) == 1 and not _with_bench["rejected"],
+          str(_with_bench["rejected"])[:100])
+    check("...and the benched player is named on the entry, so it can be late-swapped "
+          "rather than silently entered",
+          _with_bench["entries"][0]["non_starters"] == ["Benched Bat"],
+          str(_with_bench["entries"][0]["non_starters"]))
+    check("a normal entry reports no non-starters at all",
+          _from_opt["entries"][0]["non_starters"] == [])
+
+    # Bench players carry no MLB id, so identity cannot key off `id`
+    # alone -- two of them in one lineup would otherwise look like the
+    # same person rostered twice.
+    _b1 = {**_pool[0], "id": None, "dk_id": "b1", "name": "Bench One", "bench": True}
+    _b2 = {**_pool[1], "id": None, "dk_id": "b2", "name": "Bench Two", "bench": True}
+    check("two DIFFERENT players with no MLB id are not mistaken for one player rostered "
+          "twice",
+          lineup_intake._identity(_b1) != lineup_intake._identity(_b2),
+          f"{lineup_intake._identity(_b1)} vs {lineup_intake._identity(_b2)}")
+    check("the same player really rostered twice is still caught",
+          lineup_intake._identity(_b1) == lineup_intake._identity({**_b1, "salary": 1}))
+    check("a player WITH an MLB id still keys off it, so nothing about normal lineups "
+          "changed",
+          lineup_intake._identity(_pool[0]) == ("mlb", _pool[0]["id"]))
+
     # Injection into the contest.
     _injected = _from_opt["entries"]
     _batch = contest.build_contest_lineups(
