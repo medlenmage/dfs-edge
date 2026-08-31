@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { LineupPool } from './LineupPool'
 import { downloadCsv, lineupsToCsv } from '../csv'
 import { localTime } from '../format'
 import { ContestFieldPanel } from './ContestFieldPanel'
@@ -50,7 +51,7 @@ function lineupToPicks(lineup) {
  * Generates one or many optimal DraftKings Classic MLB lineups from
  * whatever salary + projections CSVs are loaded for the date.
  */
-export function LineupsPanel({ date, slate, projectionSource = 'rotowire', onLineups }) {
+export function LineupsPanel({ date, slate, projectionSource = 'rotowire', onPoolChange }) {
   const [state, setState] = useState({ status: 'idle' })
   const [numLineups, setNumLineups] = useState(1)
   const [stackShape, setStackShape] = useState('no stack')
@@ -237,9 +238,6 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire', onLin
       setSelected(0)
       setLateSwapState({ status: 'idle' })
       setState({ status: 'ready', ...result })
-      // Hand the built lineups up so they can be set aside as the
-      // ones you'll actually enter (MyLineupsCard).
-      onLineups?.(result.lineups || [])
     } catch (err) {
       setState({ status: 'error', message: err.message })
     }
@@ -752,10 +750,16 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire', onLin
             </div>
           )}
 
+          {/* Save the keepers, change the locks, solve again. The pool
+              survives across runs -- this run's exposure table below
+              only ever describes this run. */}
+          <LineupPool date={date} lineups={state.lineups} onPoolChange={onPoolChange} />
+
           {state.exposure.length > 0 && (
             <div className="card table-wrap" style={{ marginTop: 16 }}>
               <div className="sub-line" style={{ marginBottom: 8 }}>
                 Exposure across {state.lineups.length} lineup{state.lineups.length > 1 ? 's' : ''}
+                {' '}in THIS run
               </div>
               <table>
                 <thead>

@@ -39,10 +39,9 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
   const [reroll, setReroll] = useState(0)
   const [build, setBuild] = useState({ status: 'idle' })
   const [collapsed, setCollapsed] = useState(false)
-  // Lineups the optimizer built this session, and whether the contest
-  // should be built AROUND the day's set-aside tray rather than
-  // generating the whole field.
-  const [optimizerLineups, setOptimizerLineups] = useState([])
+  // Whether the contest should be built AROUND the day's saved pool
+  // rather than generating the whole field. The pool itself lives in the
+  // optimizer (LineupPool); this side only needs its size.
   const [useMyLineups, setUseMyLineups] = useState(false)
   const [trayCount, setTrayCount] = useState(0)
 
@@ -129,7 +128,7 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
           date={date}
           slate={slate}
           projectionSource={projectionSource}
-          onLineups={setOptimizerLineups}
+          onPoolChange={setTrayCount}
         />
       )}
 
@@ -256,11 +255,7 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
                     )}
                   </div>
 
-                  <MyLineupsCard
-                    date={date}
-                    optimizerLineups={optimizerLineups}
-                    onChange={setTrayCount}
-                  />
+                  <MyLineupsCard date={date} onChange={setTrayCount} />
 
                   {trayCount > 0 && (
                     <div className="field">

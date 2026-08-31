@@ -8,14 +8,19 @@ import { api } from '../api'
  * is the right model for an OPPONENT FIELD but the wrong way to produce
  * the entries you play: it can be steered toward the process rules, not
  * instructed to follow them. The optimizer can be instructed. This card
- * is where optimizer output (or lineups you already built inside
- * DraftKings) gets set aside, so the contest can be built AROUND them --
- * they lead the batch, the generator fills the field behind them, and
- * the simulator, the build audit and the daily brief all read the same
- * batch while still being able to tell yours from the field.
+ * is the contest side of the pool built in the optimizer (LineupPool):
+ * it reports what is in the pool, can pull in lineups you already built
+ * inside DraftKings, and gates the toggle that makes the contest build
+ * AROUND them -- they lead the batch, the generator fills the field
+ * behind them, and the simulator, the build audit and the daily brief
+ * all read the same batch while still telling yours from the field.
+ *
+ * Saving optimizer lineups happens in LineupPool, not here, so there is
+ * exactly one place that does it -- and it is the place where you can
+ * pick WHICH of a run's lineups are worth keeping.
  */
 
-export function MyLineupsCard({ date, optimizerLineups, onChange }) {
+export function MyLineupsCard({ date, onChange }) {
   const [tray, setTray] = useState({ status: 'loading' })
   const [busy, setBusy] = useState(null)
   const [message, setMessage] = useState(null)
@@ -44,26 +49,6 @@ export function MyLineupsCard({ date, optimizerLineups, onChange }) {
       rejected: result.rejected || [],
       note: result.note,
     })
-  }
-
-  async function addOptimizer() {
-    if (!optimizerLineups?.length) return
-    setBusy('optimizer')
-    setMessage(null)
-    try {
-      const lineups = optimizerLineups.map((lu, i) => ({
-        players: Object.values(lu.slots || {})
-          .flat()
-          .map((p) => p.id),
-        label: `optimizer #${i + 1}${lu.stack ? ` (${lu.stack_type} ${lu.stack})` : ''}`,
-      }))
-      report(await api.addMyLineups(date, lineups, { source: 'optimizer' }))
-      await load()
-    } catch (err) {
-      setMessage({ text: err.message, rejected: [] })
-    } finally {
-      setBusy(null)
-    }
   }
 
   async function addFromDk() {
@@ -96,25 +81,15 @@ export function MyLineupsCard({ date, optimizerLineups, onChange }) {
     <div className="field">
       <label>My lineups ({count})</label>
       <div className="sub-line" style={{ marginBottom: 8, fontSize: 12 }}>
-        Lineups you&rsquo;ll actually enter. Build the contest with &ldquo;Use my lineups&rdquo; and
-        these lead the batch while the generator fills the field around them — so the audit and the
-        daily brief work from lineups that <em>follow</em> the process rules instead of ones the
-        generator was steered toward.
+        Lineups you&rsquo;ll actually enter. Build them under <strong>Single lineup</strong> and
+        save the keepers to the pool there — solve, change your locks, solve again, until the pool
+        is the size you want. Then tick &ldquo;Use my lineups&rdquo; below: they lead the batch
+        while the generator fills the field around them, so the audit and the daily brief work from
+        lineups that <em>follow</em> the process rules rather than ones the generator was steered
+        toward.
       </div>
 
       <div className="controls" style={{ gap: 6 }}>
-        <button
-          className="sm"
-          onClick={addOptimizer}
-          disabled={busy || !optimizerLineups?.length}
-          title={
-            optimizerLineups?.length
-              ? `Set aside the ${optimizerLineups.length} lineups currently in Single lineup mode`
-              : 'Build lineups in Single lineup mode first'
-          }
-        >
-          {busy === 'optimizer' ? 'Adding…' : `Add ${optimizerLineups?.length || 0} from optimizer`}
-        </button>
         <button
           className="sm"
           onClick={addFromDk}

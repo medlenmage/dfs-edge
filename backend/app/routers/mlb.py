@@ -1525,13 +1525,23 @@ async def _intake_lookup(day: str, projection_source: str, included_game_pks: li
 
 def _store_my_lineups(day: str, entries: list[dict[str, Any]], *, replace: bool) -> list[dict[str, Any]]:
     """
-    Append to (or replace) the day's tray, dropping exact repeats.
+    Append to (or replace) the day's pool, dropping exact repeats.
+
+    Appending is the point: the intended workflow is to solve a few
+    lineups, change what is locked, solve a few more, and keep going
+    until the pool is the size you want -- so each run ADDS rather than
+    overwriting what came before.
 
     De-duped on the roster itself rather than on the label, because the
-    same ten players arriving twice -- once from the optimizer, once out
-    of a DK entries file you already filled from it -- is one lineup you
-    are entering once, and counting it twice would misstate both the
+    same ten players arriving twice -- from two optimizer runs that
+    happened to converge, or once from the optimizer and again out of a
+    DK entries file you already filled from it -- is one lineup you are
+    entering once, and counting it twice would misstate both the
     portfolio size and its cost.
+
+    Each pooled lineup gets a stable `entry_id` so it can be removed
+    individually later. Ids already present are preserved, so a re-store
+    never invalidates the ones the UI is holding.
     """
     existing = [] if replace else get_my_lineups(day)
     seen = {frozenset(p["id"] for p in e["players"]) for e in existing}
@@ -1541,9 +1551,54 @@ def _store_my_lineups(day: str, entries: list[dict[str, Any]], *, replace: bool)
         if key in seen:
             continue
         seen.add(key)
-        merged.append(e)
+        merged.append({**e, "entry_id": e.get("entry_id") or uuid4().hex[:12]})
+    for e in merged:
+        e.setdefault("entry_id", uuid4().hex[:12])
     cache.put(_my_lineups_key(day), merged, _MY_LINEUPS_TTL)
     return merged
+
+
+def _pool_payload(day: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    The pool plus the numbers you need to decide what to build NEXT.
+
+    Player exposure across the pool is the whole point of that: after a
+    run, the question is which players are already over-represented and
+    which ones to lock into the next set. Answering it means counting
+    across everything pooled so far, which no single optimizer run can
+    do -- each run only knows about its own lineups.
+    """
+    return {
+        "date": day,
+        "count": len(entries),
+        "sources": [
+            {"source": src, "count": n}
+            for src, n in Counter(e.get("source") for e in entries).most_common()
+        ],
+        "stack_shapes": [
+            {"shape": shape or "none", "count": n}
+            for shape, n in Counter(e.get("stack_type") for e in entries).most_common()
+        ],
+        "summary": {
+            "avg_salary_used": round(sum(e["salary_used"] for e in entries) / len(entries))
+            if entries
+            else None,
+            "avg_projected_points": round(
+                sum(e["projected_points"] for e in entries) / len(entries), 2
+            )
+            if entries
+            else None,
+            "avg_total_ownership_pct": round(
+                sum(e["total_ownership_pct"] for e in entries) / len(entries), 1
+            )
+            if entries
+            else None,
+        },
+        # Reuses the contest generator's own exposure report, so the
+        # pool's chalk is measured exactly the way a built contest's is.
+        "exposure": contest.field_exposure(entries, top_n=30) if entries else [],
+        "entries": entries,
+    }
 
 
 @router.get("/my-lineups")
@@ -1559,23 +1614,29 @@ async def list_my_lineups(date: str | None = Query(None)) -> dict[str, Any]:
     from thousands of randomly-constructed opponents.
     """
     day = date or date_cls.today().isoformat()
-    entries = get_my_lineups(day)
-    return {
-        "date": day,
-        "count": len(entries),
-        "sources": [
-            {"source": src, "count": n}
-            for src, n in Counter(e.get("source") for e in entries).most_common()
-        ],
-        "entries": entries,
-    }
+    return _pool_payload(day, get_my_lineups(day))
 
 
 @router.delete("/my-lineups")
-async def clear_my_lineups(date: str | None = Query(None)) -> dict[str, Any]:
+async def clear_my_lineups(
+    date: str | None = Query(None),
+    entry_ids: str | None = Query(
+        None,
+        description=(
+            "Comma-separated entry_ids to drop. Omit to clear the whole pool -- so a "
+            "half-built pool can be pruned without starting over."
+        ),
+    ),
+) -> dict[str, Any]:
+    """Remove specific lineups from the pool, or clear it entirely."""
     day = date or date_cls.today().isoformat()
+    if entry_ids:
+        drop = {e.strip() for e in entry_ids.split(",") if e.strip()}
+        kept = [e for e in get_my_lineups(day) if e.get("entry_id") not in drop]
+        cache.put(_my_lineups_key(day), kept, _MY_LINEUPS_TTL)
+        return _pool_payload(day, kept)
     cache.put(_my_lineups_key(day), [], _MY_LINEUPS_TTL)
-    return {"date": day, "count": 0, "entries": []}
+    return _pool_payload(day, [])
 
 
 @router.post("/my-lineups")
@@ -1614,13 +1675,16 @@ async def add_my_lineups(
         )
     _, lookup = await _intake_lookup(day, projection_source, included_game_pks)
     result = lineup_intake.intake(lineups, lookup, source=source)
+    before = len(get_my_lineups(day)) if not replace else 0
     merged = _store_my_lineups(day, result["entries"], replace=replace)
     return {
-        "date": day,
-        "accepted": len(result["entries"]),
+        **_pool_payload(day, merged),
+        "accepted": len(merged) - before,
+        # Accepted-but-already-pooled: a second run that reproduces a
+        # lineup you already have is normal, and silently reporting it as
+        # added would make the pool look like it grew when it didn't.
+        "duplicates_skipped": len(result["entries"]) - (len(merged) - before),
         "rejected": result["rejected"],
-        "count": len(merged),
-        "entries": merged,
     }
 
 
@@ -1652,14 +1716,14 @@ async def add_my_lineups_from_dk(
     result = lineup_intake.from_dk_entries(
         dk_entries.parse_entries_csv(text), lookup, contest_id=contest_id
     )
+    before = len(get_my_lineups(day)) if not replace else 0
     merged = _store_my_lineups(day, result["entries"], replace=replace)
     return {
-        "date": day,
-        "accepted": len(result["entries"]),
+        **_pool_payload(day, merged),
+        "accepted": len(merged) - before,
+        "duplicates_skipped": len(result["entries"]) - (len(merged) - before),
         "rejected": result["rejected"],
         "note": result.get("note"),
-        "count": len(merged),
-        "entries": merged,
     }
 
 

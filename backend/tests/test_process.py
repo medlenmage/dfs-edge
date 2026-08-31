@@ -490,6 +490,90 @@ async def main() -> int:
         == set(csv.DictReader(io.StringIO(lineup_export.lineups_to_csv(wide[:2], extra_columns=None))).fieldnames),
     )
 
+    print("\n== lineup pool (accumulate across optimizer runs)")
+    from app.routers import mlb as mlb_router
+
+    _POOL_DAY = "2026-08-30"
+    cache.clear("my_lineups:")
+
+    def _pool_entry(name, ids):
+        """A contest-entry-shaped lineup, which is all the pool stores."""
+        return {
+            "salary_used": 49800,
+            "stack_type": "5-3",
+            "stack": "AAA,BBB",
+            "projected_points": 110.0,
+            "total_ownership_pct": 120.0,
+            "duplication_risk": -30.0,
+            "source": "optimizer",
+            "label": name,
+            "players": [
+                {"id": i, "name": f"P{i}", "team": "AAA", "salary": 4980,
+                 "projected_fpts": 11.0, "ownership_pct": 12.0}
+                for i in ids
+            ],
+        }
+
+    _run1 = [_pool_entry("a", range(10)), _pool_entry("b", range(1, 11))]
+    _stored = mlb_router._store_my_lineups(_POOL_DAY, _run1, replace=True)
+    check("a first optimizer run seeds the pool",
+          len(_stored) == 2, str(len(_stored)))
+    check("every pooled lineup gets a stable id, so it can be pruned individually later",
+          all(e.get("entry_id") for e in _stored)
+          and len({e["entry_id"] for e in _stored}) == 2)
+    _ids_after_first = [e["entry_id"] for e in _stored]
+
+    # The whole point: a second run ADDS to the pool rather than
+    # replacing it -- solve, change the locks, solve again.
+    _run2 = [_pool_entry("c", range(5, 15))]
+    _stored = mlb_router._store_my_lineups(_POOL_DAY, _run2, replace=False)
+    check("a second run ADDS to the pool instead of replacing it -- the whole point of "
+          "building a set, changing locks, and building another",
+          len(_stored) == 3, str(len(_stored)))
+    check("and the lineups already pooled keep the ids the UI is holding",
+          [e["entry_id"] for e in _stored][:2] == _ids_after_first)
+
+    # Two runs under different settings routinely converge on the same
+    # lineup; counting it twice would misstate both the portfolio size
+    # and what it costs to enter.
+    _stored = mlb_router._store_my_lineups(_POOL_DAY, list(_run1), replace=False)
+    check("re-posting a lineup already in the pool is a no-op, not a duplicate entry",
+          len(_stored) == 3, str(len(_stored)))
+    _reordered = [{**_run1[0], "players": list(reversed(_run1[0]["players"]))}]
+    _stored = mlb_router._store_my_lineups(_POOL_DAY, _reordered, replace=False)
+    check("the same ten players in a different roster order is still the same lineup",
+          len(_stored) == 3, str(len(_stored)))
+
+    _payload = mlb_router._pool_payload(_POOL_DAY, _stored)
+    check("the pool reports exposure across EVERYTHING pooled so far -- the number that "
+          "tells you what to lock or exclude on the next run",
+          _payload["exposure"] and _payload["exposure"][0]["count"] >= 2
+          and all(0 < e["pct"] <= 100 for e in _payload["exposure"]),
+          str([(e["name"], e["pct"]) for e in _payload["exposure"][:3]]))
+    check("a player in every pooled lineup reads 100%, one in a single lineup does not",
+          max(e["pct"] for e in _payload["exposure"]) == 100.0
+          and min(e["pct"] for e in _payload["exposure"]) < 100.0,
+          f"{max(e['pct'] for e in _payload['exposure'])} / "
+          f"{min(e['pct'] for e in _payload['exposure'])}")
+    check("and it summarises the pool the way the contest summarises a batch",
+          _payload["summary"]["avg_salary_used"] == 49800
+          and _payload["stack_shapes"] == [{"shape": "5-3", "count": 3}],
+          str(_payload["stack_shapes"]))
+
+    _keep = [e for e in _stored if e["entry_id"] != _ids_after_first[0]]
+    _pruned = mlb_router._pool_payload(_POOL_DAY, _keep)
+    check("pruning one lineup leaves the rest and recomputes exposure over what's left, "
+          "so a half-built pool can be fixed without starting over",
+          _pruned["count"] == 2
+          and all(e["entry_id"] != _ids_after_first[0] for e in _pruned["entries"])
+          and _pruned["exposure"][0]["count"] <= 2)
+
+    _replaced = mlb_router._store_my_lineups(_POOL_DAY, _run2, replace=True)
+    check("replace=True still starts over, for when the pool is simply wrong",
+          len(_replaced) == 1)
+    cache.clear("my_lineups:")
+
+
     print("\n== briefs: batch pointer")
     briefs.remember_latest_batch("2026-08-30", "abc123", [good1, good2], source="build")
     latest = briefs.latest_batch("2026-08-30")
