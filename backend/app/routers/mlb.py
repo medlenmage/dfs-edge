@@ -1714,7 +1714,12 @@ async def add_my_lineups_from_dk(
         )
     _, lookup = await _intake_lookup(day, projection_source, None)
     result = lineup_intake.from_dk_entries(
-        dk_entries.parse_entries_csv(text), lookup, contest_id=contest_id
+        dk_entries.parse_entries_csv(text),
+        lookup,
+        contest_id=contest_id,
+        # The file's own player pool -- the only authority on what its
+        # roster-cell ids mean. See from_dk_entries' docstring.
+        file_pool=dk_entries.pool_lookup(dk_entries.parse_player_pool(text)) or None,
     )
     before = len(get_my_lineups(day)) if not replace else 0
     merged = _store_my_lineups(day, result["entries"], replace=replace)

@@ -6592,6 +6592,71 @@ async def main() -> int:
     except dk_entry_manager.EntryManagerError:
         check("fill_entries raises for a contest_id with no rows in the file at all", True)
 
+    # DraftKings writes a roster cell two different ways, and both are
+    # real: a fresh entries EXPORT holds the bare numeric id, while a
+    # re-downloaded (or app-filled) file holds "Player Name (id)".
+    # Reading only the second made every real export parse as a file of
+    # blank reservations -- exactly how it was reported.
+    _bare_csv = "\n".join(
+        [
+            "Entry ID,Contest Name,Contest ID,Entry Fee,P,P,C,1B,2B,3B,SS,OF,OF,OF,,Instructions",
+            "77001,Bare GPP,7000009,$5,93001,93002,93003,93004,93005,93006,93007,93008,93009,93010,,x",
+            "77002,Bare GPP,7000009,$5,,,,,,,,,,,,y",
+            ",,,,,,,,,,,,,,,Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame",
+            ",,,,,,,,,,,,,,,SP,Ace Bare (93001),Ace Bare,93001,P,10000,AAA@BBB,AAA,20.0",
+        ]
+    )
+    _bare = dk_entries.parse_entries_csv(_bare_csv)
+    check("a bare numeric roster cell is read as a real pick -- a fresh DK export writes "
+          "the id with no name around it",
+          len(_bare) == 2 and _bare[0]["picks"][0] == "93001"
+          and all(p for p in _bare[0]["picks"]),
+          str(_bare[0]["picks"][:3]))
+    check("...and a genuinely blank reservation row is still blank, not invented",
+          all(p is None for p in _bare[1]["picks"]))
+    check("a cell that is neither an id nor Name (id) is NOT guessed at -- rostering the "
+          "wrong player silently is worse than reporting a gap",
+          dk_entries.parse_entries_csv(
+              _bare_csv.replace(",93003,", ",Some Guy,")
+          )[0]["picks"][2] is None)
+
+    # The entries file carries its own player pool, and it is the only
+    # authority on which ids that draft group accepts: a roster cell
+    # holds a per-draft-group DRAFTABLE id, which is a different number
+    # from the stable PLAYER id a salary CSV's ID column can carry.
+    # Confirmed against a real export where the two spaces did not
+    # overlap at all.
+    _file_pool = dk_entries.parse_player_pool(_bare_csv)
+    check("the player pool embedded in an entries file is parsed, located by its own "
+          "header rather than a fixed column offset",
+          len(_file_pool) == 1 and _file_pool[0]["dk_id"] == "93001"
+          and _file_pool[0]["name"] == "Ace Bare" and _file_pool[0]["team"] == "AAA",
+          str(_file_pool))
+    check("a file with no embedded pool returns nothing rather than raising -- older "
+          "exports and hand-made templates don't carry one",
+          dk_entries.parse_player_pool("Entry ID,Contest Name\n1,x") == [])
+    _lk = dk_entries.pool_lookup(_file_pool)
+    check("the pool indexes by draftable id and by name",
+          _lk["by_dk_id"]["93001"]["name"] == "Ace Bare"
+          and _lk["by_name"]["ace bare"]["dk_id"] == "93001")
+
+    # And the filler must WRITE the file's own ids. Writing a salary
+    # file's id where a draftable id belongs produces a file DK rejects.
+    # The lineup carries a DIFFERENT id (99999) for the same player, which
+    # is the whole point: the file's pool has to win.
+    _fill_lineup = fake_lineup(
+        ["99999"] + ["93002"] * 9,
+        ["Ace Bare"] + [f"Other{i}" for i in range(9)],
+    )
+    # only_blank defaults to True, so it fills the RESERVATION row (77002),
+    # leaving the already-built row alone.
+    _filled_csv, _ = dk_entry_manager.fill_entries(_bare_csv, "7000009", [_fill_lineup])
+    _first_cell = list(csv.reader(io.StringIO(_filled_csv)))[2][4]
+    check("fill_entries writes the id from the FILE's own player pool, not the id the "
+          "lineup happens to be carrying -- the two are different number spaces, and "
+          "using the wrong one makes DraftKings reject the reupload",
+          _first_cell == "Ace Bare (93001)", _first_cell)
+
     lineup_missing_dk_id = fake_lineup(
         ["93001", "93002", "93003", "93004", "93005", "93006", "93007", "93008", "", "93010"],
     )

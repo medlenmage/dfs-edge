@@ -13,7 +13,7 @@ each row, which this module never touches -- survives untouched in the
 output, byte-for-byte except the slot cells actually filled.
 
 DK's reupload format expects each filled slot cell as "Player Name
-(dk_id)" -- the exact same format dk_entries.py's own _ID_RE already
+(draftable id)" -- the exact same format dk_entries.py's own _ID_RE already
 parses back OUT of an already-filled cell. This only works for a
 player whose real DK numeric id is known, which requires a DK salary
 CSV to have been uploaded for the slate (optimizer.build_player_pool()/
@@ -28,7 +28,9 @@ import csv
 import io
 from typing import Any
 
+from app.services import dk_entries
 from app.services.lineup_export import players_in_slot_order
+from app.services.player_match import normalize_name
 from app.services.optimizer import ROSTER_SIZE
 
 
@@ -108,16 +110,42 @@ def fill_entries(
                 f"No entries found for contest_id '{contest_id}' in that file."
             )
 
-    missing_dk_id: list[str] = []
+    # The id to write is the one THIS FILE's draft group uses, and the
+    # file carries its own player pool saying what those are. That is
+    # not the same number as the `dk_id` a lineup is carrying from an
+    # uploaded salary CSV: a roster cell holds a per-draft-group
+    # DRAFTABLE id (43983736), while a salary file's ID column can hold
+    # DraftKings' stable PLAYER id (110839). Writing the second where
+    # the first belongs produces a file DraftKings rejects -- confirmed
+    # against a real export where the two id spaces did not overlap at
+    # all. So the file's own pool wins, matched by name, and the
+    # lineup's dk_id is only the fallback for a file that carries no
+    # pool (older exports, hand-made templates).
+    pool = dk_entries.pool_lookup(dk_entries.parse_player_pool(text))
+    by_name = pool["by_name"]
+
+    def _cell(player: dict[str, Any]) -> str | None:
+        row = by_name.get(normalize_name(player.get("name") or ""))
+        if row:
+            return f"{row['name']} ({row['dk_id']})"
+        if player.get("dk_id"):
+            return f"{player['name']} ({player['dk_id']})"
+        return None
+
+    unresolvable: list[str] = []
     for lu in lineups[: len(target_row_idxs)]:
         for p in players_in_slot_order(lu):
-            if not p.get("dk_id"):
-                missing_dk_id.append(p.get("name") or "unknown player")
-    if missing_dk_id:
+            if _cell(p) is None:
+                unresolvable.append(p.get("name") or "unknown player")
+    if unresolvable:
         raise EntryManagerError(
-            "Can't fill real DK entries -- these players have no DK id on file "
-            "(upload a DraftKings salary CSV for this slate first, not just "
-            f"RotoWire projections): {', '.join(sorted(set(missing_dk_id)))}."
+            "Can't fill real DK entries -- no DK id for these players "
+            + (
+                "in that entries file's own player pool"
+                if by_name
+                else "(upload a DraftKings salary CSV for this slate, not just RotoWire projections)"
+            )
+            + f": {', '.join(sorted(set(unresolvable)))}."
         )
 
     entry_ids_filled: list[str] = []
@@ -127,7 +155,7 @@ def fill_entries(
         while len(row) < slot_start + ROSTER_SIZE:
             row.append("")
         for offset, p in enumerate(players_in_slot_order(lineup)):
-            row[slot_start + offset] = f"{p['name']} ({p['dk_id']})"
+            row[slot_start + offset] = _cell(p)
         entry_ids_filled.append(row[entry_id_i])
 
     buf = io.StringIO()
