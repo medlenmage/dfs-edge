@@ -6648,6 +6648,25 @@ async def main() -> int:
               _bare_csv.replace(",93003,", ",Some Guy,")
           )[0]["picks"][2] is None)
 
+    # DraftKings appends "(LOCKED)" to a roster cell whose game has
+    # already started, which puts the id in the MIDDLE of the string.
+    # The id-at-the-end match then failed and the cell read as EMPTY --
+    # silently turning a live, locked roster spot into a blank one and
+    # inviting a swap DraftKings would reject. Found on a real
+    # mid-slate export.
+    _locked_csv = _bare_csv.replace(
+        ",93001,", ",Ace Bare (93001) (LOCKED),"
+    ).replace(",93002,", ",Bench Guy (93002),")
+    _locked = dk_entries.parse_entries_csv(_locked_csv)
+    check("a roster cell marked (LOCKED) is still read as a real pick, not as an empty "
+          "reservation -- the id sits mid-string once DK appends the marker",
+          _locked[0]["picks"][0] == "93001", str(_locked[0]["picks"][:3]))
+    check("...and the plain 'Name (id)' cell beside it is unaffected",
+          _locked[0]["picks"][1] == "93002")
+    check("a lineup of locked cells is still a FILLED entry, so nothing treats it as a "
+          "blank reservation to write over",
+          all(_locked[0]["picks"]))
+
     # The entries file carries its own player pool, and it is the only
     # authority on which ids that draft group accepts: a roster cell
     # holds a per-draft-group DRAFTABLE id, which is a different number
