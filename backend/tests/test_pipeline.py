@@ -4027,6 +4027,31 @@ async def main() -> int:
     consistent_pool = await variance.player_outcome_pool(90001, "OF", VARIANCE_SEASON, seed=1)
     boom_bust_pool = await variance.player_outcome_pool(90002, "OF", VARIANCE_SEASON, seed=1)
 
+    # A bench player reconstructed for an already-entered lineup carries
+    # no MLB id. Passing that id straight through reached MLB Stats API
+    # as `None`, came back HTTP 400, and surfaced as a 500 on the whole
+    # simulation -- so the guard lives at the one place an id becomes a
+    # network call, and it must not make one at all.
+    _net_calls = {"n": 0}
+    _real_log = mlb.get_player_game_log
+
+    async def _counting_game_log(player_id, season, group="hitting"):
+        _net_calls["n"] += 1
+        return await _real_log(player_id, season, group=group)
+
+    mlb.get_player_game_log = _counting_game_log
+    try:
+        _no_id_pool = await variance.player_outcome_pool(None, "OF", VARIANCE_SEASON, seed=1)
+    finally:
+        mlb.get_player_game_log = _real_log
+    check("a player with no MLB id yields a pool without ever calling the stats API -- "
+          "a null id there is an upstream HTTP 400 and a 500 on the whole simulation",
+          _net_calls["n"] == 0 and _no_id_pool == [0.0],
+          f"{_net_calls['n']} calls, pool {_no_id_pool[:3]}")
+    check("...and he simulates as NOT PLAYING rather than as an average player at his "
+          "position, which is the one clearly wrong answer for a bat who is benched",
+          sum(_no_id_pool) == 0.0)
+
     check("player_outcome_pool returns POOL_SIZE values",
           len(consistent_pool) == variance.POOL_SIZE, str(len(consistent_pool)))
     check("both pools have roughly the same mean (same underlying season average)",

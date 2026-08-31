@@ -131,6 +131,23 @@ async def player_outcome_pool(
 
     async def _load() -> list[float]:
         kind = player_kind(position)
+        if player_id is None:
+            # A player with no MLB id is one this app could only
+            # reconstruct from the DK salary and projections uploads --
+            # in practice, a bat on an ALREADY-ENTERED lineup who is not
+            # in a confirmed lineup tonight (services/lineup_intake.py's
+            # bench tier). He is not starting, so he is simulated as not
+            # playing rather than as an average player at his position:
+            # drawing from the shared position pool would have him score
+            # like a starter, which is the one clearly wrong answer here.
+            # It is also why a lineup holding one simulates badly, which
+            # is the truth about that lineup.
+            #
+            # Guarding here rather than at the call site because this is
+            # the single place a player id becomes a network request --
+            # without it, `None` reached MLB Stats API and came back
+            # HTTP 400, surfacing as a 500 on the whole simulation.
+            return [0.0]
         group = "pitching" if kind == "pitcher" else "hitting"
         game_log = await mlb.get_player_game_log(player_id, season, group=group)
         if as_of_date is not None:

@@ -14,11 +14,12 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import cache
-from app.clients.http import close_client
+from app.clients.http import ApiError, close_client
 from app.config import get_settings
 from app.routers import mlb, nfl, season, system
 from app.services import briefs, lineup_watch
@@ -73,6 +74,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(ApiError)
+async def _upstream_api_error(request: Request, exc: ApiError) -> JSONResponse:
+    """
+    An upstream data source failing is not an internal server error, and
+    reporting it as one throws away the only useful part: which source
+    failed and what it said. A bare "Internal Server Error" on a
+    simulation cost real debugging time -- the actual cause was MLB Stats
+    API rejecting a null player id, which the response never mentioned.
+    """
+    log.warning("Upstream %s failed on %s: %s", exc.source or "API", request.url.path, exc)
+    return JSONResponse(
+        status_code=502,
+        content={
+            "detail": f"{exc.source or 'An upstream API'} failed: {exc}",
+            "source": exc.source,
+            "upstream_status": exc.status,
+        },
+    )
+
 
 app.include_router(system.router)
 app.include_router(mlb.router)
