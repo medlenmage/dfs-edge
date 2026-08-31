@@ -576,4 +576,31 @@ export const api = {
     }),
 
   nflContestEntriesCsvUrl: (batchId) => `${BASE}/api/nfl/contest-entries/${batchId}/csv`,
+
+  // ---------------------------------------------------------- season-long
+  // Sleeper needs no key and no login, so these are all plain GETs --
+  // a username is enough to read a public account's leagues and drafts.
+  seasonState: () => request('/api/season/state'),
+  seasonUser: (username, season) =>
+    request(`/api/season/user/${encodeURIComponent(username)}${season ? `?season=${season}` : ''}`),
+  seasonBoard: (leagueId, force = false) =>
+    request(
+      `/api/season/board?${new URLSearchParams({
+        ...(leagueId ? { league_id: leagueId } : {}),
+        ...(force ? { force: 'true' } : {}),
+      })}`,
+    ),
+  seasonLeague: (leagueId, userId) =>
+    request(
+      `/api/season/league/${leagueId}?${new URLSearchParams(userId ? { user_id: userId } : {})}`,
+    ),
+  seasonDraft: (draftId, userId, leagueId) =>
+    request(
+      `/api/season/draft/${draftId}?${new URLSearchParams({
+        ...(userId ? { user_id: userId } : {}),
+        ...(leagueId ? { league_id: leagueId } : {}),
+      })}`,
+    ),
+  seasonBestBall: (force = false) =>
+    request(`/api/season/bestball${force ? '?force=true' : ''}`),
 }

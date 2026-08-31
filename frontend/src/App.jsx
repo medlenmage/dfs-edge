@@ -10,6 +10,7 @@ import { BuildWorkspace } from './components/BuildWorkspace'
 import { ResultsPanel } from './components/ResultsPanel'
 import { BriefsPanel } from './components/BriefsPanel'
 import { NflPanel } from './components/NflPanel'
+import { SeasonPanel } from './components/SeasonPanel'
 import { ScoreLegend } from './components/ScoreMeter'
 import { DkSlatePicker } from './components/DkSlatePicker'
 
@@ -55,6 +56,27 @@ const NFL_NAV_GROUPS = [
       { id: 'lineups', label: 'Lineup optimizer' },
       { id: 'contest', label: 'Contest generator' },
       { id: 'simulator', label: 'Simulator' },
+    ],
+  },
+]
+
+// Season-long NFL is a genuinely separate product from the DFS side --
+// different question (whole-season value over replacement, not today's
+// value per dollar), different data, different cadence -- so it gets its
+// own top-level section rather than more tabs inside NFL.
+const SEASON_NAV_GROUPS = [
+  {
+    group: 'Research',
+    items: [
+      { id: 'board', label: 'Draft board' },
+      { id: 'league', label: 'My league' },
+    ],
+  },
+  {
+    group: 'Draft',
+    items: [
+      { id: 'draft', label: 'Live draft assistant' },
+      { id: 'bestball', label: 'Best ball' },
     ],
   },
 ]
@@ -122,6 +144,7 @@ function today() {
 
 export default function App() {
   const [sport, setSport] = useState('mlb')
+  const [seasonTab, setSeasonTab] = useState('board')
   const [date, setDate] = useState(today())
   const [tab, setTab] = useState('slate')
   const [slateTab, setSlateTab] = useState('stacks')
@@ -310,6 +333,15 @@ export default function App() {
   const activeNav = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === tab)
   const heading = VIEW_HEADINGS[tab]
 
+  // One rail, three sections. Each owns its own nav map and its own
+  // selected view, so switching sections returns you to where you were
+  // rather than resetting.
+  const navGroups =
+    sport === 'mlb' ? NAV_GROUPS : sport === 'nfl' ? NFL_NAV_GROUPS : SEASON_NAV_GROUPS
+  const navActive = sport === 'mlb' ? tab : sport === 'nfl' ? nflTab : seasonTab
+  const navSelect =
+    sport === 'mlb' ? setTab : sport === 'nfl' ? setNflTab : setSeasonTab
+
   function stepDate(days) {
     const d = new Date(`${date}T12:00:00`)
     d.setDate(d.getDate() + days)
@@ -332,19 +364,26 @@ export default function App() {
           <button className={sport === 'nfl' ? 'on' : ''} onClick={() => setSport('nfl')}>
             NFL
           </button>
+          <button
+            className={sport === 'season' ? 'on' : ''}
+            onClick={() => setSport('season')}
+            title="Season-long NFL: leagues, drafts and best ball"
+          >
+            Season
+          </button>
         </div>
 
-        {(sport === 'mlb' ? NAV_GROUPS : NFL_NAV_GROUPS).map((g) => (
+        {navGroups.map((g) => (
           <div key={g.group}>
             <div className="group">{g.group}</div>
             <nav>
               {g.items.map((item) => {
-                const active = sport === 'mlb' ? tab === item.id : nflTab === item.id
+                const active = navActive === item.id
                 return (
                   <button
                     key={item.id}
                     className={active ? 'on' : ''}
-                    onClick={() => (sport === 'mlb' ? setTab(item.id) : setNflTab(item.id))}
+                    onClick={() => navSelect(item.id)}
                   >
                     {item.label}
                     {sport === 'mlb' && item.id === 'slate' && summary && (
@@ -523,6 +562,8 @@ export default function App() {
 
         <div className="content">
       {sport === 'nfl' && <NflPanel tab={nflTab} onTabChange={setNflTab} />}
+
+      {sport === 'season' && <SeasonPanel tab={seasonTab} onTabChange={setSeasonTab} />}
 
       {sport === 'mlb' && (
         <>
