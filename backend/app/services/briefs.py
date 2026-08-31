@@ -213,7 +213,12 @@ def _local(dt: datetime | None, tz: ZoneInfo) -> str:
 def _compact_for_brief(slate: dict[str, Any]) -> dict[str, Any]:
     """analysis._compact_slate() plus the pieces the briefs argue
     from that it drops: pitchers ranked by edge with ownership, and
-    each side's open->live implied runs."""
+    each side's open->live implied runs.
+
+    Both halves filter to the DK slate being played -- _compact_slate
+    does it for the games block, the loop below for these additions.
+    They have to agree: when only this half filtered, briefs ranked
+    environments and named traps from games that weren't on the slate."""
     compact = _compact_slate(slate, top_n=6)
     pitchers = []
     implied = []

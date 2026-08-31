@@ -121,9 +121,36 @@ def _compact_slate(slate: dict[str, Any], top_n: int = 9) -> dict[str, Any]:
     The full slate object with every roster player and every component is
     enormous. We keep the top N hitters per team and drop the verbose
     component internals, keeping just the human-readable 'detail' strings.
+
+    ONLY the games on the DraftKings slate being played are included.
+    Every consumer of this function is a Claude prompt about lineups the
+    user is going to enter, and a player in a game that isn't on the
+    draft group cannot be rostered -- so an off-slate game is not extra
+    context, it is a trap. This was a real, observed failure: on a
+    12-game day with a 7-game DK slate, a brief ranked SD @ CIN as the
+    second-best environment and named an Atlanta hitter as the day's
+    trap, none of which were rosterable. It was subtle because the
+    briefs' OWN additions (pitcher rankings, implied-run lists) filtered
+    correctly while this shared block did not, so the prompt disagreed
+    with itself.
+
+    `in_slate` is None, not False, when no DK slate has been selected --
+    then nothing is filtered and every game is included, which is the
+    right answer for a day with no draft group loaded.
     """
+    all_games = slate.get("games") or []
+    on_slate = [g for g in all_games if g.get("in_slate") is not False]
+    # If the DK slate mapped to nothing at all -- a draft group whose
+    # game_pks didn't match any of today's games -- filtering would hand
+    # Claude an empty prompt, which is far worse than an unfiltered one.
+    # Fall back to every game and say the mapping failed.
+    mapping_failed = bool(all_games) and not on_slate
+    if mapping_failed:
+        on_slate = all_games
+    off_slate = len(all_games) - len(on_slate)
+
     games = []
-    for g in slate.get("games") or []:
+    for g in on_slate:
         entry: dict[str, Any] = {
             "matchup": f"{g['away']['name']} @ {g['home']['name']}",
             "time_utc": g.get("game_time_utc"),
@@ -205,7 +232,23 @@ def _compact_slate(slate: dict[str, Any], top_n: int = 9) -> dict[str, Any]:
             }
         games.append(entry)
 
-    return {"date": slate.get("date"), "games": games}
+    out = {"date": slate.get("date"), "games": games}
+    if mapping_failed:
+        out["note"] = (
+            "WARNING: none of today's games matched the loaded DraftKings slate, so every MLB "
+            "game is listed below and some of them may not be rosterable. Treat the slate "
+            "membership as unknown and say so rather than assuming."
+        )
+    elif off_slate:
+        # Stated rather than silently dropped, so a reader of the prompt
+        # can tell the difference between "this game doesn't exist" and
+        # "this game isn't on your slate".
+        out["note"] = (
+            f"Only the {len(games)} games on the DraftKings slate being played are listed. "
+            f"{off_slate} other MLB game(s) today are NOT on this slate -- their players "
+            "cannot be rostered, so do not recommend or reference them."
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
