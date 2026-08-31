@@ -36,6 +36,7 @@ import logging
 from datetime import date as date_cls
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from app import cache, history_db
@@ -108,10 +109,10 @@ SLATE DATA (current):
 Write the brief in this structure:
 
 ## Verdict
-One paragraph. Is the batch ready to enter? If not, what has to change first?
+One paragraph. The audit has already SELECTED a portfolio -- the entries listed under "Portfolio to enter". Say whether that selection is worth entering as it stands, and if not, what has to change first. Do not re-derive the selection; argue with it.
 
 ## Fix before entering
-A numbered list of specific actions: which entries to cut, which pitcher to remove, which stack to reweight, which hitter batting 7th to swap for the 2-hole bat on the same team. Reference entry numbers from the audit where possible.
+A numbered list of specific actions on the SELECTED portfolio: which of its entries to drop, which pitcher to remove from the core, which stack to reweight, which hitter batting 7th to swap for the 2-hole bat on the same team. Reference the entry numbers the audit prints. If the audit says the selection misses a rule, lead with that.
 
 ## What moved
 Scratches, lineup confirmations that changed a stack's value, line movement. Two to five bullets.
@@ -343,6 +344,32 @@ def _changes_block(day: str, slate: dict[str, Any], morning: dict[str, Any] | No
     return "\n".join(lines) or "Nothing notable."
 
 
+# The audited portfolio is cached under the same key shape every other
+# batch uses (routers/mlb.py's `contest_batch:{id}`), so the CSV
+# download and the DraftKings entry filler work on it with no special
+# case for "this batch came out of an audit". One hour matches the
+# generator's own batches -- long enough to act on before lock, short
+# enough that yesterday's portfolio can't be filled into today's
+# template by accident.
+_SELECTION_TTL = 3600
+
+
+def _cache_selection(
+    day: str, entries: list[dict[str, Any]], audit: dict[str, Any] | None
+) -> str | None:
+    """Store the audit's chosen portfolio as its own batch and return
+    its id, so the pre-lock brief hands over something enterable rather
+    than only something readable."""
+    indices = ((audit or {}).get("selection") or {}).get("indices") or []
+    kept = [entries[i] for i in indices if i < len(entries)]
+    if not kept:
+        return None
+    batch_id = uuid4().hex
+    cache.put(f"contest_batch:{batch_id}", {"entries": kept, "results": None}, _SELECTION_TTL)
+    cache.put(f"contest_batch_day:{batch_id}", day, _SELECTION_TTL)
+    return batch_id
+
+
 async def run_prelock(day: str | None = None, *, force: bool = False, target_count: int | None = None) -> dict[str, Any]:
     settings = get_settings()
     tz = ZoneInfo(settings.brief_timezone)
@@ -360,12 +387,14 @@ async def run_prelock(day: str | None = None, *, force: bool = False, target_cou
     morning_text = (morning or {}).get("text") or "(no morning brief was generated today)"
 
     batch = latest_batch(day)
+    keep_batch_id = None
     if batch and batch.get("entries"):
         audit = build_audit.audit_batch(batch["entries"], slate, target_count=target_count)
         audit_block = (
             f"Batch {batch['batch_id']} from the {batch['source']} step ({batch['total_entries']} entries, "
             f"first {len(batch['entries'])} audited).\n" + build_audit.audit_to_markdown(audit)
         )
+        keep_batch_id = _cache_selection(day, batch["entries"], audit)
     else:
         audit = None
         audit_block = "No contest batch has been built for today. The generator hasn't been run, or it was run before the backend last restarted."
@@ -388,8 +417,16 @@ async def run_prelock(day: str | None = None, *, force: bool = False, target_cou
         "lock_time_utc": lock.isoformat() if lock else None,
         "slate_label": (slate_meta or {}).get("label"),
         "lineups_confirmed": compact.get("lineups_confirmed"),
-        "audit": audit,
+        # Trimmed: a brief is stored for two weeks, and the full cut
+        # list of a big batch is megabytes of JSON nobody reads back.
+        # The markdown above (already in the prompt) and the CSV export
+        # are where the complete record lives.
+        "audit": build_audit.trim_for_response(audit) if audit else None,
+        "keep_entries": ((audit or {}).get("selection") or {}).get("indices")
+        and [batch["entries"][i] for i in audit["selection"]["indices"] if i < len(batch["entries"])]
+        or None,
         "batch_id": (batch or {}).get("batch_id"),
+        "keep_batch_id": keep_batch_id,
         **result,
     }
     _store(day, PRELOCK, payload)

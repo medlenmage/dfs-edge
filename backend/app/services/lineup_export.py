@@ -111,6 +111,7 @@ def lineups_to_csv(
     lineups: list[dict[str, Any]],
     *,
     results: list[dict[str, Any]] | None = None,
+    extra_columns: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Serialize a batch of lineups/entries to CSV text, one row each.
@@ -124,6 +125,14 @@ def lineups_to_csv(
     row order here is whatever order `lineups`/`results` are already
     in, so a caller that wants a particular sort (e.g. highest ROI
     first) should sort before calling this.
+
+    `extra_columns` is the same idea for anything computed outside this
+    module -- also index-aligned, one dict per lineup, its keys becoming
+    columns appended after the standard ones. The build audit uses it to
+    carry each lineup's verdict, the order to enter it in, and the
+    reason, so the exported file answers "what did it cut, and why"
+    without a second lookup. Keys are taken from the first row, so every
+    dict should carry the same keys.
     """
     buf = io.StringIO()
     fieldnames = [
@@ -135,6 +144,8 @@ def lineups_to_csv(
     simulated = bool(results) and "cash_probability_pct" in results[0]
     if results is not None:
         fieldnames += _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS
+    extra_fields = list(extra_columns[0]) if extra_columns else []
+    fieldnames += extra_fields
 
     writer = csv.DictWriter(buf, fieldnames=fieldnames)
     writer.writeheader()
@@ -166,6 +177,10 @@ def lineups_to_csv(
             r = results[i]
             for field in _SIMULATED_RESULT_FIELDS if simulated else _DETERMINISTIC_RESULT_FIELDS:
                 row[field] = r.get(field)
+        if extra_fields:
+            extra = extra_columns[i] if i < len(extra_columns) else {}
+            for field in extra_fields:
+                row[field] = extra.get(field)
         writer.writerow(row)
 
     return buf.getvalue()
