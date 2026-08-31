@@ -518,7 +518,40 @@ _OPPONENT_PITCHER_CHALK_WEIGHT = 0.25
 # past the sweep grid's edge to confirm it turns (stack MAE bottoms at
 # weight ~4.0-4.5 then rises); 4.0/1.4 sits at the balance point
 # rather than either metric's argmin.
-_SOFTMAX_TEMPERATURE = 1.4
+# RE-SWEPT (2026-08-31) against the full archive, now 19 real
+# contests / 13 dates rather than the 4 slates the 1.4 above was fitted
+# on. Measured on the LIVE pipeline (build_slate with include_inhouse),
+# not the Supabase reconstruction -- the archive has no historical Vegas
+# implied runs, which neutralises the team-stack layer, this module's
+# heaviest signal at weight 4.0, and sweeping a parameter with its
+# biggest input dead fits the wrong optimum entirely (the same dates
+# score rho 0.36-0.43 handicapped vs 0.54-0.75 with the layer live).
+#
+#  temp    MAE   chalk MAE   pred on chalk   bias on >=20% owned
+#  1.40    3.18     10.93        15.4%            -11.9
+#  1.10    3.31     10.26        18.0%             -9.5   <- chosen
+#  0.90    3.55     10.78        20.6%             -7.0
+#  0.75    3.83     11.96        23.3%             -4.3
+#  0.60    4.22     13.99        27.1%             -0.6
+#  0.50    4.61     16.51        30.3%             +2.5
+#  (real ownership on those top-30 chalk players: 25.7%)
+#
+# CHALK MAE is the metric that decides whether a lineup is genuinely
+# contrarian, and it bottoms at 1.10 -- so that is the pick. Overall
+# MAE is 4% worse there, which is the right trade: overall MAE is
+# dominated by the hundreds of sub-1%-owned players where a
+# point-and-a-half of error changes no decision, while the chalk is
+# where being wrong actually costs entries.
+#
+# Note what the rest of the curve says, because it is the more
+# important finding: the chalk bias only reaches zero around temp 0.60,
+# and by then chalk MAE has got 28% WORSE and the max prediction has
+# run to 81%. Sharpening amplifies whoever the model already thinks is
+# top, so it only helps while that ordering is right. The residual
+# under-calling of extreme chalk is therefore a RANKING limitation, not
+# a spread one, and no temperature fixes it -- see the README entry for
+# what would.
+_SOFTMAX_TEMPERATURE = 1.1
 
 
 def _percentiles(values: dict[str, float]) -> dict[str, float]:
