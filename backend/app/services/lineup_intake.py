@@ -48,7 +48,7 @@ from app.services.optimizer import (
     SLOT_TYPES,
     build_player_pool,
 )
-from app.services.player_match import normalize_name
+from app.services.player_match import normalize_name, normalize_team
 
 log = logging.getLogger(__name__)
 
@@ -71,10 +71,23 @@ def build_lookup(
     included_game_pks: list[int] | None = None,
 ) -> dict[str, Any]:
     """
-    Index this slate's optimizable pool three ways, so a lineup can name
-    its players however the source happens to: by DraftKings id (what a
-    DK entries CSV carries), by this app's own MLB player id (what the
-    optimizer and the frontend carry), or by name (what a human types).
+    Index this slate's optimizable pool so a lineup can identify its
+    players however the source happens to.
+
+    NAME IS THE PRIMARY KEY, on purpose. Matching on DraftKings ids
+    turned out to be a trap: a DK entries file's roster cells hold
+    per-draft-group DRAFTABLE ids, while the ID column of a DK salary
+    CSV can hold DraftKings' stable PLAYER ids -- measured on a real
+    file, the two spaces did not overlap on a single one of 128 pool
+    players, so an id join silently matched nothing. Names are the one
+    thing every source agrees on, and player_match.normalize_name
+    already handles the accents, suffixes and nicknames that make them
+    awkward. Team is folded in where it is known, since it is what makes
+    a name unambiguous.
+
+    This app's OWN player ids stay usable, because they are ours and
+    there is no second id space to disagree with. The DK id index is
+    kept only as a last resort for a source that has nothing else.
 
     The pool is `optimizer.build_player_pool()` -- deliberately the same
     pool the optimizer itself builds from, so a lineup the optimizer
@@ -102,50 +115,67 @@ def build_lookup(
 
     by_dk: dict[str, dict[str, Any]] = {}
     by_id: dict[int, dict[str, Any]] = {}
+    by_team_name: dict[tuple[str, str], dict[str, Any]] = {}
     name_hits: dict[str, list[dict[str, Any]]] = {}
     for p in pool:
         if p.get("dk_id"):
             by_dk[str(p["dk_id"])] = p
         by_id[p["id"]] = p
-        name_hits.setdefault(normalize_name(p.get("name") or ""), []).append(p)
+        normalized = normalize_name(p.get("name") or "")
+        by_team_name[(normalize_team(p.get("team") or ""), normalized)] = p
+        name_hits.setdefault(normalized, []).append(p)
 
     return {
         "pool": pool,
         "by_dk_id": by_dk,
         "by_id": by_id,
+        "by_team_name": by_team_name,
         "by_name": {n: hits[0] for n, hits in name_hits.items() if len(hits) == 1},
         "ambiguous_names": {n for n, hits in name_hits.items() if len(hits) > 1},
     }
 
 
-def resolve_player(token: Any, lookup: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+def resolve_player(
+    token: Any, lookup: dict[str, Any], *, team: str | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
     """
     One player reference -> the pool entry, or (None, reason).
 
-    Tries the identifier forms in order of how reliable they are: DK id,
-    this app's player id, then name. A bare number could be either kind
-    of id, so both are tried before giving up on it.
+    Name first, and with `team` when the caller knows it -- see
+    build_lookup for why an id join across two systems is not
+    trustworthy here. This app's own player id is honoured next (it is
+    ours, so it cannot disagree with itself), and a DraftKings id is the
+    last resort for a source that supplied nothing else.
     """
     if token is None or (isinstance(token, str) and not token.strip()):
         return None, "empty roster slot"
 
     if isinstance(token, dict):
-        for key in ("dk_id", "id", "player_id", "name"):
+        team = team or token.get("team")
+        for key in ("name", "id", "player_id", "dk_id"):
             if token.get(key):
-                return resolve_player(token[key], lookup)
-        return None, "player object carried no id or name"
+                return resolve_player(token[key], lookup, team=team)
+        return None, "player object carried no name or id"
 
     text = str(token).strip()
-    if text in lookup["by_dk_id"]:
-        return lookup["by_dk_id"][text], None
-    if text.isdigit() and int(text) in lookup["by_id"]:
-        return lookup["by_id"][int(text)], None
-
     normalized = normalize_name(text)
+
+    if team:
+        hit = lookup["by_team_name"].get((normalize_team(team), normalized))
+        if hit:
+            return hit, None
     if normalized in lookup["by_name"]:
         return lookup["by_name"][normalized], None
     if normalized in lookup["ambiguous_names"]:
-        return None, f"'{text}' matches more than one player on this slate -- use the id"
+        return (
+            None,
+            f"'{text}' matches more than one player on this slate -- say which team he's on",
+        )
+
+    if text.isdigit() and int(text) in lookup["by_id"]:
+        return lookup["by_id"][int(text)], None
+    if text in lookup["by_dk_id"]:
+        return lookup["by_dk_id"][text], None
     return None, f"'{text}' is not on this slate (or has no salary/projection loaded)"
 
 
@@ -309,10 +339,13 @@ def intake(
     for i, roster in enumerate(rosters):
         label = roster.get("label") or f"{source} #{i + 1}"
         tokens = roster.get("players") or []
+        teams = roster.get("teams") or []
         players: list[dict[str, Any]] = []
         problems: list[str] = []
-        for token in tokens:
-            player, reason = resolve_player(token, lookup)
+        for i_t, token in enumerate(tokens):
+            player, reason = resolve_player(
+                token, lookup, team=teams[i_t] if i_t < len(teams) else None
+            )
             if player is None:
                 problems.append(reason or "unmatched player")
             else:
@@ -379,15 +412,13 @@ def from_dk_entries(
     reported as broken.
 
     `file_pool` is the player pool embedded in that same file
-    (dk_entries.pool_lookup), and it matters more than it sounds. A
-    roster cell holds a per-draft-group DRAFTABLE id, which is a
-    different number from the player id a DK salary CSV's own ID column
-    may carry -- so resolving the cell against the slate's own dk_id
-    index can miss every single player even though the file is perfectly
-    valid. The file's pool translates its own ids to names, which then
-    resolve against the slate the same way a typed-in lineup does. It is
-    the file describing itself, and it is the only thing that always
-    lines up.
+    (dk_entries.pool_lookup), and it is what makes this work at all. A
+    roster cell holds nothing but a per-draft-group DRAFTABLE id -- no
+    name -- and that number is not the one a DK salary CSV's ID column
+    carries, so there is no id path from the cell to this slate. The
+    file's own pool translates its ids into names and teams, which then
+    resolve exactly the way a typed-in lineup does. It is the file
+    describing itself.
     """
     rosters = []
     for e in parsed:
@@ -396,13 +427,17 @@ def from_dk_entries(
         picks = e.get("picks") or []
         if not picks or any(p is None for p in picks):
             continue
+        teams: list[str | None] = []
         if file_pool:
-            # Hand the resolver a NAME wherever the file's own pool knows
-            # this id, so it never depends on two id spaces agreeing.
-            picks = [
-                (file_pool["by_dk_id"].get(str(pid)) or {}).get("name") or pid for pid in picks
-            ]
-        rosters.append({"players": picks, "label": f"DK entry {e.get('entry_id')}"})
+            # Hand the resolver a NAME and a TEAM wherever the file's own
+            # pool knows this id, so nothing depends on two id spaces
+            # agreeing -- see build_lookup for what that cost.
+            resolved = [file_pool["by_dk_id"].get(str(pid)) or {} for pid in picks]
+            picks = [r.get("name") or pid for r, pid in zip(resolved, picks)]
+            teams = [r.get("team") for r in resolved]
+        rosters.append(
+            {"players": picks, "teams": teams, "label": f"DK entry {e.get('entry_id')}"}
+        )
     if not rosters:
         return {
             "entries": [],

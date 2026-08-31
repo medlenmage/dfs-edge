@@ -30,7 +30,7 @@ from typing import Any
 
 from app.services import dk_entries
 from app.services.lineup_export import players_in_slot_order
-from app.services.player_match import normalize_name
+from app.services import player_match
 from app.services.optimizer import ROSTER_SIZE
 
 
@@ -121,15 +121,46 @@ def fill_entries(
     # all. So the file's own pool wins, matched by name, and the
     # lineup's dk_id is only the fallback for a file that carries no
     # pool (older exports, hand-made templates).
-    pool = dk_entries.pool_lookup(dk_entries.parse_player_pool(text))
-    by_name = pool["by_name"]
+    # Players are matched BY NAME against the pool this file carries,
+    # using the same matcher every other third-party join in this app
+    # goes through -- accents, generational suffixes and nicknames folded,
+    # with a same-team fuzzy fallback for genuine spelling drift. An id
+    # join is not usable here: a roster cell's id is a per-draft-group
+    # draftable id, which is a different number from the one a DK salary
+    # CSV's ID column carries (measured on a real file: no overlap at all
+    # across 128 players).
+    #
+    # The cell is still WRITTEN as "Name (id)", because DraftKings' own
+    # instructions inside the file say a bare name is not accepted.
+    pool_rows = dk_entries.parse_player_pool(text)
+    pool_lookup = player_match.build_lookup(pool_rows) if pool_rows else {}
+    # A name-only index too, for the same reason player_match keeps one
+    # scoped by team: a lineup does not always carry a team (an
+    # optimizer lineup does, a hand-made one may not), and without this
+    # a perfectly matchable player falls through to the id fallback.
+    # Ambiguous names are excluded rather than resolved by coin flip.
+    _name_hits: dict[str, list[dict[str, Any]]] = {}
+    for r in pool_rows:
+        _name_hits.setdefault(r["normalized_name"], []).append(r)
+    by_name_only = {n: v[0] for n, v in _name_hits.items() if len(v) == 1}
+    fell_back: list[str] = []
 
     def _cell(player: dict[str, Any]) -> str | None:
-        row = by_name.get(normalize_name(player.get("name") or ""))
+        name, team = player.get("name") or "", player.get("team") or ""
+        row = player_match.match(pool_lookup, name, team, fuzzy=True) if pool_lookup else None
+        row = row or by_name_only.get(player_match.normalize_name(name))
         if row:
             return f"{row['name']} ({row['dk_id']})"
+        # Last resort: the id the lineup itself carries. Right for a file
+        # with no embedded pool (older exports, hand-made templates), and
+        # a guess for a player whose name simply didn't match -- so it is
+        # RECORDED and reported on the summary rather than passing
+        # silently, since that is exactly how the wrong-id-space bug went
+        # unnoticed.
         if player.get("dk_id"):
-            return f"{player['name']} ({player['dk_id']})"
+            if pool_rows:
+                fell_back.append(name or "unknown player")
+            return f"{name} ({player['dk_id']})"
         return None
 
     unresolvable: list[str] = []
@@ -139,13 +170,9 @@ def fill_entries(
                 unresolvable.append(p.get("name") or "unknown player")
     if unresolvable:
         raise EntryManagerError(
-            "Can't fill real DK entries -- no DK id for these players "
-            + (
-                "in that entries file's own player pool"
-                if by_name
-                else "(upload a DraftKings salary CSV for this slate, not just RotoWire projections)"
-            )
-            + f": {', '.join(sorted(set(unresolvable)))}."
+            "Can't fill real DK entries -- no DK id for these players, in that file's own "
+            "player pool or on the lineup itself (upload a DraftKings salary CSV for this "
+            f"slate, not just RotoWire projections): {', '.join(sorted(set(unresolvable)))}."
         )
 
     entry_ids_filled: list[str] = []
@@ -163,6 +190,12 @@ def fill_entries(
 
     return buf.getvalue(), {
         "contest_id": contest_id,
+        # Names that could not be found in this file's own player pool
+        # and so were written with the lineup's own id instead. Empty is
+        # the expected state; anything here is a cell DraftKings may
+        # reject, and it is surfaced rather than left to be discovered on
+        # upload.
+        "unmatched_in_file_pool": sorted(set(fell_back)),
         "filled_count": n_filled,
         "entry_ids_filled": entry_ids_filled,
         "unfilled_row_count": max(0, len(target_row_idxs) - len(lineups)),
