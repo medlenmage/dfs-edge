@@ -66,6 +66,14 @@ def _pick_id(cell: str) -> str | None:
     cell = (cell or "").strip()
     if not cell:
         return None
+    # DraftKings appends "(LOCKED)" to a cell whose game has already
+    # started. The id is then no longer at the end of the string, so a
+    # cell like "Kyle Harrison (43983384) (LOCKED)" read as EMPTY --
+    # which would silently turn a live, locked roster spot into a blank
+    # one and invite a swap DraftKings will reject.
+    locked = cell.upper().endswith("(LOCKED)")
+    if locked:
+        cell = cell[: cell.upper().rfind("(LOCKED)")].strip()
     m = _ID_RE.search(cell)
     if m:
         return m.group(1)
