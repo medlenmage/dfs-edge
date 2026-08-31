@@ -6537,7 +6537,8 @@ async def main() -> int:
     filled_csv, em_summary = dk_entry_manager.fill_entries(dk_entries_csv, "7000001", [em_lineup_a])
     em_rows = list(csv.reader(io.StringIO(filled_csv)))
     check("fill_entries fills exactly the one blank entry for that contest (only_blank default)",
-          em_summary == {
+          {k: em_summary[k] for k in ("contest_id", "filled_count", "entry_ids_filled",
+                                      "unfilled_row_count", "lineups_unused")} == {
               "contest_id": "7000001", "filled_count": 1, "entry_ids_filled": ["5000000002"],
               "unfilled_row_count": 0, "lineups_unused": 0,
           },
@@ -6572,7 +6573,8 @@ async def main() -> int:
         dk_entries_csv, "7000001", [em_lineup_a, em_lineup_b],
     )
     check("more lineups than blank target rows: the leftover lineup is reported as unused, not an error",
-          no_room_summary == {
+          {k: no_room_summary[k] for k in ("contest_id", "filled_count", "entry_ids_filled",
+                                      "unfilled_row_count", "lineups_unused")} == {
               "contest_id": "7000001", "filled_count": 1, "entry_ids_filled": ["5000000002"],
               "unfilled_row_count": 0, "lineups_unused": 1,
           },
@@ -6580,7 +6582,8 @@ async def main() -> int:
 
     _, no_lineups_summary = dk_entry_manager.fill_entries(dk_entries_csv, "7000002", [])
     check("more blank target rows than lineups: the leftover row is reported unfilled, not an error",
-          no_lineups_summary == {
+          {k: no_lineups_summary[k] for k in ("contest_id", "filled_count", "entry_ids_filled",
+                                      "unfilled_row_count", "lineups_unused")} == {
               "contest_id": "7000002", "filled_count": 0, "entry_ids_filled": [],
               "unfilled_row_count": 1, "lineups_unused": 0,
           },
@@ -6648,6 +6651,20 @@ async def main() -> int:
         ["99999"] + ["93002"] * 9,
         ["Ace Bare"] + [f"Other{i}" for i in range(9)],
     )
+    # Matching is BY NAME, not by id, because the two id spaces don't
+    # line up. A lineup carrying a completely wrong id still fills
+    # correctly as long as the name is right.
+    _named = fake_lineup(["00000"] * 10, ["Ace Bare"] + [f"Other{i}" for i in range(9)])
+    _out, _sum = dk_entry_manager.fill_entries(_bare_csv, "7000009", [_named])
+    check("a lineup whose dk_id is wrong still fills correctly, because the player is "
+          "found by NAME in the file's own pool",
+          list(csv.reader(io.StringIO(_out)))[2][4] == "Ace Bare (93001)",
+          list(csv.reader(io.StringIO(_out)))[2][4])
+    check("a player the file's pool doesn't know is reported on the summary rather than "
+          "silently written with an id DraftKings may reject",
+          "Other0" in _sum["unmatched_in_file_pool"] and "Ace Bare" not in _sum["unmatched_in_file_pool"],
+          str(_sum["unmatched_in_file_pool"])[:70])
+
     # only_blank defaults to True, so it fills the RESERVATION row (77002),
     # leaving the already-built row alone.
     _filled_csv, _ = dk_entry_manager.fill_entries(_bare_csv, "7000009", [_fill_lineup])

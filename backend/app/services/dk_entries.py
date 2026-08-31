@@ -34,7 +34,7 @@ from typing import Any
 
 from app.cache import get, put
 from app.services.optimizer import ROSTER_SIZE
-from app.services.player_match import normalize_name
+from app.services.player_match import normalize_name, normalize_team
 
 _CACHE_PREFIX = "dk_entries"
 # Same window as salaries/projections uploads -- long enough to survive
@@ -198,10 +198,13 @@ def pool_lookup(pool_rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
     by_id = {r["dk_id"]: r for r in pool_rows}
     hits: dict[str, list[dict[str, Any]]] = {}
+    by_team_name: dict[tuple[str, str], dict[str, Any]] = {}
     for r in pool_rows:
         hits.setdefault(r["normalized_name"], []).append(r)
+        by_team_name[(normalize_team(r["team"]), r["normalized_name"])] = r
     return {
         "by_dk_id": by_id,
+        "by_team_name": by_team_name,
         "by_name": {n: v[0] for n, v in hits.items() if len(v) == 1},
         "ambiguous_names": {n for n, v in hits.items() if len(v) > 1},
         "rows": pool_rows,
