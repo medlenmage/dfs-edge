@@ -114,6 +114,30 @@ export function NflStackTable({ season, week }) {
                         </div>
                       )}
                       <div className="sub-line">{t.components.game_total.detail}</div>
+                      {/* Game script and leverage move the rating in
+                          opposite directions from the same game, so both
+                          are shown with their sign rather than folded
+                          silently into the number. */}
+                      {t.components.game_script?.value ? (
+                        <div
+                          className="sub-line"
+                          style={{
+                            color:
+                              t.components.game_script.value < 0
+                                ? 'var(--critical-ink)'
+                                : 'var(--edge-ink)',
+                          }}
+                        >
+                          {t.components.game_script.value > 0 ? '+' : ''}
+                          {t.components.game_script.value} script —{' '}
+                          {t.components.game_script.detail}
+                        </div>
+                      ) : null}
+                      {t.components.leverage?.value ? (
+                        <div className="sub-line dim">
+                          {t.components.leverage.value} leverage — {t.components.leverage.detail}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="num">
                       {t.components.proe.detail}

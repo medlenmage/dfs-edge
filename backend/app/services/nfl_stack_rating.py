@@ -35,13 +35,73 @@ LEAGUE_AVG_GAME_TOTAL = 44.0
 GAME_TOTAL_SENSITIVITY = 1.5
 GAME_TOTAL_MAX_ADJUSTMENT = 9.0
 
-# The user's own spec: a high total combined with a close (0-7.5 pt)
-# spread is the "back-and-forth shootout" combination that most
-# reliably drives real passing volume -- worth a bonus beyond what the
-# total and spread each contribute independently.
-SHOOTOUT_SPREAD_MAX = 7.5
-SHOOTOUT_MIN_TOTAL = 47.0
-SHOOTOUT_BONUS = 6.0
+# The old "shootout bonus" (high total + spread within 7.5) lived here
+# and has been REMOVED, not retuned. Two reasons, both real:
+#
+#   1. Its 7.5-point spread window paid a bonus to exactly the games the
+#      blowout penalty below exists to punish -- a 7-point favourite in a
+#      48-total game was collecting +6 for a spot that deserves the
+#      opposite.
+#   2. Narrowing that window would have left it measuring the same thing
+#      as the close-game-in-a-high-total bonus in _game_script_component:
+#      one fact, paid twice, ~+10 for a single 3-point spread in a 49
+#      total.
+#
+# So the closeness x total interaction now lives in exactly one place
+# (game script), and this component is purely about what the total says
+# on its own.
+
+# --- Game script ----------------------------------------------------------
+#
+# What the scoreboard does to a passing attack, which the implied total
+# on its own cannot see.
+#
+# A big favourite is the trap. Go up two scores and the offense stops
+# needing to throw: it runs, bleeds clock, and the passing volume a stack
+# is BUILT on evaporates in exactly the half where a stack needs it. The
+# team can win 31-10 and hand you a mediocre stack, because most of the
+# damage came on the ground after the game was decided.
+BLOWOUT_SPREAD = 7.0
+BLOWOUT_BASE_PENALTY = 3.0        # at exactly -7
+BLOWOUT_SLOPE = 1.2               # per point beyond -7
+BLOWOUT_MAX_PENALTY = 9.0
+
+# The mirror image, and it follows from the same reasoning rather than
+# being a separate idea: a big UNDERDOG is playing from behind, which
+# forces the ball into the air and adds fourth-quarter volume. Smaller
+# than the favourite penalty on purpose -- trailing raises attempts but
+# lowers efficiency (soft coverage, short throws, a defense that will
+# trade yards for clock), so it is a real effect and a milder one.
+UNDERDOG_BONUS_SLOPE = 0.7
+UNDERDOG_MAX_BONUS = 4.5
+
+# A near-pick'em keeps both offenses honest for four quarters, which is
+# the cleanest game script a stack can ask for. Worth more when the total
+# says both teams can actually score.
+# Starts at 0, not 0.5: a pick'em is the extreme case of "close game",
+# not something outside it. Excluding it gave a 52-total pick'em -- the
+# single best script on a slate -- a flat zero here.
+CLOSE_SPREAD_MIN = 0.0
+CLOSE_SPREAD_MAX = 3.5
+CLOSE_GAME_BONUS = 2.0
+CLOSE_GAME_HIGH_TOTAL = 47.5
+CLOSE_GAME_HIGH_TOTAL_BONUS = 4.0
+
+# --- Leverage -------------------------------------------------------------
+#
+# The highest-total game on a slate is the one every entrant can see.
+# That crowding is a real cost in a GPP even when the spot itself is
+# genuinely good, so it is subtracted -- but deliberately by LESS than
+# the total's own bonus is worth, because the answer to "the best spot is
+# also the most obvious" is to shade away from it, not to refuse to play
+# it. A 52-total shootout still rates near the top after this; it just
+# stops rating as far above a quieter spot as its raw ceiling suggests.
+#
+# This is the one component that is not about how many points the stack
+# will score. It is about how many other people will have it.
+CROWDING_MIN_TOTAL = 47.5
+CROWDING_SLOPE = 0.8
+CROWDING_MAX_PENALTY = 5.0
 
 PROE_SENSITIVITY = 1.2
 PROE_MAX_ADJUSTMENT = 8.0
@@ -92,18 +152,88 @@ def _game_total_component(
     )
     spread_label = _spread_label(spread_magnitude, favored)
     detail = f"{total_line:g} game total, {spread_label}"
-    if (
-        total_line >= SHOOTOUT_MIN_TOTAL
-        and spread_magnitude is not None
-        and spread_magnitude <= SHOOTOUT_SPREAD_MAX
-    ):
-        value += SHOOTOUT_BONUS
-        detail += " (shootout spot)"
     return {
         "value": round(value, 1),
         "favored": favored,
         "spread": spread_magnitude,
         "detail": detail,
+    }
+
+
+def _game_script_component(
+    spread_magnitude: float | None, favored: bool | None, total_line: float | None
+) -> dict[str, Any]:
+    """
+    What the likely scoreboard does to this offense's passing volume.
+
+    Separate from the game total on purpose: the total says how many
+    points the game holds, this says whether THIS team will still be
+    throwing when they are scored. A 7-point favourite in a 50-total
+    game and a 7-point underdog in the same game share a total and face
+    opposite second halves.
+    """
+    if spread_magnitude is None or favored is None:
+        return {"value": 0.0, "detail": "no spread available"}
+
+    if favored and spread_magnitude >= BLOWOUT_SPREAD:
+        penalty = min(
+            BLOWOUT_BASE_PENALTY + (spread_magnitude - BLOWOUT_SPREAD) * BLOWOUT_SLOPE,
+            BLOWOUT_MAX_PENALTY,
+        )
+        return {
+            "value": -round(penalty, 1),
+            "detail": (
+                f"favored by {spread_magnitude:g} -- blowout risk, passing attack likely "
+                "throttled once they're up two scores"
+            ),
+        }
+
+    if not favored and spread_magnitude >= BLOWOUT_SPREAD:
+        bonus = min(
+            (spread_magnitude - BLOWOUT_SPREAD) * UNDERDOG_BONUS_SLOPE + 1.0, UNDERDOG_MAX_BONUS
+        )
+        return {
+            "value": round(bonus, 1),
+            "detail": (
+                f"underdog by {spread_magnitude:g} -- playing from behind forces the ball "
+                "into the air"
+            ),
+        }
+
+    if CLOSE_SPREAD_MIN <= spread_magnitude <= CLOSE_SPREAD_MAX:
+        bonus = CLOSE_GAME_BONUS
+        detail = f"{spread_magnitude:g}-pt game -- stays competitive, passing on the table late"
+        if total_line is not None and total_line >= CLOSE_GAME_HIGH_TOTAL:
+            bonus = CLOSE_GAME_HIGH_TOTAL_BONUS
+            detail = (
+                f"{spread_magnitude:g}-pt game at a {total_line:g} total -- close and high "
+                "scoring, the cleanest script a stack can ask for"
+            )
+        return {"value": round(bonus, 1), "detail": detail}
+
+    return {
+        "value": 0.0,
+        "detail": f"{spread_magnitude:g}-pt spread -- no strong script either way",
+    }
+
+
+def _crowding_component(total_line: float | None) -> dict[str, Any]:
+    """
+    How obvious this spot is to everyone else.
+
+    The only component here that is not a projection of points. A high
+    total draws the field, and in a GPP that duplication is a real cost --
+    so it is subtracted, by less than the total's own bonus is worth.
+    """
+    if total_line is None or total_line < CROWDING_MIN_TOTAL:
+        return {"value": 0.0, "detail": "not a total the field will crowd into"}
+    penalty = min((total_line - CROWDING_MIN_TOTAL) * CROWDING_SLOPE, CROWDING_MAX_PENALTY)
+    return {
+        "value": -round(penalty, 1),
+        "detail": (
+            f"{total_line:g} total -- one of the spots the whole field can see, so expect "
+            "company on this stack"
+        ),
     }
 
 
@@ -198,8 +328,20 @@ def _rate_team(
     opp_def_proe = (proe.get(opp) or {}).get("def_proe_allowed")
     proe_c = _proe_component(team_proe)
     funnel_c = _funnel_component(opp_def_proe)
+    script_c = _game_script_component(spread_magnitude, favored, total_line)
+    crowding_c = _crowding_component(total_line)
 
-    rating = _clamp(env["score"] + game_total["value"] + proe_c["value"] + funnel_c["value"])
+    # game_total and crowding deliberately pull in opposite directions on
+    # the same number: a high total genuinely raises the ceiling AND
+    # genuinely draws the field. Both are true, both are stated, and the
+    # crowding side is the smaller of the two so a real shootout still
+    # rates well -- it just stops rating as far clear as its raw ceiling
+    # implies. `rating_before_leverage` is kept so the two questions can
+    # still be asked separately.
+    rating_before_leverage = _clamp(
+        env["score"] + game_total["value"] + proe_c["value"] + funnel_c["value"] + script_c["value"]
+    )
+    rating = _clamp(rating_before_leverage + crowding_c["value"])
 
     partners = _pick_partners(team_data.get("players") or [], correlations)
     bring_back = _pick_bring_back(opp_data.get("players") or [], correlations)
@@ -231,11 +373,16 @@ def _rate_team(
         "opponent": opp,
         "is_home": team_data.get("is_home", False),
         "rating": round(rating, 1),
+        # The same stack without the crowding penalty -- how good the
+        # spot is on its own terms, before what the field thinks of it.
+        "rating_before_leverage": round(rating_before_leverage, 1),
         "components": {
             "environment": env,
             "game_total": game_total,
+            "game_script": script_c,
             "proe": proe_c,
             "pass_funnel": funnel_c,
+            "leverage": crowding_c,
         },
         "partners": partners,
         "bring_back": bring_back,
