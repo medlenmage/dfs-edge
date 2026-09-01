@@ -1117,11 +1117,80 @@ def main() -> int:
 
     print("\nNFL stack rating (nfl_stack_rating.py) -- Vegas + PROE + real correlation combined")
 
-    shootout = nfl_stack_rating._game_total_component(50.0, 3.5, True)
-    no_shootout = nfl_stack_rating._game_total_component(50.0, 10.0, True)
-    check("a 50-pt total with a tight (<=7.5) spread gets a shootout bonus a wide-spread game of the "
-          "same total doesn't",
-          shootout["value"] > no_shootout["value"], str((shootout, no_shootout)))
+    tight = nfl_stack_rating._game_total_component(50.0, 3.5, True)
+    wide = nfl_stack_rating._game_total_component(50.0, 10.0, True)
+    check("the game-total component now scores the TOTAL only -- the same 50-pt total is worth the "
+          "same whatever the spread, because closeness is game script's job and paying for it twice "
+          "was worth ~+10 for one 3-pt spread",
+          tight["value"] == wide["value"], str((tight["value"], wide["value"])))
+
+    # --- game script: what the scoreboard does to passing volume -------
+    script = nfl_stack_rating._game_script_component
+    big_fav = script(10.0, True, 48.0)
+    check("a big favourite is PENALISED -- going up two scores means running the clock, and the "
+          "passing volume a stack is built on evaporates in the half it needs",
+          big_fav["value"] < 0 and "blowout" in big_fav["detail"], str(big_fav))
+    check("and the penalty grows with the spread rather than being a flat cliff",
+          script(14.0, True, 48.0)["value"] < big_fav["value"] < script(7.0, True, 48.0)["value"],
+          f"{script(14.0, True, 48.0)['value']} < {big_fav['value']} < {script(7.0, True, 48.0)['value']}")
+    check("it is capped, so a 20-point spread doesn't swamp every other component",
+          script(20.0, True, 48.0)["value"] == -nfl_stack_rating.BLOWOUT_MAX_PENALTY,
+          str(script(20.0, True, 48.0)["value"]))
+    check("a favourite just under the threshold is untouched -- 6.5 is not a blowout",
+          script(6.5, True, 44.0)["value"] == 0.0, str(script(6.5, True, 44.0)))
+
+    big_dog = script(10.0, False, 48.0)
+    check("the same spread for the UNDERDOG is a bonus, not a penalty -- playing from behind forces "
+          "the ball into the air",
+          big_dog["value"] > 0, str(big_dog))
+    check("...and it is smaller than the favourite's penalty, because trailing raises attempts but "
+          "lowers efficiency",
+          abs(big_dog["value"]) < abs(big_fav["value"]),
+          f"dog {big_dog['value']} vs fav {big_fav['value']}")
+
+    close_high = script(3.0, True, 49.0)
+    close_low = script(3.0, True, 42.0)
+    check("a close game is a bonus, and worth more when the total says both teams can score",
+          close_high["value"] > close_low["value"] > 0,
+          f"{close_high['value']} > {close_low['value']}")
+    check("a pick'em counts as close -- it is the extreme case of a close game, not an edge case "
+          "outside it",
+          script(0.0, True, 52.0)["value"] == close_high["value"],
+          str(script(0.0, True, 52.0)["value"]))
+    check("the dead zone between close and blowout scores neither way",
+          script(5.5, True, 48.0)["value"] == 0.0, str(script(5.5, True, 48.0)))
+    check("no spread available scores nothing rather than guessing a script",
+          script(None, None, 48.0)["value"] == 0.0)
+
+    # --- leverage: how obvious the spot is ------------------------------
+    crowd = nfl_stack_rating._crowding_component
+    check("a high total carries a leverage PENALTY -- the spot the whole field can see costs "
+          "duplication in a GPP",
+          crowd(52.0)["value"] < 0, str(crowd(52.0)))
+    check("an ordinary total carries none",
+          crowd(43.0)["value"] == 0.0, str(crowd(43.0)))
+    check("the crowding penalty is deliberately SMALLER than the total's own bonus, so a real "
+          "shootout still rates well -- the answer to 'best spot, most obvious' is to shade away "
+          "from it, not refuse to play it",
+          abs(crowd(52.0)["value"])
+          < nfl_stack_rating._game_total_component(52.0, 3.0, True)["value"],
+          f"{crowd(52.0)['value']} vs {nfl_stack_rating._game_total_component(52.0, 3.0, True)['value']}")
+
+    # The headline case, end to end through the arithmetic: a good total
+    # no longer rescues a blowout script.
+    def _net(spread, favored, total):
+        return (
+            nfl_stack_rating._game_total_component(total, spread, favored)["value"]
+            + script(spread, favored, total)["value"]
+            + crowd(total)["value"]
+        )
+
+    check("a 10-point favourite in a 48-total game now nets NEGATIVE, where the total alone would "
+          "have made it one of the better spots on the board",
+          _net(10.0, True, 48.0) < 0 < _net(3.0, True, 48.0),
+          f"fav-10 {_net(10.0, True, 48.0):+.1f} vs fav-3 {_net(3.0, True, 48.0):+.1f}")
+    check("...and a 14-point favourite in a 51-total game is negative too -- the trap spot",
+          _net(14.0, True, 51.0) < 0, f"{_net(14.0, True, 51.0):+.1f}")
     favored_detail = nfl_stack_rating._game_total_component(44.0, 3.5, True)
     dog_detail = nfl_stack_rating._game_total_component(44.0, 3.5, False)
     unknown_detail = nfl_stack_rating._game_total_component(44.0, 3.5, None)
@@ -1175,16 +1244,26 @@ def main() -> int:
         {"AAA": {"off_proe": 3.0, "def_proe_allowed": -1.0}, "OPP": {"off_proe": -1.0, "def_proe_allowed": 1.0}},
         stack_corr,
     )
-    check("_rate_team's overall rating is the exact sum of its own named components (environment + game "
-          "total/shootout + PROE + pass funnel), clamped 0-100",
+    _c = full_rating["components"]
+    check("_rate_team's overall rating is the exact sum of its own named components (environment + "
+          "game total + game script + PROE + pass funnel + leverage), clamped 0-100 -- nothing is "
+          "folded in without a visible reason",
           full_rating["rating"] == round(
-              full_rating["components"]["environment"]["score"]
-              + full_rating["components"]["game_total"]["value"]
-              + full_rating["components"]["proe"]["value"]
-              + full_rating["components"]["pass_funnel"]["value"],
+              _c["environment"]["score"]
+              + _c["game_total"]["value"]
+              + _c["game_script"]["value"]
+              + _c["proe"]["value"]
+              + _c["pass_funnel"]["value"]
+              + _c["leverage"]["value"],
               1,
           ),
           str(full_rating))
+    check("rating_before_leverage is that same rating with only the crowding penalty removed -- so "
+          "'how good is this spot' and 'how obvious is it' stay separable",
+          full_rating["rating_before_leverage"]
+          == round(full_rating["rating"] - _c["leverage"]["value"], 1),
+          f"{full_rating['rating_before_leverage']} vs {full_rating['rating']} "
+          f"- ({_c['leverage']['value']})")
     check("_rate_team's top_stack_value combines the QB and top partner's real salary/fpts/ownership",
           full_rating["top_stack_value"]["combined_salary"] == 7000 + 8000
           and full_rating["top_stack_value"]["combined_projected_fpts"] == 38.0
