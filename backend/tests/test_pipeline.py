@@ -7779,6 +7779,90 @@ async def main() -> int:
     finally:
         _reset_provider(*_saved)
 
+    print("\nManual builder: hand the slate out, take lineups back")
+    from app.services import manual_builder
+
+    _MB_NAMES = ["Ace One", "Ace Two", "Cat Cher", "First Base", "Second Base",
+                 "Third Base", "Short Stop", "OF One", "OF Two", "OF Three"]
+
+    # The parser is deliberately FORGIVING about format: a model asked
+    # for ten names writes them however its own prose habits favour, and
+    # losing a good lineup to a stray bullet character wastes a round
+    # trip. Each of these is a shape a model actually produces.
+    _shapes = {
+        "plain block": "\n".join(_MB_NAMES),
+        "numbered under a header": "Lineup 1\n" + "\n".join(
+            f"{i + 1}. {n}" for i, n in enumerate(_MB_NAMES)),
+        "slot-labelled": "\n".join(
+            f"{s}: {n}" for s, n in zip(["P","P","C","1B","2B","3B","SS","OF","OF","OF"], _MB_NAMES)),
+        "bullets with salary": "\n".join(f"- {n} ($5,400)" for n in _MB_NAMES),
+        "trailing points": "\n".join(f"{n} - 12.3 pts" for n in _MB_NAMES),
+        "team in parens": "\n".join(f"{n} (NYY)" for n in _MB_NAMES),
+        "csv row": ",".join(_MB_NAMES),
+        "markdown header + stars": "## Lineup 1\n" + "\n".join(f"* {n}" for n in _MB_NAMES),
+    }
+    for _label, _text in _shapes.items():
+        _got = manual_builder.parse_lineups(_text, roster_size=10)
+        check(f"parses a lineup written as: {_label}",
+              len(_got) == 1 and _got[0]["players"] == _MB_NAMES,
+              str(_got[0]["players"][:3]) if _got else "nothing parsed")
+
+    _two = manual_builder.parse_lineups(
+        "```\nLineup 1\n" + "\n".join(_MB_NAMES) + "\n```\n\n---\n\nLineup 2\n"
+        + "\n".join(_MB_NAMES) + "\n```", roster_size=10)
+    check("code fences, dividers and repeated headers don't merge two lineups into one",
+          len(_two) == 2 and all(l["players"] == _MB_NAMES for l in _two),
+          f"{len(_two)} parsed")
+
+    # ...and strict about CONTENT: real names must survive untouched, or
+    # the decoration-stripping is doing more harm than good.
+    for _name in ["C.J. Abrams", "Luis Garcia Jr.", "Michael Harris II",
+                  "Christian Encarnacion-Strand", "Ja'Marr Chase"]:
+        check(f"a real name with punctuation survives cleaning: {_name}",
+              manual_builder._clean(_name) == _name, manual_builder._clean(_name))
+    check("decoration around a punctuated name is still stripped",
+          manual_builder._clean("3. Luis Garcia Jr. ($4,200)") == "Luis Garcia Jr."
+          and manual_builder._clean("SS: C.J. Abrams (WSH)") == "C.J. Abrams")
+    check("an incomplete block is still returned, so intake can reject it BY NAME rather "
+          "than the text silently parsing to nothing",
+          manual_builder.parse_lineups("\n".join(_MB_NAMES[:9]), roster_size=10)[0]["players"]
+          == _MB_NAMES[:9])
+    check("prose with no lineup in it parses to nothing rather than a garbage lineup",
+          manual_builder.parse_lineups("Here are my thoughts on the slate.", roster_size=10) == [])
+
+    # The brief has to be self-contained -- it is read somewhere with no
+    # access to this app -- and must never offer a player the board
+    # doesn't hold.
+    _brief_pool = optimizer.build_player_pool(mul_slate)
+    _brief = manual_builder.slate_brief(_brief_pool, date=DAY, games=mul_slate["games"])
+    check("the brief carries the roster rules, the cap and the process rules",
+          "Exactly 10 players" in _brief and "$50,000" in _brief
+          and "PROCESS RULES" in _brief)
+    check("every roster slot gets its own section, so a builder can see what it must fill",
+          all(f"### {lbl}" in _brief for lbl in
+              ("Pitchers (2)", "Catcher (1)", "Shortstop (1)", "Outfield (3)")))
+    check("it says explicitly what to send back",
+          "## What to send back" in _brief and "blank line" in _brief)
+    _listed = {p["name"] for p in _brief_pool if p["name"] in _brief}
+    check("the players it lists all come from the real pool -- it cannot offer someone the "
+          "app would then refuse",
+          len(_listed) > 0 and _listed <= {p["name"] for p in _brief_pool})
+
+    # The games section is derived from the BOARD, not the slate's full
+    # game list -- on a day where the DK slate is a subset, listing every
+    # game would invite lineups built around players not on the board.
+    _extra = {
+        **mul_slate,
+        "games": list(mul_slate["games"]) + [
+            {**copy.deepcopy(mul_slate["games"][0]), "game_pk": 999999}
+        ],
+    }
+    _extra["games"][-1]["home"]["abbrev"] = "OFFH"
+    _extra["games"][-1]["away"]["abbrev"] = "OFFA"
+    _brief2 = manual_builder.slate_brief(_brief_pool, date=DAY, games=_extra["games"])
+    check("a game with no players on the board is left out of the brief's Games section",
+          "OFFH" not in _brief2 and "OFFA" not in _brief2)
+
     print("\nLineup intake: your own lineups into the contest batch")
     from app.services import build_audit, lineup_intake
 
