@@ -388,6 +388,28 @@ export const api = {
   // Your own lineups for the day -- the tray the contest generator can
   // build a field around (services/lineup_intake.py).
   myLineups: (date) => request(`/api/mlb/my-lineups?date=${date}`),
+
+  // The whole slate as one pasteable brief, for building lineups by
+  // hand or in another Claude. Returns markdown, not JSON.
+  manualBriefUrl: (date) => `${BASE}/api/mlb/manual/brief?date=${date}`,
+  manualBrief: async (date) => {
+    const res = await fetch(`${BASE}/api/mlb/manual/brief?date=${date}`)
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`
+      try {
+        detail = (await res.json()).detail || detail
+      } catch {
+        /* not JSON -- keep the status */
+      }
+      throw new Error(detail)
+    }
+    return res.text()
+  },
+  myLineupsFromText: (date, text, { save = true, replace = false } = {}) =>
+    request('/api/mlb/my-lineups/from-text', {
+      method: 'POST',
+      body: JSON.stringify({ date, text, save, replace }),
+    }),
   addMyLineups: (date, lineups, { source = 'manual', replace = false, projectionSource = 'rotowire' } = {}) =>
     request('/api/mlb/my-lineups', {
       method: 'POST',

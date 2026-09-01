@@ -682,6 +682,17 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire', onPoo
         </>
       )}
 
+      {/* Always visible: the pool survives across runs, and the manual
+          builder inside it is an ALTERNATIVE to solving, not a result of
+          one -- gating it behind a solve meant you could not build by
+          hand until you had first used the optimizer. `lineups` is
+          simply empty until a run produces some. */}
+      <LineupPool
+        date={date}
+        lineups={state.status === 'ready' ? state.lineups : []}
+        onPoolChange={onPoolChange}
+      />
+
       {state.status === 'ready' && (
         <>
           {state.lineups.length < numLineups && (
@@ -749,11 +760,6 @@ export function LineupsPanel({ date, slate, projectionSource = 'rotowire', onPoo
               )}
             </div>
           )}
-
-          {/* Save the keepers, change the locks, solve again. The pool
-              survives across runs -- this run's exposure table below
-              only ever describes this run. */}
-          <LineupPool date={date} lineups={state.lineups} onPoolChange={onPoolChange} />
 
           {state.exposure.length > 0 && (
             <div className="card table-wrap" style={{ marginTop: 16 }}>

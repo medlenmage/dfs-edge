@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
+import { ManualBuilder } from './ManualBuilder'
 
 /**
  * The lineup pool, sitting inside the optimizer where it's built.
@@ -240,6 +241,8 @@ export function LineupPool({ date, lineups, onPoolChange }) {
           {pool.message}
         </div>
       )}
+
+      <ManualBuilder date={date} onPoolChange={() => load()} />
 
       {count > 0 && (
         <>

@@ -28,6 +28,7 @@ from app.services import (
     late_swap as late_swap_service,
     lineup_export,
     lineup_intake,
+    manual_builder,
     mlb_slate,
     optimizer,
     player_match,
@@ -1702,6 +1703,134 @@ async def add_my_lineups(
         # Accepted-but-already-pooled: a second run that reproduces a
         # lineup you already have is normal, and silently reporting it as
         # added would make the pool look like it grew when it didn't.
+        "duplicates_skipped": len(result["entries"]) - (len(merged) - before),
+        "rejected": result["rejected"],
+    }
+
+
+@router.get("/manual/brief")
+async def manual_slate_brief(
+    date: str | None = Query(None),
+    projection_source: str = Query("rotowire"),
+    included_game_pks: list[int] | None = Query(None),
+    include_rules: bool = Query(
+        True, description="Include this account's own process rules in the brief"
+    ),
+    format: str = Query("markdown", description="'markdown' (pasteable) or 'json'"),
+) -> Any:
+    """
+    The whole slate as one self-contained brief you can hand to any
+    Claude -- including one with no access to this machine.
+
+    It carries the roster and cap rules, this account's process rules,
+    the games with their implied runs, and every draftable player
+    grouped by roster slot with salary, projection, ownership and
+    batting order. Paste it in, get lineups back, paste those into
+    POST /my-lineups/from-text, and they land in the same pool the
+    optimizer and the DK import feed -- so a hand-built lineup reaches
+    the simulator, the build audit and the daily brief by exactly the
+    same route as any other.
+
+    The board is built from `optimizer.build_player_pool()`, so it can
+    never offer a player this app would then refuse.
+    """
+    day = date or date_cls.today().isoformat()
+    slate = await mlb_slate.build_slate(
+        day, include_inhouse=(projection_source == "inhouse")
+    )
+    pool = optimizer.build_player_pool(
+        slate,
+        included_game_pks=set(included_game_pks) if included_game_pks else None,
+        projection_source=projection_source,
+    )
+    if not pool:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No draftable players for that date -- a DraftKings salary file and a "
+                "projections file both need to be loaded first."
+            ),
+        )
+    brief = manual_builder.slate_brief(
+        pool, date=day, games=slate.get("games"), include_rules=include_rules
+    )
+    if format == "markdown":
+        return Response(content=brief, media_type="text/markdown; charset=utf-8")
+    return {
+        "date": day,
+        "player_count": len(pool),
+        "roster": dict(optimizer.SLOT_REQUIREMENTS),
+        "salary_cap": optimizer.SALARY_CAP,
+        "brief": brief,
+        "players": [
+            {
+                k: p.get(k)
+                for k in (
+                    "id", "name", "team", "opponent", "salary", "projected_fpts",
+                    "ownership_pct", "slots", "batting_order", "game_pk",
+                )
+            }
+            for p in pool
+        ],
+    }
+
+
+@router.post("/my-lineups/from-text")
+async def add_my_lineups_from_text(
+    date: str | None = Body(None, embed=True),
+    text: str = Body(
+        ...,
+        embed=True,
+        description=(
+            "Lineups as free text -- whatever a model handed back. Numbered lists, "
+            "'P: Name' slot labels, CSV rows and blank-line-separated blocks all parse."
+        ),
+    ),
+    save: bool = Body(
+        True,
+        embed=True,
+        description="False validates and reports without touching the pool -- a dry run",
+    ),
+    replace: bool = Body(False, embed=True),
+    projection_source: str = Body("rotowire", embed=True),
+) -> dict[str, Any]:
+    """
+    Take lineups back from wherever they were built and put them in the
+    day's pool.
+
+    Deliberately forgiving about FORMAT and strict about CONTENT: the
+    names go through the same validation as every other intake path, so
+    a hand-built lineup is legal by the same standard as an optimizer
+    one, or it comes back rejected with the reason. `save=false` is a
+    dry run -- check before committing.
+    """
+    day = date or date_cls.today().isoformat()
+    _, lookup = await _intake_lookup(day, projection_source, None)
+    rosters = manual_builder.parse_lineups(text, roster_size=optimizer.ROSTER_SIZE)
+    if not rosters:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Couldn't find any lineups in that text -- expected blocks of "
+                f"{optimizer.ROSTER_SIZE} player names."
+            ),
+        )
+    result = lineup_intake.intake(rosters, lookup, source="manual")
+    if not save:
+        return {
+            "date": day,
+            "dry_run": True,
+            "parsed": len(rosters),
+            "would_accept": len(result["entries"]),
+            "rejected": result["rejected"],
+            "entries": result["entries"],
+        }
+    before = len(get_my_lineups(day)) if not replace else 0
+    merged = _store_my_lineups(day, result["entries"], replace=replace)
+    return {
+        **_pool_payload(day, merged),
+        "parsed": len(rosters),
+        "accepted": len(merged) - before,
         "duplicates_skipped": len(result["entries"]) - (len(merged) - before),
         "rejected": result["rejected"],
     }
