@@ -405,28 +405,74 @@ def _fpts_weight(p: dict[str, Any]) -> float:
 # bettors converging tightly on the objectively best plays, not just
 # whoever happens to be popular.
 FIELD_SHARPNESS_LEVELS = ("low", "marquee", "high")
-# Exponent < 1 compresses the gap between a heavily-owned chalk play
-# and a lightly-owned one, so "low" sampling spreads out more instead
-# of clustering as hard on the very top of the ownership curve.
-_LOW_STAKES_OWNERSHIP_EXPONENT = 0.5
-# How hard "high" leans into point-per-dollar value on top of
-# ownership -- multiplies the usual ownership weight by
-# (fpts/salary)^this, so a good-value player gets sampled meaningfully
-# more even at middling ownership, without discarding the ownership
-# signal (chalk-but-bad-value still isn't what a sharp field plays).
-_HIGH_STAKES_VALUE_EXPONENT = 1.5
+#
+# These describe the STAKES of the contest, and therefore who is in it.
+# The ordering used to be inverted -- "low" produced the least chalky
+# field and "high" the most, which is backwards from how real fields
+# behave:
+#
+#   low      A cheap contest is full of newer and more risk-averse
+#            entrants, and they build the chalkiest lineups on the
+#            board. This is the MOST concentrated field, not the least.
+#
+#   marquee  A milly-maker or other massive-field contest, often at a
+#            low-to-mid entry fee: a genuine mix of safe entrants and
+#            grinders, so it lands between the other two.
+#
+#   high     High stakes. These players know they have to be different
+#            to win, so they limit chalk and hunt lower-owned plays --
+#            the LEAST concentrated field.
+#
+# Exponent > 1 sharpens the ownership curve (chalk pulls even harder);
+# exponent < 1 flattens it (chalk still leads, by less).
+_LOW_STAKES_OWNERSHIP_EXPONENT = 1.5
+_HIGH_STAKES_OWNERSHIP_EXPONENT = 0.5
+
+# But "high stakes" is not "contrarian for its own sake", and modelling
+# it as pure ownership-dampening gets the field wrong in a way that
+# matters. Measured on a real slate: dampening alone dropped cumulative
+# ownership to 108% but only 30.6% of the sub-8%-owned players it
+# rostered had an above-average matchup -- WORSE than the marquee
+# field's 35.2%. That is a field of random cheap names, which is not
+# what a high-stakes player is doing.
+#
+# A sharp entrant takes low-owned plays that have something behind them:
+# the good game environment that isn't the obvious Coors game, the bat
+# facing a good pitcher who is on short rest or into a wind that turns
+# the park over. `edge_composite` is exactly that signal already --
+# scoring.py's matchup multiplier, carrying park, weather, opposing
+# starter and bullpen quality, platoon and recent form, centered on 1.00.
+#
+# Weighting by it lifts the share of GOOD low-owned picks from 30.6% to
+# 49.5% while keeping cumulative ownership below the marquee field. The
+# exponent is steep because the multiplier's real range is narrow
+# (0.82-1.20 on a live slate), so a gentler one moves nothing: at 12, a
+# top environment is worth ~9x an average one before ownership is
+# considered, which is the intended "hunt the spot the field missed".
+_HIGH_STAKES_EDGE_EXPONENT = 12.0
 
 
 def _field_weight_fn(field_sharpness: str) -> Callable[[dict[str, Any]], float]:
     """The per-player sampling weight generate_field() should use for
     one sharpness level -- see FIELD_SHARPNESS_LEVELS' own comment."""
     if field_sharpness == "low":
+        # Cheap contest, safer entrants, chalk pulls hardest.
         return lambda p: _ownership_weight(p) ** _LOW_STAKES_OWNERSHIP_EXPONENT
     if field_sharpness == "high":
+
         def _high_stakes_weight(p: dict[str, Any]) -> float:
-            value = max(p["projected_fpts"], _FPTS_FLOOR) / max(p["salary"], 1)
-            return _ownership_weight(p) * (value ** _HIGH_STAKES_VALUE_EXPONENT)
+            # Chalk is limited rather than abandoned -- a sharp field
+            # still plays the obvious plays, just less of them -- and
+            # what it reaches for instead is a real matchup edge, not
+            # merely a low ownership number.
+            edge = p.get("edge_composite")
+            edge = 1.0 if edge is None else max(edge, 0.01)
+            return (_ownership_weight(p) ** _HIGH_STAKES_OWNERSHIP_EXPONENT) * (
+                edge ** _HIGH_STAKES_EDGE_EXPONENT
+            )
+
         return _high_stakes_weight
+    # Marquee: the ownership curve as it is, no thumb on the scale.
     return _ownership_weight
 
 

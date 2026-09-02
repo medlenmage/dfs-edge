@@ -3185,6 +3185,10 @@ async def main() -> int:
     # noisy statistics of a full random-sampled field -- a heavily
     # chalk-owned, mediocre-value player vs. a lightly-owned, strong-
     # value one, run through each sharpness level's actual weight_fn.
+    # The levels describe the STAKES, and therefore who is in the field:
+    # a cheap contest is full of newer, safer entrants and is the
+    # CHALKIEST; high stakes know they must be different to win and is
+    # the least chalky. The ordering used to be inverted.
     chalk_player = {"ownership_pct": 40.0, "salary": 5000, "projected_fpts": 10.0}
     value_player = {"ownership_pct": 5.0, "salary": 4000, "projected_fpts": 12.0}
 
@@ -3195,18 +3199,42 @@ async def main() -> int:
     check("'marquee' field_sharpness weighs the chalk player over the value player in "
           "direct proportion to ownership% (8x)",
           marquee_ratio == 8.0, str(marquee_ratio))
-    check("'low' field_sharpness compresses the ownership gap -- the chalk player's edge "
-          "over the value player shrinks vs. 'marquee'",
-          low_ratio < marquee_ratio,
+    check("'low' (a cheap contest, newer and safer entrants) leans on chalk HARDER than "
+          "marquee -- it is the most concentrated field, not the least",
+          low_ratio > marquee_ratio,
           f"low={low_ratio:.2f} marquee={marquee_ratio:.2f}")
-    check("'high' field_sharpness's points-per-dollar bonus narrows the chalk player's "
-          "edge vs. 'marquee' (the value player closes the gap on pure value)",
-          high_ratio < marquee_ratio,
-          f"high={high_ratio:.2f} marquee={marquee_ratio:.2f}")
-    check("'high' field_sharpness still weighs the chalk player above zero (still "
-          "ownership-aware, not ownership-blind)",
+    check("'high' (high stakes, players who must differentiate to win) leans on chalk "
+          "LEAST",
+          high_ratio < marquee_ratio < low_ratio,
+          f"high={high_ratio:.2f} marquee={marquee_ratio:.2f} low={low_ratio:.2f}")
+    check("'high' still weighs the chalk player above zero -- a sharp field limits chalk, "
+          "it does not abandon it",
           contest._field_weight_fn("high")(chalk_player) > 0,
           str(contest._field_weight_fn("high")(chalk_player)))
+
+    # And "high stakes" is not "contrarian for its own sake". Two equally
+    # lightly-owned players, one in a good spot and one in a bad one: the
+    # sharp field has to prefer the good spot, or it is just picking
+    # cheap names.
+    good_spot = {"ownership_pct": 4.0, "salary": 4000, "projected_fpts": 10.0,
+                 "edge_composite": 1.18}
+    bad_spot = {"ownership_pct": 4.0, "salary": 4000, "projected_fpts": 10.0,
+                "edge_composite": 0.85}
+    check("'high' prefers the low-owned player who is in a GOOD spot over an equally "
+          "low-owned one in a bad spot -- a sharp entrant hunts the game the field "
+          "missed, not merely a small ownership number",
+          contest._field_weight_fn("high")(good_spot)
+          > 3 * contest._field_weight_fn("high")(bad_spot),
+          f"{contest._field_weight_fn('high')(good_spot):.4f} vs "
+          f"{contest._field_weight_fn('high')(bad_spot):.4f}")
+    check("...and the other two levels are indifferent between them, because matchup "
+          "quality is not what a softer field is selecting on",
+          contest._field_weight_fn("marquee")(good_spot)
+          == contest._field_weight_fn("marquee")(bad_spot))
+    check("a player with no edge_composite is treated as neutral rather than excluded",
+          contest._field_weight_fn("high")(
+              {"ownership_pct": 4.0, "salary": 4000, "projected_fpts": 10.0}
+          ) > 0)
 
     # mul_slate never sets real ownership_pct values (see the "Rake
     # sanity check" section below), so every player floors to the same
@@ -6222,10 +6250,15 @@ async def main() -> int:
 
     marquee_lo_rate = lo_pick_rate("marquee")
     low_lo_rate = lo_pick_rate("low")
-    check("'low' field_sharpness's compressed ownership weighting rosters the lightly-owned "
-          "same-position alternative measurably more often than 'marquee' does",
-          low_lo_rate > marquee_lo_rate * 1.5,
+    high_lo_rate = lo_pick_rate("high")
+    check("'low' (cheap contest, safer entrants) rosters the lightly-owned alternative "
+          "measurably LESS than marquee -- it is the chalkiest field on the board",
+          low_lo_rate * 1.5 < marquee_lo_rate,
           f"low={low_lo_rate:.3f} marquee={marquee_lo_rate:.3f}")
+    check("'high' (high stakes) rosters it MOST -- differentiating is how you win a "
+          "contest full of people who can all see the chalk",
+          high_lo_rate > marquee_lo_rate > low_lo_rate,
+          f"high={high_lo_rate:.3f} > marquee={marquee_lo_rate:.3f} > low={low_lo_rate:.3f}")
 
     # sample_size=250 is a deliberate exact divisor of both field_size
     # values used below (500 and 100,000) -- when field_size isn't an
@@ -8062,10 +8095,14 @@ async def main() -> int:
     def _avg_own(b):
         return sum(e["total_ownership_pct"] for e in b["entries"]) / len(b["entries"])
 
-    check("field sharpness changes the contest the generator BUILDS -- a sharper field "
-          "clusters harder on what the public actually rosters",
-          _avg_own(_sharp_batches["high"]) > _avg_own(_sharp_batches["low"]),
-          f"high {_avg_own(_sharp_batches['high']):.1f}% vs low {_avg_own(_sharp_batches['low']):.1f}%")
+    check("field sharpness changes the contest the generator BUILDS, in the direction "
+          "real fields run: a cheap contest is the chalkiest, high stakes the least",
+          _avg_own(_sharp_batches["low"])
+          > _avg_own(_sharp_batches["marquee"])
+          > _avg_own(_sharp_batches["high"]),
+          f"low {_avg_own(_sharp_batches['low']):.1f}% > "
+          f"marquee {_avg_own(_sharp_batches['marquee']):.1f}% > "
+          f"high {_avg_own(_sharp_batches['high']):.1f}%")
     check("the batch records what its opponents were built to be, so nothing downstream has "
           "to assume a default",
           [b["field_sharpness"] for b in _sharp_batches.values()] == ["low", "marquee", "high"])

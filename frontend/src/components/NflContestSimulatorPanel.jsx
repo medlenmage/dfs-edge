@@ -138,7 +138,7 @@ export function NflContestSimulatorPanel({ batch, onOpenGenerator }) {
           <label
             className="dim"
             style={{ fontSize: 13 }}
-            title="How sharp the sampled public field is. Low: softer/chalkier. Marquee (default): a realistic large-field GPP. High: sharp bettors converging on the best pure value plays."
+            title="Contest stakes, and so who is in the field. Low: a cheap contest -- newer, safer entrants, the chalkiest lineups. Marquee (default): a milly-maker or other massive field, a mix of both. High: high stakes, where players limit chalk and hunt low-owned plays that have a real matchup edge behind them."
           >
             Field sharpness{' '}
             <select value={fieldSharpness} onChange={(e) => setFieldSharpness(e.target.value)}>

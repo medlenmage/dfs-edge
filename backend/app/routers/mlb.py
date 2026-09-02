@@ -776,7 +776,7 @@ async def build_contest_field(
     field_sharpness: str = Body(
         "marquee",
         embed=True,
-        description="How sharp the simulated public field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays).",
+        description="Contest stakes, and so who is in the field: 'low' (a cheap contest -- newer, safer entrants, the chalkiest lineups), 'marquee' (default, a milly-maker or other massive field, a mix of both), or 'high' (high stakes, where players limit chalk and hunt low-owned plays with a real matchup edge behind them).",
     ),
 ) -> dict[str, Any]:
     """
@@ -1102,7 +1102,7 @@ async def build_contest_entries_simulated(
     field_sharpness: str = Body(
         "marquee",
         embed=True,
-        description="How sharp the simulated opponent field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays). Ignored when self_play=True -- self-play never samples a separate field.",
+        description="Contest stakes, and so who is in the field: 'low' (a cheap contest -- newer, safer entrants, the chalkiest lineups), 'marquee' (default, a milly-maker or other massive field, a mix of both), or 'high' (high stakes, where players limit chalk and hunt low-owned plays with a real matchup edge behind them). Ignored when self_play=True -- self-play never samples a separate field.",
     ),
     first_place_pct: float | None = Body(
         None,
@@ -1977,7 +1977,7 @@ async def simulate_dk_entries(
     field_sharpness: str = Body(
         "marquee",
         embed=True,
-        description="How sharp the simulated field is: 'low' (softer/chalkier, more dispersed ownership), 'marquee' (default, a realistic large-field GPP), or 'high' (sharp bettors converging on the best pure value plays).",
+        description="Contest stakes, and so who is in the field: 'low' (a cheap contest -- newer, safer entrants, the chalkiest lineups), 'marquee' (default, a milly-maker or other massive field, a mix of both), or 'high' (high stakes, where players limit chalk and hunt low-owned plays with a real matchup edge behind them).",
     ),
 ) -> dict[str, Any]:
     """
