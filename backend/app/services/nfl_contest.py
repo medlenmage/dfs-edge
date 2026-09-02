@@ -628,8 +628,12 @@ def generate_field(
     """
     if sample_size < 1:
         raise ContestError("sample_size must be at least 1.")
-    if sample_size > MAX_SAMPLE_SIZE:
-        raise ContestError(f"sample_size can't exceed {MAX_SAMPLE_SIZE}.")
+    # MAX_USER_LINEUPS, not MAX_SAMPLE_SIZE: this builds the contest
+    # itself now (build_contest_lineups), not only a sample for the
+    # simulator to rank against. MAX_SAMPLE_SIZE stays the cap on how
+    # much of a batch gets SIMULATED, which is a different question.
+    if sample_size > MAX_USER_LINEUPS:
+        raise ContestError(f"sample_size can't exceed {MAX_USER_LINEUPS:,}.")
     if field_sharpness not in FIELD_SHARPNESS_LEVELS:
         raise ContestError(
             f"Unknown field_sharpness '{field_sharpness}'. Choose one of: "
@@ -901,6 +905,7 @@ async def build_contest_lineups(
     *,
     season: int,
     seed: int | None = None,
+    field_sharpness: str = "marquee",
 ) -> dict[str, Any]:
     """
     Build a whole NFL CONTEST -- and nothing else. The generator half of
@@ -934,10 +939,16 @@ async def build_contest_lineups(
     candidates_by_slot, _ = _build_candidate_pool(slate)
     running_qb_ids, pass_catching_rb_ids = await _classify_pool(candidates_by_slot, season)
 
-    entries = generate_entries(
+    # generate_field, not generate_entries. The two are different
+    # models: generate_entries weights by projected points and exists to
+    # build lineups YOU would enter; generate_field weights by ownership
+    # and builds the lineups the public actually enters. This function
+    # claims to build a contest, so it has to use the second -- the same
+    # correction MLB's generator got.
+    entries = generate_field(
         slate, num_lineups,
         min_salary=0, max_salary=SALARY_CAP,
-        allow_duplicates=True, seed=seed,
+        seed=seed, field_sharpness=field_sharpness,
         running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
 
@@ -950,6 +961,9 @@ async def build_contest_lineups(
         "field_size": contest_size,
         "num_entries_requested": num_lineups,
         "num_entries_built": len(entries),
+        # What the opponents were built to look like, recorded so the
+        # simulator and the UI report the field that actually exists.
+        "field_sharpness": field_sharpness,
         "num_distinct_entries": len(
             {frozenset(pl["id"] for pl in e["players"]) for e in entries}
         ),

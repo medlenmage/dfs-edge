@@ -53,6 +53,7 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
   // contest -- the backend derives a deterministic seed from them, so
   // the table no longer reshuffles on every click for no reason.
   const [reroll, setReroll] = useState(0)
+  const [fieldSharpness, setFieldSharpness] = useState('marquee')
 
   useEffect(() => {
     api.nflContestTypes().then((r) => setContestTypes(r.contest_types)).catch(() => {})
@@ -74,6 +75,7 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
       const result = await api.nflBuildContestEntries(season, week, {
         contestType,
         contestSize,
+        fieldSharpness,
         reroll: rerollOverride ?? reroll,
       })
       setState({ status: 'ready', ...result })
@@ -96,6 +98,18 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
                 {c.label}
               </option>
             ))}
+          </select>
+        </label>
+        <label
+          className="dim"
+          style={{ fontSize: 13 }}
+          title="The stakes, and so who you're playing against. A cheap contest is full of newer, safer entrants and builds the chalkiest lineups; high stakes know they have to be different to win, so they limit chalk and hunt low-owned plays with a real edge behind them -- not just a small ownership number. It lives here because the generator is what builds the opponents; the simulator prices the pool it's handed."
+        >
+          Field{' '}
+          <select value={fieldSharpness} onChange={(e) => setFieldSharpness(e.target.value)}>
+            <option value="low">Low stakes -- chalkiest</option>
+            <option value="marquee">Marquee -- a mix of both</option>
+            <option value="high">High stakes -- least chalky</option>
           </select>
         </label>
         <label

@@ -12,6 +12,7 @@ Run it with:
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect as inspect_module
 import random
 import sys
@@ -326,11 +327,16 @@ def main() -> int:
     # --------------------------------------------------------------------
     print("\nLineup optimizer (DraftKings Classic NFL)")
 
-    def player(id_, name, team, pos, salary, fpts, own=10.0):
-        return {
+    def player(id_, name, team, pos, salary, fpts, own=10.0, edge=None):
+        p = {
             "dk_id": id_, "name": name, "salary": salary, "position": pos,
             "projection": {"fpts": fpts, "ownership_pct": own},
         }
+        if edge is not None:
+            # Shaped like nfl_scoring.score_player()'s return, which is
+            # where a real slate's composite comes from.
+            p["edge"] = {"score": 50.0, "composite": edge}
+        return p
 
     team_a = [
         player("1", "QB_A", "SEA", "QB", 7000, 22),
@@ -357,6 +363,32 @@ def main() -> int:
     pool = nfl_optimizer.build_player_pool(slate)
     check("build_player_pool flattens both teams' rosters",
           len(pool) == 16, str(len(pool)))
+
+    # nfl_scoring computes a matchup multiplier, but the pool never
+    # carried it -- so the contest field sampler's "high stakes" model
+    # had nothing to tell a low-owned player in a GOOD spot from a
+    # low-owned player in a bad one, and degraded to picking cheap
+    # names (measured on MLB as WORSE than an ordinary field).
+    _edge_slate = {
+        "games": [
+            {
+                "home": {"abbrev": "SEA", "players": [
+                    {**team_a[0], "edge": {"score": 70.0, "composite": 1.15}},
+                    *team_a[1:],
+                ]},
+                "away": {"abbrev": "NE", "players": team_b},
+            }
+        ]
+    }
+    _edge_pool = nfl_optimizer.build_player_pool(_edge_slate)
+    _qb = next(p for p in _edge_pool if p["name"] == "QB_A")
+    check("the pool carries nfl_scoring's matchup multiplier as edge_composite, under the "
+          "same name MLB's pool uses",
+          _qb["edge_composite"] == 1.15, str(_qb.get("edge_composite")))
+    check("a player with no computed edge carries None rather than a fabricated 1.0 -- the "
+          "field sampler treats missing as neutral itself, and inventing a value here "
+          "would hide how much of a slate is actually scored",
+          next(p for p in _edge_pool if p["name"] == "RB_A1")["edge_composite"] is None)
 
     result = nfl_optimizer.generate_lineups(slate, num_lineups=1)
     lineup = result["lineups"][0]
@@ -842,6 +874,36 @@ def main() -> int:
           all(c.get("sizes") and c["field_size"] in c["sizes"]
               for c in nfl_contest.CONTEST_TYPES.values()),
           str({k: c.get("sizes") for k, c in nfl_contest.CONTEST_TYPES.items()}))
+
+    # The NFL generator built its "contest" with generate_entries --
+    # the projected-points model for lineups YOU would enter -- so field
+    # sharpness could not affect it at all. Same correction MLB got: the
+    # opponents are built with the ownership model now.
+    # `slate` here has flat 10% ownership on every player, so the three
+    # sharpness levels would be indistinguishable on it. Give the field
+    # a real ownership curve -- chalk concentrated on a handful -- or the
+    # check proves nothing.
+    sharp_slate = copy.deepcopy(slate)
+    for _g in sharp_slate["games"]:
+        for _side in ("home", "away"):
+            for _i, _p in enumerate(_g[_side]["players"]):
+                _p["projection"]["ownership_pct"] = 35.0 if _i % 4 == 0 else 3.0
+
+    def _sharp_own(level):
+        b = asyncio.run(nfl_contest.build_contest_lineups(
+            sharp_slate, "gpp_large", 120, season=2098, seed=9, field_sharpness=level))
+        return sum(e["total_ownership_pct"] for e in b["entries"]) / len(b["entries"]), b
+
+    _low_own, _low_b = _sharp_own("low")
+    _mar_own, _ = _sharp_own("marquee")
+    _high_own, _ = _sharp_own("high")
+    check("field sharpness now changes the NFL contest the generator BUILDS, in the "
+          "direction real fields run -- a cheap contest is the chalkiest, high stakes the "
+          "least",
+          _low_own > _mar_own > _high_own,
+          f"low {_low_own:.1f}% > marquee {_mar_own:.1f}% > high {_high_own:.1f}%")
+    check("and the NFL batch records what its opponents were built to be",
+          _low_b["field_sharpness"] == "low", str(_low_b.get("field_sharpness")))
 
     built = asyncio.run(nfl_contest.build_contest_lineups(slate, "gpp_small", 6, season=2098, seed=5))
     check("build_contest_lineups builds exactly as many lineups as the contest holds -- the two "
