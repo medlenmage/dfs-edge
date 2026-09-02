@@ -98,13 +98,17 @@ export function DkSlatePicker({ date, onLoaded }) {
       {open && (
         <div
           className="card"
+          // Anchored to the RIGHT edge, not the left: this pops open
+          // inside the Data menu, which is itself flush against the
+          // right edge of the window, so a left-anchored 320px list ran
+          // straight off-screen and its game times were unreadable.
           style={{
             position: 'absolute',
             top: '100%',
-            left: 0,
+            right: 0,
             marginTop: 4,
             zIndex: 20,
-            minWidth: 320,
+            width: 'max(320px, 100%)',
             maxHeight: 360,
             overflowY: 'auto',
           }}

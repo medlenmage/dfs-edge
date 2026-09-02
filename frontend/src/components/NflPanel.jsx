@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api'
 import { NflContestGeneratorPanel } from './NflContestGeneratorPanel'
 import { NflContestSimulatorPanel } from './NflContestSimulatorPanel'
@@ -100,7 +101,7 @@ function NflMatchups({ slate }) {
  * calendar date, so this manages its own state rather than sharing
  * App.jsx's date-driven slate fetch.
  */
-export function NflPanel({ tab: controlledTab, onTabChange }) {
+export function NflPanel({ tab: controlledTab, onTabChange, headerSlot }) {
   const [season, setSeason] = useState('')
   const [week, setWeek] = useState('')
   const [slate, setSlate] = useState(null)
@@ -112,6 +113,10 @@ export function NflPanel({ tab: controlledTab, onTabChange }) {
   const [internalTab, setInternalTab] = useState('matchups')
   const tab = controlledTab ?? internalTab
   const setTab = onTabChange ?? setInternalTab
+  // Generator and simulator used to be two rail entries with a tab
+  // switch between them; they're one page now. 'simulator' is kept as an
+  // alias so a stored/controlled tab id from before still resolves.
+  const contestTab = tab === 'contest' || tab === 'simulator'
   const [playerSubTab, setPlayerSubTab] = useState('QB')
   // The contest the generator last built, handed to the Simulator tab.
   // Lives here rather than inside either panel because it's the one
@@ -124,6 +129,30 @@ export function NflPanel({ tab: controlledTab, onTabChange }) {
   const [inhouseLoading, setInhouseLoading] = useState(false)
   const salaryInputRef = useRef(null)
   const projectionInputRef = useRef(null)
+  // The NFL side had no header bar at all: the week -- the single most
+  // important piece of context on the page -- was a bare number input
+  // buried in a row of upload buttons. It now gets the same sticky bar
+  // MLB's date has, portalled into the slot App holds open above the
+  // scrolling content. State stays here, because an NFL slate is keyed
+  // by season+week and this panel is what owns that.
+  const [dataMenuOpen, setDataMenuOpen] = useState(false)
+  const dataMenuRef = useRef(null)
+
+  useEffect(() => {
+    if (!dataMenuOpen) return
+    const onPointerDown = (e) => {
+      if (!dataMenuRef.current?.contains(e.target)) setDataMenuOpen(false)
+    }
+    const onKey = (e) => {
+      if (e.key === 'Escape') setDataMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [dataMenuOpen])
 
   async function load(overrideSeason, overrideWeek, { inhouse = false } = {}) {
     setLoading(true)
@@ -203,74 +232,170 @@ export function NflPanel({ tab: controlledTab, onTabChange }) {
     }
   }
 
+  // A week stepper needs the week as a number, and NFL regular season
+  // is 1-18. Stepping past either end is simply a no-op rather than a
+  // request the backend will reject.
+  const weekNum = Number(week) || null
+  function stepWeek(delta) {
+    if (!weekNum) return
+    const next = weekNum + delta
+    if (next < 1 || next > 18) return
+    setWeek(String(next))
+    load(season || null, next)
+  }
+
+  // Slate summary for the header, from the same numbers the matchup
+  // cards already show -- no extra fetch.
+  const games = slate?.games || []
+  const totals = games.map((g) => g.betting?.total_line).filter((n) => n != null)
+  const avgTotal = totals.length
+    ? (totals.reduce((a, b) => a + b, 0) / totals.length).toFixed(1)
+    : null
+  const sides = games.flatMap((g) => [g.away, g.home]).filter((t) => t?.implied_total != null)
+  const topTeam = sides.length
+    ? sides.reduce((best, t) => (t.implied_total > best.implied_total ? t : best))
+    : null
+
+  const header = headerSlot
+    ? createPortal(
+        <>
+          <div className="datestep" aria-label="Week">
+            <button onClick={() => stepWeek(-1)} disabled={!weekNum || weekNum <= 1} aria-label="Previous week">
+              ‹
+            </button>
+            <span className="weeklabel">{weekNum ? `Week ${weekNum}` : 'Week —'}</span>
+            <button onClick={() => stepWeek(1)} disabled={!weekNum || weekNum >= 18} aria-label="Next week">
+              ›
+            </button>
+          </div>
+
+          <label className="dim" style={{ fontSize: 12.5 }}>
+            Season{' '}
+            <input
+              type="number"
+              value={season}
+              placeholder={String(currentNflSeason())}
+              onChange={(e) => setSeason(e.target.value)}
+              onBlur={() => load()}
+              style={{ width: 70 }}
+            />
+          </label>
+
+          {games.length > 0 && (
+            <div className="kpis" aria-label="Week summary">
+              <div className="kpi">
+                <b>{games.length}</b>
+                <span>games</span>
+              </div>
+              <div className="kpi">
+                <b>{avgTotal ?? '—'}</b>
+                <span>avg total</span>
+              </div>
+              <div className="kpi">
+                <b>
+                  {topTeam ? `${topTeam.abbrev} ${topTeam.implied_total.toFixed(1)}` : '—'}
+                </b>
+                <span>top implied</span>
+              </div>
+            </div>
+          )}
+
+          <div className="grow" />
+
+          <div className="status">
+            <span className={`dot ${loading ? 'warn' : ''}`} />
+            {loading ? 'Loading…' : 'Data loaded'}
+          </div>
+
+          {/* Same one-home-for-every-load-control shape as MLB's. */}
+          <div className="menu-wrap" ref={dataMenuRef}>
+            <button onClick={() => setDataMenuOpen((v) => !v)} aria-expanded={dataMenuOpen}>
+              Data ▾
+            </button>
+            {dataMenuOpen && (
+              <div className="menu" role="menu">
+                <div className="menu-row">
+                  <div>
+                    <div className="t">Matchups &amp; lines</div>
+                    <div className="s">Schedule, Vegas totals and spreads, weather</div>
+                  </div>
+                  <button className="sm" onClick={() => load()} disabled={loading}>
+                    {loading ? 'Loading…' : 'Reload'}
+                  </button>
+                </div>
+
+                <div className="menu-row">
+                  <div>
+                    <div className="t">DraftKings salaries</div>
+                    <div className="s">Upload a DK NFL salary CSV for this week</div>
+                  </div>
+                  <button className="sm" onClick={() => salaryInputRef.current?.click()}>
+                    Choose file
+                  </button>
+                </div>
+
+                <div className="menu-row">
+                  <div>
+                    <div className="t">RotoWire projections</div>
+                    <div className="s">
+                      Live optimizer pool — FPTS and rostership, no CSV. Doesn&rsquo;t touch
+                      DK salaries.
+                    </div>
+                  </div>
+                  <button className="sm" onClick={refreshFromRotowire} disabled={rotowireLoading}>
+                    {rotowireLoading ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
+
+                <div className="menu-row">
+                  <div>
+                    <div className="t">In-house projections</div>
+                    <div className="s">
+                      This app&rsquo;s own FPTS, ownership, ceiling and leverage from real game logs
+                    </div>
+                  </div>
+                  <button className="sm" onClick={loadInhouse} disabled={inhouseLoading || !slate}>
+                    {inhouseLoading ? 'Computing…' : 'Compute'}
+                  </button>
+                </div>
+
+                <div className="menu-row">
+                  <div>
+                    <div className="t">Upload a projections CSV</div>
+                    <div className="s">A RotoWire NFL projections export for this week</div>
+                  </div>
+                  <button className="sm" onClick={() => projectionInputRef.current?.click()}>
+                    Choose file
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </>,
+        headerSlot,
+      )
+    : null
+
   return (
     <div>
-      <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
-        <label className="dim" style={{ fontSize: 13 }}>
-          Season{' '}
-          <input
-            type="number"
-            value={season}
-            placeholder={String(currentNflSeason())}
-            onChange={(e) => setSeason(e.target.value)}
-            style={{ width: 70 }}
-          />
-        </label>
-        <label className="dim" style={{ fontSize: 13 }}>
-          Week{' '}
-          <input
-            type="number"
-            min="1"
-            max="18"
-            value={week}
-            onChange={(e) => setWeek(e.target.value)}
-            style={{ width: 55 }}
-          />
-        </label>
-        <button onClick={() => load()} disabled={loading}>
-          {loading ? 'Loading…' : 'Load'}
-        </button>
-        <input
-          ref={salaryInputRef}
-          type="file"
-          accept=".csv"
-          onChange={handleSalaryUpload}
-          style={{ display: 'none' }}
-        />
-        <button
-          onClick={() => salaryInputRef.current?.click()}
-          title="Upload a DraftKings NFL salary CSV for this week"
-        >
-          Upload salaries
-        </button>
-        <input
-          ref={projectionInputRef}
-          type="file"
-          accept=".csv"
-          onChange={handleProjectionUpload}
-          style={{ display: 'none' }}
-        />
-        <button
-          onClick={() => projectionInputRef.current?.click()}
-          title="Upload a RotoWire NFL projections CSV for this week"
-        >
-          Upload projections
-        </button>
-        <button
-          onClick={refreshFromRotowire}
-          disabled={rotowireLoading}
-          title="Pull RotoWire's own live optimizer player pool directly -- salary, position, opponent, FPTS, and rostership% -- with no manual CSV download/upload. Always bypasses the cache for genuinely live data. Doesn't touch DK salaries -- RotoWire's NFL export has no DK numeric player id, so a real DK salary CSV is still needed separately."
-        >
-          {rotowireLoading ? 'Loading…' : 'Refresh from RotoWire'}
-        </button>
-        <button
-          onClick={loadInhouse}
-          disabled={inhouseLoading || !slate}
-          title="Compute this app's own in-house FPTS, ownership%, ceiling and leverage for this week, from real prior-season game logs scaled by each player's matchup. Shown alongside RotoWire's numbers, not instead of them. Reads a real game log per player, so the first run takes a moment."
-        >
-          {inhouseLoading ? 'Computing…' : 'Load in-house projections'}
-        </button>
-      </div>
+      {header}
+
+      {/* The visible controls all moved into the header's Data menu;
+          these two inputs are only here to be clicked programmatically. */}
+      <input
+        ref={salaryInputRef}
+        type="file"
+        accept=".csv"
+        onChange={handleSalaryUpload}
+        style={{ display: 'none' }}
+      />
+      <input
+        ref={projectionInputRef}
+        type="file"
+        accept=".csv"
+        onChange={handleProjectionUpload}
+        style={{ display: 'none' }}
+      />
 
       {(salaryMsg || projectionMsg) && (
         <div className="dim" style={{ fontSize: 13, marginBottom: 12 }}>
@@ -310,11 +435,8 @@ export function NflPanel({ tab: controlledTab, onTabChange }) {
             <button className={`tab ${tab === 'lineups' ? 'active' : ''}`} onClick={() => setTab('lineups')}>
               Lineups
             </button>
-            <button className={`tab ${tab === 'contest' ? 'active' : ''}`} onClick={() => setTab('contest')}>
-              Contest Generator
-            </button>
-            <button className={`tab ${tab === 'simulator' ? 'active' : ''}`} onClick={() => setTab('simulator')}>
-              Simulator
+            <button className={`tab ${contestTab ? 'active' : ''}`} onClick={() => setTab('contest')}>
+              Contest &amp; sim
             </button>
           </div>
 
@@ -340,20 +462,24 @@ export function NflPanel({ tab: controlledTab, onTabChange }) {
             </>
           )}
           {tab === 'lineups' && <NflLineupsPanel season={slate.season} week={slate.week} slate={slate} />}
-          {tab === 'contest' && (
+          {contestTab && (
             <NflContestGeneratorPanel
               season={slate.season}
               week={slate.week}
-              onSimulate={(built) => {
-                setContestBatch(built)
-                setTab('simulator')
-              }}
-            />
-          )}
-          {tab === 'simulator' && (
-            <NflContestSimulatorPanel
-              batch={contestBatch}
-              onOpenGenerator={() => setTab('contest')}
+              onBuilt={setContestBatch}
+              simulator={
+                contestBatch ? (
+                  <>
+                    <div className="section-head">
+                      <h2>Simulate</h2>
+                      <span className="hint">
+                        price this contest — entry cost and payout curve set here
+                      </span>
+                    </div>
+                    <NflContestSimulatorPanel batch={contestBatch} />
+                  </>
+                ) : null
+              }
             />
           )}
         </>

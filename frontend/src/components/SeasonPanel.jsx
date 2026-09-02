@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api'
 
 // The Sleeper account, once connected, is worth remembering between
@@ -650,7 +651,7 @@ const HEADINGS = {
   },
 }
 
-export function SeasonPanel({ tab, onTabChange }) {
+export function SeasonPanel({ tab, onTabChange, headerSlot }) {
   const [account, setAccount] = useState(loadSaved)
   const [leagueId, setLeagueId] = useState(loadSaved()?.selectedLeagueId || '')
 
@@ -674,13 +675,81 @@ export function SeasonPanel({ tab, onTabChange }) {
 
   const heading = HEADINGS[tab] || HEADINGS.board
   const userId = account?.user?.user_id
+  const connected = Boolean(userId)
   // A draft attached to the selected league is the one that matters; a
   // mock draft on the account is still offered, since rehearsing is the
   // whole point of having this before draft night.
   const drafts = account?.drafts || []
 
+  // Which league you're looking at is the Season section's equivalent
+  // of MLB's date -- it re-frames every number on the page -- so it
+  // belongs in the sticky header rather than in a card you scroll past.
+  // The connect FORM stays in the body: it's a form, and it only shows
+  // until you're connected.
+  const header =
+    headerSlot && tab !== 'bestball'
+      ? createPortal(
+          connected ? (
+            <>
+              {account.leagues?.length > 0 && (
+                <label className="dim" style={{ fontSize: 12.5 }}>
+                  League{' '}
+                  <select value={leagueId} onChange={(e) => chooseLeague(e.target.value)}>
+                    <option value="">(no league — standard 12-team value)</option>
+                    {account.leagues.map((lg) => (
+                      <option key={lg.league_id} value={lg.league_id}>
+                        {lg.name} · {lg.total_rosters} teams · {lg.status}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              <div className="kpis" aria-label="Sleeper account">
+                <div className="kpi">
+                  <b>{account.user.display_name || account.user.username}</b>
+                  <span>sleeper</span>
+                </div>
+                <div className="kpi">
+                  <b>{account.leagues?.length || 0}</b>
+                  <span>leagues</span>
+                </div>
+                <div className="kpi">
+                  <b>{account.drafts?.length || 0}</b>
+                  <span>drafts</span>
+                </div>
+              </div>
+
+              <div className="grow" />
+
+              <div className="status">
+                <span className="dot" />
+                Connected
+              </div>
+              <button className="sm" onClick={disconnect}>
+                Disconnect
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="status">
+                <span className="dot warn" />
+                Not connected
+              </div>
+              <span className="dim" style={{ fontSize: 12.5 }}>
+                connect a Sleeper username below to see your own leagues and drafts
+              </span>
+              <div className="grow" />
+            </>
+          ),
+          headerSlot,
+        )
+      : null
+
   return (
     <>
+      {header}
+
       <div className="ph">
         <div>
           <h1>{heading.title}</h1>
@@ -688,23 +757,8 @@ export function SeasonPanel({ tab, onTabChange }) {
         </div>
       </div>
 
-      {tab !== 'bestball' && (
-        <>
-          <ConnectCard saved={account} onConnect={connect} onDisconnect={disconnect} />
-          {account?.leagues?.length > 0 && (
-            <div className="controls" style={{ marginBottom: 16 }}>
-              <label style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>League</label>
-              <select value={leagueId} onChange={(e) => chooseLeague(e.target.value)}>
-                <option value="">(no league — value for a standard 12-team league)</option>
-                {account.leagues.map((lg) => (
-                  <option key={lg.league_id} value={lg.league_id}>
-                    {lg.name} · {lg.total_rosters} teams · {lg.status}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-        </>
+      {tab !== 'bestball' && !connected && (
+        <ConnectCard saved={account} onConnect={connect} onDisconnect={disconnect} />
       )}
 
       {tab === 'board' && <BoardView leagueId={leagueId} />}
