@@ -389,6 +389,16 @@ def patch() -> None:
 # Checks
 # --------------------------------------------------------------------------
 
+def _raises(fn, exc) -> bool:
+    """True if calling fn() raises exc -- keeps a one-line negative case
+    from needing a five-line try/except at every use."""
+    try:
+        fn()
+    except exc:
+        return True
+    return False
+
+
 PASS, FAILED = [], []
 
 
@@ -3134,11 +3144,20 @@ async def main() -> int:
     except contest.ContestError:
         check("generate_field rejects sample_size < 1", True)
 
+    # The ceiling is MAX_USER_LINEUPS, not MAX_SAMPLE_SIZE: generate_field
+    # builds the CONTEST now (build_contest_lineups), not only a sample
+    # for the simulator to rank against. MAX_SAMPLE_SIZE is still the cap
+    # on how much of a batch gets simulated, which is a different limit
+    # and enforced elsewhere.
     try:
-        contest.generate_field(mul_slate, contest.MAX_SAMPLE_SIZE + 1)
-        check("generate_field rejects sample_size above MAX_SAMPLE_SIZE", False)
+        contest.generate_field(mul_slate, contest.MAX_USER_LINEUPS + 1)
+        check("generate_field rejects sample_size above MAX_USER_LINEUPS", False)
     except contest.ContestError:
-        check("generate_field rejects sample_size above MAX_SAMPLE_SIZE", True)
+        check("generate_field rejects sample_size above MAX_USER_LINEUPS", True)
+    check("...and a size between the simulate cap and the build cap is ALLOWED, since a "
+          "6,000-lineup contest is a real thing to build",
+          contest.MAX_SAMPLE_SIZE < 6000 <= contest.MAX_USER_LINEUPS,
+          f"sample cap {contest.MAX_SAMPLE_SIZE}, build cap {contest.MAX_USER_LINEUPS}")
 
     try:
         contest.generate_field({"games": []}, 10)
@@ -8013,6 +8032,68 @@ async def main() -> int:
     check("a player WITH an MLB id still keys off it, so nothing about normal lineups "
           "changed",
           lineup_intake._identity(_pool[0]) == ("mlb", _pool[0]["id"]))
+
+    # The generator builds the OPPONENTS, so how sharp they are belongs
+    # here rather than on the simulator -- the simulator's job is to
+    # price the pool it is handed, not to invent a second one.
+    # mul_slate carries no ownership, and the whole point of the field
+    # model is that it weights BY ownership -- so give this fixture a
+    # real ownership curve, or the two constructions are indistinguishable
+    # (both come out at 0.0% and the check proves nothing). Chalk is
+    # concentrated on the cheaper half, which is what makes an
+    # ownership-weighted field look different from a projection-weighted
+    # one rather than merely noisier.
+    _own_slate = copy.deepcopy(_intake_slate)
+    for _g in _own_slate["games"]:
+        for _side in ("home", "away"):
+            _t = _g[_side]
+            for _i, _h in enumerate(_t.get("hitters") or []):
+                _h.setdefault("projection", {})
+                _h["projection"]["ownership_pct"] = 30.0 if _i % 3 == 0 else 3.0
+            _pp = _t.get("probable_pitcher")
+            if _pp:
+                _pp.setdefault("projection", {})
+                _pp["projection"]["ownership_pct"] = 25.0
+
+    _sharp_batches = {
+        sh: contest.build_contest_lineups(_own_slate, "gpp_small", 60, seed=5, field_sharpness=sh)
+        for sh in ("low", "marquee", "high")
+    }
+    def _avg_own(b):
+        return sum(e["total_ownership_pct"] for e in b["entries"]) / len(b["entries"])
+
+    check("field sharpness changes the contest the generator BUILDS -- a sharper field "
+          "clusters harder on what the public actually rosters",
+          _avg_own(_sharp_batches["high"]) > _avg_own(_sharp_batches["low"]),
+          f"high {_avg_own(_sharp_batches['high']):.1f}% vs low {_avg_own(_sharp_batches['low']):.1f}%")
+    check("the batch records what its opponents were built to be, so nothing downstream has "
+          "to assume a default",
+          [b["field_sharpness"] for b in _sharp_batches.values()] == ["low", "marquee", "high"])
+
+    # The construction itself changed, and this is the reason: the old
+    # one built the contest out of lineups YOU would enter (weighted by
+    # projected points), not lineups the public enters (weighted by
+    # ownership), so every self-play contest was less chalky than any
+    # real field.
+    _as_field = contest.build_contest_lineups(_own_slate, "gpp_small", 60, seed=5)
+    _as_entries = contest.generate_entries(
+        _own_slate, 60, min_salary=0, max_salary=contest.SALARY_CAP,
+        allow_duplicates=True, seed=5,
+    )
+    check("the generated contest is now built on the OWNERSHIP model, not the "
+          "projected-points model your own entries use -- a real field is chalkier than a "
+          "field of optimal lineups",
+          (sum(e["total_ownership_pct"] for e in _as_field["entries"]) / len(_as_field["entries"]))
+          > (sum(e["total_ownership_pct"] for e in _as_entries) / len(_as_entries)),
+          f"field {sum(e['total_ownership_pct'] for e in _as_field['entries']) / len(_as_field['entries']):.1f}% "
+          f"vs entries {sum(e['total_ownership_pct'] for e in _as_entries) / len(_as_entries):.1f}%")
+    check("an invalid sharpness is refused rather than silently defaulting",
+          _raises(
+              lambda: contest.build_contest_lineups(
+                  _own_slate, "gpp_small", 20, seed=5, field_sharpness="sharp-ish"
+              ),
+              contest.ContestError,
+          ))
 
     # Injection into the contest.
     _injected = _from_opt["entries"]

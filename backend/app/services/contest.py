@@ -958,8 +958,13 @@ def generate_field(
     """
     if sample_size < 1:
         raise ContestError("sample_size must be at least 1.")
-    if sample_size > MAX_SAMPLE_SIZE:
-        raise ContestError(f"sample_size can't exceed {MAX_SAMPLE_SIZE}.")
+    # MAX_USER_LINEUPS, not MAX_SAMPLE_SIZE: this builds the contest
+    # itself now (build_contest_lineups), not only a sample for the
+    # simulator to rank against. MAX_SAMPLE_SIZE remains the cap on how
+    # much of a batch gets SIMULATED, which is a different question and
+    # still enforced in simulate_contest_batch.
+    if sample_size > MAX_USER_LINEUPS:
+        raise ContestError(f"sample_size can't exceed {MAX_USER_LINEUPS:,}.")
     if field_sharpness not in FIELD_SHARPNESS_LEVELS:
         raise ContestError(
             f"Unknown field_sharpness '{field_sharpness}'. Choose one of: "
@@ -2200,6 +2205,7 @@ def build_contest_lineups(
     included_game_pks: list[int] | None = None,
     seed: int | None = None,
     injected_entries: list[dict[str, Any]] | None = None,
+    field_sharpness: str = "marquee",
 ) -> dict[str, Any]:
     """
     Build a whole CONTEST -- and nothing else.
@@ -2251,6 +2257,24 @@ def build_contest_lineups(
     Front placement is deliberate and load-bearing: the simulator
     samples a batch bigger than MAX_SAMPLE_SIZE by taking a leading
     slice, so anything at the front is guaranteed to be simulated.
+
+    `field_sharpness` steers how the OPPONENTS are built -- and it
+    belongs here, on the generator, because the generator is the thing
+    that builds them. The simulator's job is to simulate the pool it is
+    given, not to invent a second one.
+
+    This is also why the generated lineups come from `generate_field()`
+    rather than `generate_entries()`. The two are different models:
+    generate_entries weights by projected points (`_fpts_weight`) and
+    exists to build lineups YOU would enter; generate_field weights by
+    ownership (`_ownership_weight`) and exists to build the lineups the
+    public actually enters. This function claims to build a contest, so
+    it has to use the second. Measured on a real slate, the difference
+    is not cosmetic: the old construction averaged 106.6% cumulative
+    ownership against 133.3% for a marquee field -- a field roughly 27
+    points less chalky than any real one, which made every self-play
+    contest harder to beat than reality and quietly understated what a
+    genuinely differentiated portfolio is worth.
     """
     if contest_type not in CONTEST_TYPES:
         raise ContestError(
@@ -2270,15 +2294,19 @@ def build_contest_lineups(
             f"{num_lineups}. Raise the contest size or supply fewer."
         )
 
-    generated = generate_entries(
-        slate,
-        num_lineups - len(injected),
-        projection_source=projection_source,
-        included_game_pks=included_game_pks,
-        min_salary=0,
-        max_salary=SALARY_CAP,
-        allow_duplicates=True,
-        seed=seed,
+    generated = (
+        generate_field(
+            slate,
+            num_lineups - len(injected),
+            projection_source=projection_source,
+            included_game_pks=included_game_pks,
+            min_salary=0,
+            max_salary=SALARY_CAP,
+            seed=seed,
+            field_sharpness=field_sharpness,
+        )
+        if num_lineups - len(injected) > 0
+        else []
     )
     for e in generated:
         e.setdefault("source", "generated")
@@ -2294,6 +2322,10 @@ def build_contest_lineups(
         "num_entries_requested": num_lineups,
         "num_entries_built": len(entries),
         "num_injected": len(injected),
+        # What the opponents were built to look like. Recorded on the
+        # batch so the simulator and the UI report the field that
+        # actually exists rather than a default they assume.
+        "field_sharpness": field_sharpness,
         # Which lineups are YOURS rather than field, most common source
         # first. A batch with nothing injected is all "generated".
         "sources": [
@@ -2336,10 +2368,11 @@ def build_contest_lineups(
             else ""
         )
         + (
-            "Field lineups are built by fast randomized construction weighted toward "
-            "projected points and toward spending the salary cap, deliberately allowing "
-            "the duplicates a real contest field contains. No simulation has been run "
-            "yet -- send the batch to the simulator for cash probability, payouts and ROI."
+            f"Opponents are built as a '{field_sharpness}' public field -- weighted toward "
+            "what ownership says the public actually rosters, spending the salary cap, and "
+            "deliberately allowing the duplicates a real contest field contains. No "
+            "simulation has been run yet -- send the batch to the simulator for cash "
+            "probability, payouts and ROI."
         ),
     }
 

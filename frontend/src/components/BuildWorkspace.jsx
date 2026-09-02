@@ -43,6 +43,9 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
   // rather than generating the whole field. The pool itself lives in the
   // optimizer (LineupPool); this side only needs its size.
   const [useMyLineups, setUseMyLineups] = useState(false)
+  // How sharp the OPPONENTS this contest is built from are. On the
+  // generator because the generator is what builds them.
+  const [fieldSharpness, setFieldSharpness] = useState('marquee')
   const [trayCount, setTrayCount] = useState(0)
 
   // Slate-game filter, same auto-detect pattern every other panel uses.
@@ -93,6 +96,7 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
         includedGamePks:
           slateGames.length && includedGames.size < slateGames.length ? [...includedGames] : null,
         useMyLineups,
+        fieldSharpness,
       })
       setBuild({ status: 'ready', ...result })
     } catch (err) {
@@ -253,6 +257,23 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
                         ))}
                       </div>
                     )}
+                  </div>
+
+                  <div className="field">
+                    <label>Field sharpness</label>
+                    <select
+                      value={fieldSharpness}
+                      onChange={(e) => setFieldSharpness(e.target.value)}
+                    >
+                      <option value="low">Low — softer field, chalk spread wider</option>
+                      <option value="marquee">Marquee — a realistic large-field GPP</option>
+                      <option value="high">High — sharp money on the best value</option>
+                    </select>
+                    <div className="hint">
+                      How sharp the opponents this contest is built from are. It lives here
+                      because the generator is what builds them — the simulator prices the pool
+                      it&rsquo;s handed rather than inventing a second one.
+                    </div>
                   </div>
 
                   <MyLineupsCard date={date} onChange={setTrayCount} />
