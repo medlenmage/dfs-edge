@@ -365,7 +365,7 @@ export function ContestSimulatorPanel({ date, batch, projectionSource = 'rotowir
               <label
                 className="dim"
                 style={{ fontSize: 13 }}
-                title="How sharp the sampled public field is. Low: softer/chalkier, ownership spread out more evenly. Marquee (default): a realistic large-field GPP. High: sharp bettors converging tightly on the best pure points-per-dollar plays."
+                title="Contest stakes, and so who is in the field. Low: a cheap contest -- newer, safer entrants, the chalkiest lineups. Marquee (default): a milly-maker or other massive field, a mix of both. High: high stakes, where players limit chalk and hunt low-owned plays that have a real matchup edge behind them."
               >
                 Field sharpness{' '}
                 <select value={fieldSharpness} onChange={(e) => setFieldSharpness(e.target.value)}>
@@ -486,7 +486,7 @@ export function ContestSimulatorPanel({ date, batch, projectionSource = 'rotowir
               <label
                 className="dim"
                 style={{ fontSize: 13 }}
-                title="How sharp the simulated field is. Low: softer/chalkier. Marquee (default): a realistic large-field GPP. High: sharp bettors converging on the best pure value plays."
+                title="Contest stakes, and so who is in the field. Low: a cheap contest -- newer, safer entrants, the chalkiest lineups. Marquee (default): a milly-maker or other massive field, a mix of both. High: high stakes, where players limit chalk and hunt low-owned plays that have a real matchup edge behind them."
               >
                 Field sharpness{' '}
                 <select value={fieldSharpness} onChange={(e) => setFieldSharpness(e.target.value)}>
