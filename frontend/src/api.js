@@ -203,7 +203,13 @@ export const api = {
     date,
     contestType,
     contestSize,
-    { projectionSource = 'rotowire', includedGamePks = null, reroll = 0, useMyLineups = false } = {},
+    {
+      projectionSource = 'rotowire',
+      includedGamePks = null,
+      reroll = 0,
+      useMyLineups = false,
+      fieldSharpness = 'marquee',
+    } = {},
   ) =>
     request('/api/mlb/contest-entries', {
       method: 'POST',
@@ -214,6 +220,7 @@ export const api = {
         projection_source: projectionSource,
         included_game_pks: includedGamePks,
         use_my_lineups: useMyLineups,
+        field_sharpness: fieldSharpness,
         reroll,
       }),
     }),

@@ -47,7 +47,9 @@ _CONTEST_BATCH_TTL = 3600
 _SIM_TRIALS = 10_000
 
 
-def _sim_seed(day: str, contest_type: str, source: str, engine: str, reroll: int) -> int:
+def _sim_seed(
+    day: str, contest_type: str, source: str, engine: str, reroll: int, *extra: str
+) -> int:
     """
     A deterministic seed derived from the settings that actually shape
     a batch, so identical requests reproduce identical results. Without
@@ -58,8 +60,14 @@ def _sim_seed(day: str, contest_type: str, source: str, engine: str, reroll: int
 
     zlib.crc32 rather than hash(): Python salts hash() per process, so
     it would break the whole point across a backend restart.
+
+    `extra` carries any further setting that genuinely changes the
+    output -- field sharpness, for one. A setting that shapes the batch
+    but is missing from the key would reproduce the SAME contest under
+    different settings, which is a worse failure than an unseeded one
+    because it looks deterministic while being wrong.
     """
-    key = f"{day}|{contest_type}|{source}|{engine}|{reroll}"
+    key = "|".join([day, contest_type, source, engine, str(reroll), *extra])
     return zlib.crc32(key.encode()) & 0x7FFFFFFF
 
 
@@ -838,6 +846,17 @@ async def build_contest_entries(
             "rather than one the generator was merely steered toward."
         ),
     ),
+    field_sharpness: str = Body(
+        "marquee",
+        embed=True,
+        description=(
+            "How sharp the opponents this contest is built from are: 'low' (softer, chalk "
+            "spread wider), 'marquee' (default, a realistic large-field GPP) or 'high' (sharp "
+            "money converging on the best value). This belongs on the generator because the "
+            "generator is what builds the opponents -- the simulator's job is to price the "
+            "pool it is handed, not to invent a second one."
+        ),
+    ),
     reroll: int = Body(
         0,
         embed=True,
@@ -892,9 +911,12 @@ async def build_contest_entries(
             # field behind them. See lineup_intake.py for why the two
             # engines are used together rather than one or the other.
             injected_entries=injected,
+            field_sharpness=field_sharpness,
             # Identical settings reproduce the identical contest (see
             # _sim_seed); `reroll` bumps into a genuinely new draw.
-            seed=_sim_seed(day, contest_type, projection_source, "build", reroll),
+            seed=_sim_seed(
+                day, contest_type, projection_source, "build", reroll, field_sharpness
+            ),
         )
     except contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -911,6 +933,7 @@ async def build_contest_entries(
             "contest_type": contest_type,
             "projection_source": projection_source,
             "included_game_pks": included_game_pks,
+            "field_sharpness": field_sharpness,
         },
         _CONTEST_BATCH_TTL,
     )
@@ -943,7 +966,12 @@ async def simulate_contest_batch(
     field_sharpness: str = Body(
         "marquee",
         embed=True,
-        description="How sharp the sampled public field is: 'low', 'marquee' (default) or 'high'. Only used when self_play is false -- self-play never samples a separate field.",
+        description=(
+            "Only used when self_play is FALSE, to describe a separately sampled public "
+            "field. In self-play (the default) the batch IS the field, and how sharp it is "
+            "was decided when the contest was BUILT -- see field_sharpness on POST "
+            "/contest-entries. Setting it here does nothing in that mode."
+        ),
     ),
     engine: str = Body(
         "bootstrap",
