@@ -1,65 +1,96 @@
 /* =========================================================
-   DFS Edge - design tokens (v2 redesign)
+   DFS Edge - design tokens
 
-   Dark only, deliberately. The redesign mockup was drawn light
-   with a single dark surface -- its deep bottle-green rail
-   (#182420) -- so this builds the whole palette out of that one
-   colour family instead of inverting a light theme into mud:
-   near-black greens for ground and surfaces, the mockup's own
-   green as the accent (brightened, since #0f7a4b reads almost
-   black against a dark ground), and its warm orange for the
-   negative side.
+   Dark only, deliberately, and TEAM-COLOURED per sport. The rail's
+   sport switcher stamps `data-sport` on <html>, and everything below
+   is a token, so switching MLB -> NFL repaints the whole app without
+   a single component knowing about it.
 
-   There is no light theme and no auto/system switch. One theme,
-   picked on purpose, so every colour below can be chosen against
-   a known background rather than having to survive both.
+     MLB    -- Atlanta Braves. Navy is the ground and every surface
+               above it; scarlet is the one action colour (primary
+               button, active nav, stage ticks, stack chips); the road
+               grey is the body/secondary text; gold appears only as
+               accent -- links, focus rings, the "live number beat the
+               opener" arrow.
+     NFL    -- Tennessee Titans, the early-2000s look: the deeper navy
+               of that era as the ground, powder blue as the action
+               colour, the red for negatives, silver for text.
+     Season -- season-long NFL, so it shares the Titans palette.
+
+   Two rules held the whole way down: the base stays dark (these are
+   accent colours on navy, never navy-on-colour), and the semantic
+   meaning of each token is fixed even when its hue changes -- --edge
+   is always "primary/positive", --critical always "negative", so a
+   panel written against the tokens is correct in either sport.
+
+   There is no light theme and no auto/system switch.
    ========================================================= */
 
 :root {
   color-scheme: dark;
 
-  --page: #0d1310;           /* app ground */
-  --rail: #0f1815;           /* the nav rail, darkest surface */
-  --surface-1: #161f1b;      /* cards, tables, panels */
-  --surface-2: #1c2723;      /* raised: hover rows, inset controls */
+  /* ------------------------------------------------ MLB / Braves */
+  /* Ground and surfaces: Braves navy #13274F, stepped down for the
+     page and up for anything raised off it. */
+  --page: #070c18;           /* app ground */
+  --rail: #0a1224;           /* the nav rail, darkest surface */
+  --well: #050912;           /* inset trough (the sport switcher) */
+  --surface-1: #101a31;      /* cards, tables, panels */
+  --surface-2: #17233f;      /* raised: hover rows, inset controls */
+  --surface-detail: #0d1729; /* expanded detail rows */
+  --skeleton-mid: #1f2c49;   /* loading shimmer highlight */
 
-  --text-primary: #e9eeeb;
-  --text-secondary: #a7b3ad;
-  --text-muted: #75837c;
+  --nav-hover: #16223c;
+  --nav-active: #20325a;
 
-  --gridline: #22302a;       /* table rules, card borders */
-  --border: #2c3d36;         /* input/button borders, stronger */
-  --baseline: #2c3d36;
+  /* Text: the Braves road grey is exactly the secondary tone. */
+  --text-primary: #e8ecf2;
+  --text-secondary: #a5acaf;
+  --text-muted: #77839a;
 
-  /* Edge = positive/primary. The mockup's --edge #0f7a4b, lifted
-     for contrast on a dark ground (4.5:1+ against --surface-1). */
-  --edge: #2bb673;
-  --edge-strong: #35d488;
-  --edge-soft: #10281e;      /* filled chip background */
-  --edge-ink: #7fe0b0;       /* text on --edge-soft */
+  --gridline: #1e2c4b;       /* table rules, card borders */
+  --border: #2a3c61;         /* input/button borders, stronger */
+  --baseline: #2a3c61;
 
-  /* Fade = negative, the mockup's --fade #c2410c warmed up. */
-  --critical: #f0724a;
-  --critical-soft: #2c1710;
-  --critical-ink: #ffa588;
+  /* Edge = primary/positive. Braves scarlet #CE1141, lifted so it
+     clears 4.5:1 on --surface-1. */
+  --edge: #d62b4e;
+  --edge-strong: #ee4467;
+  --edge-soft: #2b0f1a;      /* filled chip background */
+  --edge-ink: #ff9bae;       /* text on --edge-soft */
+  --on-edge: #ffffff;        /* text ON a solid --edge fill */
 
-  --warning: #d9a441;
-  --warning-soft: #2a2113;
-  --warning-ink: #f0c877;
+  /* Critical = negative. Pushed to orange-red so it stays readable
+     next to a scarlet brand instead of merging with it. */
+  --critical: #ff6b57;
+  --critical-soft: #2e1410;
+  --critical-ink: #ffb0a0;
 
-  --accent: #5b8def;         /* links / live values */
-  --good: var(--edge);
-  --success-text: var(--edge);
+  /* The gold. It carries the WARNING role and the POSITIVE role both,
+     which is why it isn't the brand colour: --edge (scarlet) is what
+     you click, gold is what a number is telling you. Splitting the two
+     is the whole reason a red-branded app can still say "up" without
+     colouring good news like an error. */
+  --warning: #eaaa00;
+  --warning-soft: #2b2208;
+  --warning-ink: #fbd25e;
 
-  /* Sequential ramp for the score meters -- a green ramp now, so
+  --ok: #eaaa00;             /* positive: ROI, leverage, boom%, ready */
+  --ok-soft: #2b2208;
+  --ok-ink: #fbd25e;
+
+  --accent: #eaaa00;         /* links / live values / focus ring */
+  --good: var(--ok);
+  --success-text: var(--ok);
+
+  /* Sequential ramp for the score meters: navy up to scarlet, so
      magnitude reads in the same family as everything else. */
-  --seq-100: #1d3a2c;
-  --seq-250: #23624169;
-  --seq-250: #236241;
-  --seq-350: #2a7d52;
-  --seq-400: #2bb673;
-  --seq-500: #4fd08f;
-  --seq-600: #7fe0b0;
+  --seq-100: #1b2740;
+  --seq-250: #46304a;
+  --seq-350: #74334a;
+  --seq-400: #a32f4c;
+  --seq-500: #ce1141;
+  --seq-600: #f0435f;
 
   --radius: 10px;
   --radius-sm: 6px;
@@ -71,6 +102,63 @@
      them and proportional digits made columns visibly ragged. */
   font-feature-settings: 'tnum' 1;
   font-size: 14px;
+}
+
+/* ------------------------------------------- NFL / Titans (2000s)
+   Same token names, same meanings, a colder and deeper navy ground.
+   Powder blue takes over as the action colour, which is why --on-edge
+   flips dark here: a solid powder-blue button needs dark text. */
+:root[data-sport='nfl'],
+:root[data-sport='season'] {
+  --page: #04101f;
+  --rail: #061729;
+  --well: #030c18;
+  --surface-1: #0b2038;
+  --surface-2: #102b48;
+  --surface-detail: #081b30;
+  --skeleton-mid: #17375a;
+
+  --nav-hover: #0f2b48;
+  --nav-active: #14395e;
+
+  --text-primary: #e6edf5;
+  --text-secondary: #a5acaf;   /* Titans silver */
+  --text-muted: #77879b;
+
+  --gridline: #163254;
+  --border: #1f4368;
+  --baseline: #1f4368;
+
+  --edge: #5aa0e6;             /* Titans blue #4B92DB, lifted */
+  --edge-strong: #7cb8f0;
+  --edge-soft: #0a2440;
+  --edge-ink: #a9d3f5;
+  --on-edge: #04121f;
+
+  --critical: #ef3e52;         /* Titans red #C8102E, lifted */
+  --critical-soft: #2b0e14;
+  --critical-ink: #ff9aa6;
+
+  --warning: #c99a3e;
+  --warning-soft: #262008;
+  --warning-ink: #edc776;
+
+  /* Powder blue is both the brand and the positive here -- against
+     Titans red as the negative, blue-up/red-down reads immediately. */
+  --ok: #6fb4ee;
+  --ok-soft: #0a2440;
+  --ok-ink: #a9d3f5;
+
+  --accent: #6fb4ee;
+  --good: var(--ok);
+  --success-text: var(--ok);
+
+  --seq-100: #12304f;
+  --seq-250: #1b4670;
+  --seq-350: #245f94;
+  --seq-400: #2f7cbb;
+  --seq-500: #4b92db;
+  --seq-600: #8ac0ef;
 }
 
 * { box-sizing: border-box; }
@@ -108,13 +196,13 @@ input, select { font: inherit; color: inherit; }
 .rail .brand strong { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; color: #fff; }
 .rail .brand span { font-size: 11px; color: var(--text-muted); }
 
-.sport { display: flex; background: #0a110e; border-radius: 8px; padding: 3px; margin: 0 2px 18px; }
+.sport { display: flex; background: var(--well); border-radius: 8px; padding: 3px; margin: 0 2px 18px; }
 .sport button {
   flex: 1; padding: 6px 0; border-radius: 6px;
   font-size: 12.5px; font-weight: 600; color: var(--text-muted);
 }
 .sport button:hover { color: var(--text-secondary); }
-.sport button.on { background: #24352e; color: #fff; }
+.sport button.on { background: var(--nav-active); color: #fff; }
 
 .rail .group {
   font-size: 11px; color: var(--text-muted);
@@ -126,8 +214,8 @@ input, select { font: inherit; color: inherit; }
   width: 100%; padding: 8px; border-radius: 7px;
   color: var(--text-secondary); font-size: 13.5px; text-align: left;
 }
-.rail nav button:hover { background: #1b2a24; color: var(--text-primary); }
-.rail nav button.on { background: #24463a; color: #fff; }
+.rail nav button:hover { background: var(--nav-hover); color: var(--text-primary); }
+.rail nav button.on { background: var(--nav-active); color: #fff; }
 .rail nav button small { font-size: 11px; color: var(--text-muted); }
 .rail nav button.on small { color: var(--edge-ink); }
 
@@ -156,6 +244,18 @@ input, select { font: inherit; color: inherit; }
   border: 0; background: none; padding: 0 4px; font-size: 13.5px; font-weight: 600;
   color-scheme: dark;
 }
+/* NFL's week readout sits where MLB's date input does. */
+.datestep .weeklabel { padding: 0 8px; font-size: 13.5px; font-weight: 600; min-width: 74px; text-align: center; }
+.datestep .todaybtn {
+  border: 0; border-left: 1px solid var(--gridline); border-radius: 0;
+  background: none; padding: 4px 9px; font-size: 12px; color: var(--text-secondary);
+}
+.datestep .todaybtn:disabled { opacity: 0.4; }
+.datestep .todaybtn:disabled:hover { background: none; }
+
+/* The bar is empty on a section that has nothing to put in it, and an
+   empty 44px strip above the page reads as a rendering fault. */
+.slatebar:empty { display: none; }
 
 .kpis { display: flex; gap: 20px; margin-left: 4px; padding-left: 16px; border-left: 1px solid var(--gridline); }
 .kpi { display: flex; flex-direction: column; line-height: 1.15; }
@@ -165,7 +265,9 @@ input, select { font: inherit; color: inherit; }
 .grow { flex: 1; }
 
 .status { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary); }
-.status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--edge); }
+/* Idle is silver, not a colour: a red or gold dot beside "Data
+   loaded" reads as an alarm nobody raised. */
+.status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-secondary); }
 .status .dot.warn { background: var(--warning); }
 
 /* Data menu -- one home for every load/refresh/upload control that
@@ -181,7 +283,7 @@ input, select { font: inherit; color: inherit; }
 .menu-row:hover { background: var(--surface-2); }
 .menu-row .t { font-size: 13px; font-weight: 500; }
 .menu-row .s { font-size: 11.5px; color: var(--text-muted); margin-top: 1px; }
-.menu-row .s.ok { color: var(--edge); }
+.menu-row .s.ok { color: var(--ok); }
 .menu-row .s.miss { color: var(--critical); }
 .menu-sep { height: 1px; background: var(--gridline); margin: 4px 6px; }
 .menu-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px 4px; font-size: 12px; color: var(--text-muted); }
@@ -237,7 +339,17 @@ input, select { font: inherit; color: inherit; }
 
 .controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-button:not(.tab):not(.rail nav button):not(.sport button),
+/* Default button chrome, with the controls that aren't buttons-in-a-row
+   carved out. The exclusions sit inside :where() so they cost NOTHING in
+   specificity -- this rule scores a bare `button`, and every modifier
+   below it (.primary, .sm) and every named control above it (.subtabs
+   button, .seg button, .stage) outranks it as written.
+
+   With plain :not(), `:not(.rail nav button)` alone dragged this to
+   (0,2,5) and it silently beat all of them: `.primary` never actually
+   painted its accent, and the segmented controls rendered as rows of
+   separately-bordered buttons. */
+button:not(:where(.tab, .rail nav button, .sport button, .subtabs button, .seg button, .stage)),
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 11px;
@@ -245,12 +357,12 @@ button:not(.tab):not(.rail nav button):not(.sport button),
   background: var(--surface-1); color: var(--text-primary);
   font-size: 13px; font-weight: 500;
 }
-button:not(.tab):not(.sport button):hover { background: var(--surface-2); }
+button:not(:where(.tab, .sport button, .subtabs button, .seg button, .stage)):hover { background: var(--surface-2); }
 button:disabled { opacity: 0.5; cursor: default; }
 button:disabled:hover { background: var(--surface-1); }
 
 button.primary, .btn.primary {
-  background: var(--edge); border-color: var(--edge); color: #05130d; font-weight: 600;
+  background: var(--edge); border-color: var(--edge); color: var(--on-edge); font-weight: 600;
 }
 button.primary:hover { background: var(--edge-strong); }
 button.sm, .btn.sm { padding: 4px 9px; font-size: 12.5px; }
@@ -308,7 +420,7 @@ tbody tr:hover td { background: var(--surface-2); }
   border: 1px solid var(--border); background: var(--surface-2);
   font-size: 11.5px; color: var(--text-secondary); white-space: nowrap;
 }
-.badge.ok { background: var(--edge-soft); border-color: transparent; color: var(--edge-ink); }
+.badge.ok { background: var(--ok-soft); border-color: transparent; color: var(--ok-ink); }
 .badge.risk { background: var(--critical-soft); border-color: transparent; color: var(--critical-ink); }
 .badge.warn { background: var(--warning-soft); border-color: transparent; color: var(--warning-ink); }
 
@@ -339,7 +451,7 @@ tbody tr:hover td { background: var(--surface-2); }
 
 .skeleton {
   height: 12px; border-radius: 6px;
-  background: linear-gradient(90deg, var(--surface-2) 25%, #26332d 50%, var(--surface-2) 75%);
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--skeleton-mid) 50%, var(--surface-2) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.4s linear infinite;
 }
@@ -406,11 +518,11 @@ tbody tr.exp td { background: var(--surface-2); }
 .expand { color: var(--text-muted); font-size: 11px; }
 
 tr.detail td {
-  background: #131c18;
+  background: var(--surface-detail);
   white-space: normal;
   padding: 14px 16px 16px 56px;
 }
-tr.detail:hover td { background: #131c18; }
+tr.detail:hover td { background: var(--surface-detail); }
 .detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; font-size: 12.5px; }
 .detail-grid h4 { margin: 0 0 6px; font-size: 11.5px; color: var(--text-muted); font-weight: 500; }
 .detail-grid ul { margin: 0; padding: 0; list-style: none; }
@@ -432,17 +544,25 @@ tr.detail:hover td { background: #131c18; }
    ========================================================= */
 
 .stages { display: flex; border: 1px solid var(--gridline); border-radius: var(--radius); background: var(--surface-1); overflow: hidden; margin-bottom: 14px; }
+/* Real buttons that jump to their section, so the generic button
+   chrome has to be unwound: they're segments of one strip, not three
+   separate controls. */
 .stage {
   flex: 1; padding: 10px 14px; display: flex; gap: 10px; align-items: center;
-  border-right: 1px solid var(--gridline); color: var(--text-muted); text-align: left;
+  border: 0; border-right: 1px solid var(--gridline); border-radius: 0;
+  background: none; color: var(--text-muted); text-align: left;
 }
 .stage:last-child { border-right: 0; }
+.stage:not(:disabled):hover { background: var(--surface-2); color: var(--text-primary); }
+/* An unreachable stage reads as muted, not as a half-faded button. */
+.stage:disabled { opacity: 1; }
+.stage:disabled:hover { background: none; }
 .stage .k {
   width: 22px; height: 22px; flex: none; border-radius: 50%;
   border: 1.5px solid var(--border); display: grid; place-items: center;
   font-size: 11.5px; font-weight: 600;
 }
-.stage.done .k { background: var(--edge); border-color: var(--edge); color: #05130d; }
+.stage.done .k { background: var(--edge); border-color: var(--edge); color: var(--on-edge); }
 .stage.on { color: var(--text-primary); background: var(--surface-2); }
 .stage.on .k { border-color: var(--text-primary); color: var(--text-primary); }
 .stage .t { font-size: 13px; font-weight: 500; }
@@ -450,6 +570,12 @@ tr.detail:hover td { background: #131c18; }
 .stage.on .s { color: var(--text-secondary); }
 
 .build { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+/* The settings rail follows you down the page. The main column is
+   long -- simulator, then a grid of lineup cards -- and Build /
+   Re-roll used to scroll out of reach the moment you looked at
+   anything below the fold. It gets its own scrollbar when it's
+   taller than the viewport so a long rail can't trap the buttons. */
+.build > .panel { position: sticky; top: 0; max-height: calc(100vh - 96px); overflow-y: auto; }
 .panel { background: var(--surface-1); border: 1px solid var(--gridline); border-radius: var(--radius); }
 .panel-h {
   padding: 12px 14px; border-bottom: 1px solid var(--gridline);
@@ -495,6 +621,8 @@ tr.detail:hover td { background: #131c18; }
 
 @media (max-width: 1100px) {
   .build { grid-template-columns: 1fr; }
+  /* Stacked layout: a sticky rail would just cover the results. */
+  .build > .panel { position: static; max-height: none; overflow-y: visible; }
   .stages { flex-direction: column; }
   .stage { border-right: 0; border-bottom: 1px solid var(--gridline); }
   .stage:last-child { border-bottom: 0; }

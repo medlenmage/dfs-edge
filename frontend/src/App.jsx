@@ -54,8 +54,10 @@ const NFL_NAV_GROUPS = [
     group: 'Build',
     items: [
       { id: 'lineups', label: 'Lineup optimizer' },
-      { id: 'contest', label: 'Contest generator' },
-      { id: 'simulator', label: 'Simulator' },
+      // One entry, not two: the generator hands its batch to the
+      // simulator on the same page now, so there was nothing left for a
+      // second rail item to navigate to.
+      { id: 'contest', label: 'Contest & sim' },
     ],
   },
 ]
@@ -149,6 +151,12 @@ export default function App() {
   const [tab, setTab] = useState('slate')
   const [slateTab, setSlateTab] = useState('stacks')
   const [dataMenuOpen, setDataMenuOpen] = useState(false)
+  const dataMenuRef = useRef(null)
+  // The sticky bar above the scrolling content. MLB fills it inline;
+  // NFL and Season portal into it, because the state their headers show
+  // (season/week, the connected Sleeper account) belongs to those
+  // panels and lifting it up here would only spread it around.
+  const [headerEl, setHeaderEl] = useState(null)
   // "Add N-stack to build" from the Stacks table: {team, size}. Held
   // here because it crosses views -- the Stacks table raises it, the
   // Build workspace consumes it.
@@ -193,6 +201,39 @@ export default function App() {
   // about the "Load in-house projections" button -- and any Refresh,
   // date change or projections upload silently wiped them back out,
   // since every one of those reloads went through the fast path.
+
+  // Every colour in the app is a token, and the whole token block is
+  // keyed off this attribute -- so the sport switcher repaints the
+  // ground, the rail, the buttons and the score ramps in one go. It
+  // goes on <html> rather than the shell div so <body>'s own
+  // background follows it too, otherwise the old ground shows through
+  // wherever the shell doesn't reach.
+  useEffect(() => {
+    document.documentElement.dataset.sport = sport
+  }, [sport])
+
+  // The Data menu used to close only on mouse-leave, which is the worst
+  // of both worlds: it slams shut when you cut a corner on the way to a
+  // button, and it stays open forever once you click away from it with
+  // the pointer still inside. Click-outside plus Escape is what every
+  // other menu on the web does -- and it lets DkSlatePicker pop its own
+  // list without the parent vanishing underneath it.
+  useEffect(() => {
+    if (!dataMenuOpen) return
+    const onPointerDown = (e) => {
+      if (!dataMenuRef.current?.contains(e.target)) setDataMenuOpen(false)
+    }
+    const onKey = (e) => {
+      if (e.key === 'Escape') setDataMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [dataMenuOpen])
+
   const loadInhouse = useCallback(
     async ({ background = false } = {}) => {
       if (!background) setInhouseLoading(true)
@@ -407,8 +448,9 @@ export default function App() {
 
       {/* ---------------------------------------------- main */}
       <div className="main">
-        {sport === 'mlb' && (
-          <header className="slatebar">
+        <header className="slatebar" ref={setHeaderEl}>
+          {sport === 'mlb' && (
+            <>
             <div className="datestep">
               <button onClick={() => stepDate(-1)} aria-label="Previous day">
                 ‹
@@ -416,6 +458,16 @@ export default function App() {
               <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
               <button onClick={() => stepDate(1)} aria-label="Next day">
                 ›
+              </button>
+              {/* Browsing back a few days used to mean clicking your way
+                  home or opening the picker. */}
+              <button
+                className="todaybtn"
+                onClick={() => setDate(today())}
+                disabled={date === today()}
+                title="Back to today's slate"
+              >
+                Today
               </button>
             </div>
 
@@ -476,12 +528,12 @@ export default function App() {
                 header used to carry six buttons, two selects and a file
                 input in one row; they are the same actions, just no
                 longer competing with the slate itself for attention. */}
-            <div className="menu-wrap">
+            <div className="menu-wrap" ref={dataMenuRef}>
               <button onClick={() => setDataMenuOpen((v) => !v)} aria-expanded={dataMenuOpen}>
                 Data ▾
               </button>
               {dataMenuOpen && (
-                <div className="menu" role="menu" onMouseLeave={() => setDataMenuOpen(false)}>
+                <div className="menu" role="menu">
                   <div className="menu-row">
                     <div>
                       <div className="t">Matchups &amp; lineups</div>
@@ -557,13 +609,18 @@ export default function App() {
               onChange={handleProjectionUpload}
               style={{ display: 'none' }}
             />
-          </header>
-        )}
+            </>
+          )}
+        </header>
 
         <div className="content">
-      {sport === 'nfl' && <NflPanel tab={nflTab} onTabChange={setNflTab} />}
+      {sport === 'nfl' && (
+        <NflPanel tab={nflTab} onTabChange={setNflTab} headerSlot={headerEl} />
+      )}
 
-      {sport === 'season' && <SeasonPanel tab={seasonTab} onTabChange={setSeasonTab} />}
+      {sport === 'season' && (
+        <SeasonPanel tab={seasonTab} onTabChange={setSeasonTab} headerSlot={headerEl} />
+      )}
 
       {sport === 'mlb' && (
         <>

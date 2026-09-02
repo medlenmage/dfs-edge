@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { ContestSimulatorPanel } from './ContestSimulatorPanel'
 import { LineupsPanel } from './LineupsPanel'
@@ -52,6 +52,19 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
   const [showSlateGames, setShowSlateGames] = useState(false)
   const [includedGames, setIncludedGames] = useState(new Set())
 
+  // The three stage chips are the natural jump targets for a page this
+  // long, so they're real buttons that scroll to their section rather
+  // than a decorative progress bar. Stage 1 is the settings rail, which
+  // is sticky and therefore always on screen -- clicking it focuses the
+  // contest picker instead, which is the thing you actually came for.
+  const settingsRef = useRef(null)
+  const simulateRef = useRef(null)
+  const lineupsRef = useRef(null)
+
+  function jumpTo(ref) {
+    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   useEffect(() => {
     api
       .contestTypes()
@@ -74,10 +87,16 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
         .map((g) => ({ pk: g.game_pk, away: g.away?.abbrev, home: g.home?.abbrev, inSlate: g.in_slate })),
     [slate],
   )
-  const slateGamePks = slateGames.map((g) => g.pk).join(',')
+  // Keyed on each game's in_slate flag as well as its pk. Picking a DK
+  // slate doesn't change WHICH games the day has -- all 15 come back
+  // either way -- it only flips in_slate on the ones that slate covers.
+  // Keying on the pks alone meant the checkboxes never re-derived, so
+  // after loading a 6-game Main slate the rail still read "15 of 15"
+  // with every game ticked.
+  const slateGameKey = slateGames.map((g) => `${g.pk}:${g.inSlate}`).join(',')
   useEffect(() => {
     setIncludedGames(new Set(slateGames.filter((g) => g.inSlate !== false).map((g) => g.pk)))
-  }, [slateGamePks])
+  }, [slateGameKey])
 
   // A stack sent over from the Stacks table lands here. The generator
   // builds every archetype itself rather than taking a forced primary,
@@ -140,7 +159,14 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
         <>
           {/* ------------------------------------------- stages */}
           <div className="stages" aria-label="Build stages">
-            <div className={`stage ${built ? 'done' : 'on'}`}>
+            <button
+              className={`stage ${built ? 'done' : 'on'}`}
+              onClick={() => {
+                setCollapsed(false)
+                jumpTo(settingsRef)
+                settingsRef.current?.querySelector('select')?.focus()
+              }}
+            >
               <div className="k">{built ? '✓' : '1'}</div>
               <div>
                 <div className="t">Settings</div>
@@ -148,8 +174,12 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
                   {preset ? `${preset.label} · ${sizeLabel(contestSize)}` : 'Pick a contest'}
                 </div>
               </div>
-            </div>
-            <div className={`stage ${built ? 'done' : ''}`}>
+            </button>
+            <button
+              className={`stage ${built ? 'done' : ''}`}
+              onClick={() => jumpTo(lineupsRef)}
+              disabled={!built}
+            >
               <div className="k">{built ? '✓' : '2'}</div>
               <div>
                 <div className="t">Lineups</div>
@@ -159,14 +189,18 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
                     : 'Not built yet'}
                 </div>
               </div>
-            </div>
-            <div className={`stage ${built ? 'on' : ''}`}>
+            </button>
+            <button
+              className={`stage ${built ? 'on' : ''}`}
+              onClick={() => jumpTo(simulateRef)}
+              disabled={!built}
+            >
               <div className="k">3</div>
               <div>
                 <div className="t">Simulate</div>
                 <div className="s">{built ? 'Ready to price' : 'Build a contest first'}</div>
               </div>
-            </div>
+            </button>
           </div>
 
           {stackIntent && (
@@ -183,7 +217,7 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
 
           <div className="build">
             {/* ----------------------------------------- settings rail */}
-            <aside className="panel">
+            <aside className="panel" ref={settingsRef}>
               <div className="panel-h">
                 Settings
                 <button className="sm" onClick={() => setCollapsed((v) => !v)}>
@@ -400,6 +434,30 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
                     </div>
                   </div>
 
+                  {/* Stage 3 sits directly under the summary tiles rather
+                      than below the lineup grid: the simulator is the
+                      control you keep coming back to (entry fee, payout
+                      curve, re-runs), while the lineups below are a sample
+                      you scan once. Burying it meant scrolling past 24
+                      cards every time. */}
+                  <div className="section-head" ref={simulateRef}>
+                    <h2>Simulate</h2>
+                    <span className="hint">
+                      price this contest — entry cost and payout curve set here
+                    </span>
+                  </div>
+                  <ContestSimulatorPanel
+                    date={date}
+                    batch={build}
+                    projectionSource={projectionSource}
+                  />
+
+                  <div className="section-head" style={{ marginTop: 20 }} ref={lineupsRef}>
+                    <h2>Lineups</h2>
+                    <span className="hint">
+                      a sample of the field this contest was built from
+                    </span>
+                  </div>
                   <div className="controls" style={{ marginBottom: 12 }}>
                     <a href={api.contestEntriesCsvUrl(build.batch_id)}>
                       <button>Download full contest (CSV)</button>
@@ -443,21 +501,6 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
                       </div>
                     ))}
                   </div>
-
-                  {/* Stage 3 lives in the same page rather than a
-                      separate tab -- it operates on the batch built
-                      directly above it. */}
-                  <div className="section-head">
-                    <h2>Simulate</h2>
-                    <span className="hint">
-                      price this contest — entry cost and payout curve set here
-                    </span>
-                  </div>
-                  <ContestSimulatorPanel
-                    date={date}
-                    batch={build}
-                    projectionSource={projectionSource}
-                  />
                 </>
               )}
             </div>

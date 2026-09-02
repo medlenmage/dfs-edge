@@ -1,14 +1,19 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 
 /**
  * The NFL contest generator: builds a whole DraftKings Classic NFL
- * contest -- lineups, and nothing else. The NFL sibling of
- * ContestGeneratorPanel.jsx (MLB), split the same way and for the same
- * reason: building lineups and pricing them are different questions,
- * and the inputs that answer the second one (entry cost, payout curve)
- * have nothing to do with how the lineups get built, so they live in
- * the Simulator tab instead.
+ * contest -- lineups, and nothing else. Building lineups and pricing
+ * them are still different questions, and the inputs that answer the
+ * second one (entry cost, payout curve) have nothing to do with how the
+ * lineups get built -- so the simulator remains its own component.
+ *
+ * It is no longer its own TAB, though. It renders through the
+ * `simulator` slot, between the build summary and the detail tables,
+ * the same way MLB's BuildWorkspace stacks the two: the batch is handed
+ * over the moment it's built rather than after a click that also
+ * navigates you away, and pricing sits above the tables you scroll
+ * rather than below them.
  *
  * No salary, exposure or duplicate knobs either: every entry is built
  * toward spending the cap (nfl_contest._SALARY_PACING_STRENGTH) because
@@ -44,7 +49,7 @@ function stackTeamsLabel(entry) {
   return parts.join(', ')
 }
 
-export function NflContestGeneratorPanel({ season, week, onSimulate }) {
+export function NflContestGeneratorPanel({ season, week, onBuilt, simulator }) {
   const [contestTypes, setContestTypes] = useState({})
   const [contestType, setContestType] = useState('gpp_small')
   const [contestSize, setContestSize] = useState(500)
@@ -53,6 +58,7 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
   // contest -- the backend derives a deterministic seed from them, so
   // the table no longer reshuffles on every click for no reason.
   const [reroll, setReroll] = useState(0)
+  const simulatorRef = useRef(null)
 
   useEffect(() => {
     api.nflContestTypes().then((r) => setContestTypes(r.contest_types)).catch(() => {})
@@ -77,6 +83,10 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
         reroll: rerollOverride ?? reroll,
       })
       setState({ status: 'ready', ...result })
+      // Hand it straight over. The old flow needed a click on
+      // "Simulate this contest" purely to move the batch across a tab
+      // boundary that no longer exists.
+      onBuilt?.(result)
     } catch (err) {
       setState({ status: 'error', message: err.message })
     }
@@ -86,7 +96,8 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
   const sampled = state.status === 'ready' && state.num_entries_built < state.field_size
 
   return (
-    <div className="card">
+    <>
+      <div className="card">
       <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
         <label className="dim" style={{ fontSize: 13 }}>
           Contest{' '}
@@ -134,9 +145,9 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
           Builds an entire DraftKings Classic NFL contest in one shot — every lineup
           individually strong (weighted heavily toward projected points, and toward actually
           spending the salary cap), across the real NFL GPP stack archetypes, duplicates
-          included the way a real field produces them. No economics here: once it&apos;s built,
-          send it to the Simulator for cash probability, payouts and ROI. Requires both a DK
-          salary CSV and RotoWire projections loaded for the week.
+          included the way a real field produces them. No economics until it&apos;s built —
+          then the simulator appears right below with cash probability, payouts and ROI.
+          Requires both a DK salary CSV and RotoWire projections loaded for the week.
         </p>
       )}
 
@@ -200,9 +211,14 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
             </span>
           </div>
 
-          <div className="controls" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
-            <button className="primary" onClick={() => onSimulate?.(state)}>
-              Simulate this contest →
+          <div className="controls" style={{ marginBottom: 0, flexWrap: 'wrap' }}>
+            <button
+              className="primary"
+              onClick={() =>
+                simulatorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }
+            >
+              Simulate this contest ↓
             </button>
             <a
               href={api.nflContestEntriesCsvUrl(state.batch_id)}
@@ -211,10 +227,21 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
               <button>Download full contest (CSV)</button>
             </a>
             <span className="dim" style={{ fontSize: 12 }}>
-              hands this batch to the Simulator tab — entry cost and payout curve are set there
+              already loaded below — entry cost and payout curve are set there
             </span>
           </div>
+        </>
+      )}
+      </div>
 
+      {/* Pricing sits between the build summary and the detail tables,
+          not underneath a page of them. */}
+      {state.status === 'ready' && simulator && (
+        <div ref={simulatorRef} style={{ margin: '14px 0' }}>{simulator}</div>
+      )}
+
+      {state.status === 'ready' && (
+        <>
           {state.stack_shapes?.length > 0 && (
             <div className="card table-wrap" style={{ marginBottom: 14 }}>
               <div className="sub-line" style={{ marginBottom: 8 }}>
@@ -316,6 +343,6 @@ export function NflContestGeneratorPanel({ season, week, onSimulate }) {
           <button onClick={() => run()}>Rebuild</button>
         </>
       )}
-    </div>
+    </>
   )
 }
