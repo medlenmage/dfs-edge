@@ -299,14 +299,17 @@ export function BuildWorkspace({ date, slate, projectionSource, stackIntent, onC
                       value={fieldSharpness}
                       onChange={(e) => setFieldSharpness(e.target.value)}
                     >
-                      <option value="low">Low — softer field, chalk spread wider</option>
-                      <option value="marquee">Marquee — a realistic large-field GPP</option>
-                      <option value="high">High — sharp money on the best value</option>
+                      <option value="low">Low stakes — cheapest, chalkiest field</option>
+                      <option value="marquee">Marquee — milly-maker, a mix of both</option>
+                      <option value="high">High stakes — least chalky, hunts leverage</option>
                     </select>
                     <div className="hint">
-                      How sharp the opponents this contest is built from are. It lives here
-                      because the generator is what builds them — the simulator prices the pool
-                      it&rsquo;s handed rather than inventing a second one.
+                      The <em>stakes</em>, and so who you&rsquo;re playing against. A cheap
+                      contest is full of newer, safer entrants and builds the chalkiest lineups;
+                      high stakes know they have to be different to win, so they limit chalk and
+                      hunt low-owned plays that have a real edge behind them — not just a small
+                      ownership number. It lives here because the generator is what builds the
+                      opponents; the simulator prices the pool it&rsquo;s handed.
                     </div>
                   </div>
 

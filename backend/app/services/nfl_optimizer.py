@@ -70,6 +70,11 @@ def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
     Flatten every rostered player across the slate's games into one
     optimizable pool. Skips anyone missing a matched salary or
     projection, or with a position that doesn't map to a roster slot.
+
+    Each entry also carries `edge_composite` -- nfl_scoring's matchup
+    multiplier -- which neither lineup engine optimizes against, but
+    which the contest field sampler reads to model a sharp field.
+    Mirrors MLB's pool exactly.
     """
     pool: list[dict[str, Any]] = []
     for game in slate.get("games") or []:
@@ -98,6 +103,17 @@ def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
                         "projected_fpts": proj["fpts"],
                         "ownership_pct": proj.get("ownership_pct") or 0,
                         "slots": slots,
+                        # nfl_scoring's own matchup multiplier (1.00 =
+                        # dead average), under the same name MLB's pool
+                        # uses so anything reading a pool entry works for
+                        # either sport. Neither lineup engine optimizes
+                        # against it; the contest field sampler reads it
+                        # to model a SHARP field, which needs to tell a
+                        # low-owned player in a good spot from a
+                        # low-owned player in a bad one. Without it that
+                        # model degrades to picking cheap names, which
+                        # measured worse than an ordinary field.
+                        "edge_composite": (p.get("edge") or {}).get("composite"),
                         "is_pass_catcher": p.get("position") in ("WR", "TE"),
                     }
                 )

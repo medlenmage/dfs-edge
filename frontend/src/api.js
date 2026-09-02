@@ -576,7 +576,11 @@ export const api = {
   // `contestSize` is the single size control: it's both the contest's
   // field size and how many lineups get built. Economics come
   // afterwards from nflSimulateContestBatch() on the batch_id returned.
-  nflBuildContestEntries: (season, week, { contestType, contestSize, reroll = 0 }) =>
+  nflBuildContestEntries: (
+    season,
+    week,
+    { contestType, contestSize, reroll = 0, fieldSharpness = 'marquee' },
+  ) =>
     request('/api/nfl/contest-entries', {
       method: 'POST',
       body: JSON.stringify({
@@ -584,6 +588,7 @@ export const api = {
         week,
         contest_type: contestType,
         contest_size: contestSize,
+        field_sharpness: fieldSharpness,
         reroll,
       }),
     }),

@@ -311,6 +311,17 @@ async def build_contest_entries(
             "reports num_entries_built alongside field_size rather than conflating them."
         ),
     ),
+    field_sharpness: str = Body(
+        "marquee",
+        embed=True,
+        description=(
+            "Contest stakes, and so who is in the field: 'low' (a cheap contest -- newer, "
+            "safer entrants, the chalkiest lineups), 'marquee' (default, a milly-maker or "
+            "other massive field, a mix of both), or 'high' (high stakes, where players "
+            "limit chalk and hunt low-owned plays with a real matchup edge behind them). "
+            "It belongs on the generator because the generator is what builds the opponents."
+        ),
+    ),
     reroll: int = Body(
         0,
         embed=True,
@@ -327,6 +338,10 @@ async def build_contest_entries(
     the entry cost and the payout curve's percent-to-first, neither of
     which has anything to do with how the lineups themselves get built.
 
+    `field_sharpness` steers how the OPPONENTS are built, and belongs
+    here because the generator is what builds them -- the simulator's
+    job is to price the pool it is handed, not to invent a second one.
+
     Equally deliberately, there are no salary, exposure or duplicate
     knobs. Every entry is built toward spending the cap (see
     nfl_contest._SALARY_PACING_STRENGTH) because a lineup leaving salary
@@ -341,7 +356,15 @@ async def build_contest_entries(
             contest_type,
             contest_size,
             season=nfl.PRIOR_SEASON,
-            seed=_nfl_sim_seed(resolved_season, resolved_week, contest_type, f"build:{contest_size}", reroll),
+            field_sharpness=field_sharpness,
+            # Sharpness is in the seed key: a setting that shapes the
+            # batch but is missing from it would reproduce the SAME
+            # contest under different settings, which looks deterministic
+            # while being wrong.
+            seed=_nfl_sim_seed(
+                resolved_season, resolved_week, contest_type,
+                f"build:{contest_size}:{field_sharpness}", reroll,
+            ),
         )
     except nfl_contest.ContestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
