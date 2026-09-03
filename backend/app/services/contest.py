@@ -1920,6 +1920,15 @@ async def _simulate_lineups_atbat(
         player_trials = await atbat_sim.simulate_slate_trials(
             slate, season, num_trials=num_trials, seed=seed, included_game_pks=included_game_pks
         )
+        # Marginals from today's projection, dependence from the
+        # simulation. The engine reproduces the projection's LEVEL well
+        # but compresses its SPREAD badly for hitters (measured slope
+        # 0.37), which read a batch of good lineups ~7 points light and
+        # flattened corr(projected points, top-1%) to +0.005. Scaling
+        # each player's own trials is correlation-preserving, so this
+        # keeps every reason to run this engine and fixes only the part
+        # it gets wrong -- see recenter_trials_on_projections().
+        player_trials = atbat_sim.recenter_trials_on_projections(player_trials, slate)
     except atbat_sim.SlateNotSimulatableError as exc:
         # A plain Exception, not a ContestError, since atbat_sim.py has no
         # dependency on contest.py -- re-raised as one here so the router's

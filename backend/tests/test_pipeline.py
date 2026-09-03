@@ -4726,6 +4726,86 @@ async def main() -> int:
           "starts logged",
           atbat_sim.starter_outs_pool([]) == [15], "")
 
+    print("\nAt-bat engine: recentering its marginals on today's projection")
+
+    # The engine reproduces a projection's LEVEL but compresses its
+    # SPREAD for hitters -- measured slope 0.37 on a real slate, which
+    # read a batch of good lineups ~7 points light and flattened
+    # corr(projected points, top-1%) to +0.005. Recentering fixes the
+    # marginals while leaving the dependence structure -- the entire
+    # reason to run an at-bat engine -- untouched.
+    _rc_slate = {
+        "games": [
+            {
+                "home": {
+                    "abbrev": "AAA",
+                    "hitters": [
+                        {"id": 1, "name": "Star", "projection": {"fpts": 12.0}},
+                        {"id": 2, "name": "Scrub", "projection": {"fpts": 5.0}},
+                        {"id": 3, "name": "NoProj", "projection": {}},
+                    ],
+                    "probable_pitcher": {"id": 4, "name": "Ace", "projection": {"fpts": 18.0}},
+                },
+                "away": {"abbrev": "BBB", "hitters": [], "probable_pitcher": None},
+            }
+        ]
+    }
+    # Star simulates at 8.0 (compressed down), Scrub at 6.5 (pulled up)
+    # -- exactly the flattening measured on the real slate.
+    _rc_trials = {
+        1: [4.0, 8.0, 12.0, 8.0],
+        2: [3.0, 6.5, 10.0, 6.5],
+        3: [1.0, 2.0, 3.0, 4.0],
+        4: [9.0, 18.0, 27.0, 18.0],
+        99: [5.0, 5.0, 5.0, 5.0],
+    }
+    _rc = atbat_sim.recenter_trials_on_projections(_rc_trials, _rc_slate)
+
+    def _mean(xs):
+        return sum(xs) / len(xs)
+
+    check("a hitter the engine simulated BELOW his projection is scaled up to meet it",
+          abs(_mean(_rc[1]) - 12.0) < 1e-9, f"{_mean(_rc[1]):.3f}")
+    check("a hitter the engine simulated ABOVE his projection is scaled down to meet it -- the "
+          "flattening runs both ways, and so does the correction",
+          abs(_mean(_rc[2]) - 5.0) < 1e-9, f"{_mean(_rc[2]):.3f}")
+    check("the starting pitcher is recentred on his own projection too",
+          abs(_mean(_rc[4]) - 18.0) < 1e-9, f"{_mean(_rc[4]):.3f}")
+
+    # THE point of doing it this way. Scaling each player's own array by
+    # a constant cannot change any pairwise correlation, so every bit of
+    # the at-bat engine's dependence structure -- a big inning lifting
+    # consecutive hitters, the lineup turning over, a starter against
+    # the offence he actually faced -- survives untouched. Marginals
+    # from the projection, dependence from the simulation.
+    def _corr(a, b):
+        n = len(a)
+        ma, mb = _mean(a), _mean(b)
+        sa = sum((x - ma) ** 2 for x in a) ** 0.5
+        sb = sum((y - mb) ** 2 for y in b) ** 0.5
+        return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (sa * sb)
+
+    check("recentering leaves every pairwise correlation EXACTLY unchanged -- this is why the "
+          "marginals can be replaced without losing the engine's whole contribution",
+          abs(_corr(_rc[1], _rc[2]) - _corr(_rc_trials[1], _rc_trials[2])) < 1e-12,
+          f"{_corr(_rc[1], _rc[2]):.6f} vs {_corr(_rc_trials[1], _rc_trials[2]):.6f}")
+    check("...and the shape of a player's own distribution is preserved, not flattened -- his "
+          "spread scales with his level rather than being replaced by a fixed one",
+          abs((max(_rc[1]) - min(_rc[1])) / (max(_rc_trials[1]) - min(_rc_trials[1]))
+              - _mean(_rc[1]) / _mean(_rc_trials[1])) < 1e-9)
+
+    check("a player with no projection passes through untouched rather than being invented",
+          _rc[3] == _rc_trials[3], str(_rc[3]))
+    check("a player who is not on the slate at all passes through untouched",
+          _rc[99] == _rc_trials[99], str(_rc[99]))
+    check("an all-zero pool is left alone -- multiplying zeros by any scale still can't reach a "
+          "projection, and the implied scale would be enormous",
+          atbat_sim.recenter_trials_on_projections({1: [0.0, 0.0]}, _rc_slate)[1] == [0.0, 0.0])
+    check("the scale is clamped, so one degenerate simulated mean can't stretch a distribution "
+          "into nonsense",
+          _mean(atbat_sim.recenter_trials_on_projections({1: [0.6, 0.6, 0.6, 0.6]}, _rc_slate)[1])
+          <= 0.6 * atbat_sim._RECENTER_SCALE_MAX + 1e-9)
+
     print("\nAt-bat-level baserunner advancement (atbat_sim._advance_runners)")
 
     _rng0 = random.Random(0)  # deterministic branch selection below via explicit thresholds
