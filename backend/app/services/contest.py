@@ -105,6 +105,63 @@ MAX_HITTERS_PER_TEAM = 5
 _FPTS_SAMPLING_EXPONENT = 3.0
 _FPTS_FLOOR = 0.1
 
+# Entry generation used to be entirely ownership-BLIND: pick by
+# projection and let cumulative ownership fall where it may. Measured
+# against real contests, that produced a systematic contrarian lean --
+# on 9/2 the generated entries averaged 112.5% cumulative ownership
+# against a real field at 130.8%, roughly 18 points light, and the same
+# gap (-14 to -31 points vs the modelled field) showed up on every
+# slate checked.
+#
+# That lean would only be right if real winners were contrarian. They
+# are not. Across 22 archived contests, the top-10 finishers average
+# -1.2 points of cumulative ownership against THEIR OWN field (median
+# +1.7, ratio 1.01x) -- winners land on the field, and whether chalk or
+# contrarian wins is a slate-by-slate coin flip with enormous variance
+# (-130pp to +60pp). Building every lineup 18 points below the field is
+# therefore a standing bet on one side of that coin.
+#
+# An ownership term recentres it:
+#
+#     exp     entries vs modelled field, 4 slates      dupes
+#     0.0     -14.2  -19.6  -15.1  -30.9               5.9%
+#     0.4      -3.1   -4.0   +0.2   -4.3               7.4%
+#     0.5      +1.7   -2.5   +3.1   +9.2              11.1%
+#
+# 0.4 lands consistently just under the field, which is where the
+# winners actually sit; 0.5 both overshoots and scatters, and doubles
+# the rate at which the batch duplicates itself.
+#
+# BE HONEST ABOUT WHAT THIS BUYS. It does not make the batch score
+# better. Measured across k = 0.0 / 0.25 / 0.40 / 0.55 on a real slate,
+# average top-1% rate is flat (1.33, 1.36, 1.35, 1.33) and ROI moves
+# only within its own noise. That is the EXPECTED result, and a good
+# sign rather than a bad one: the simulator now scores ownership close
+# to neutrally (corr(own, top-1%) ~ +0.05 after the field calibration),
+# so moving a batch's ownership should not move its simulated finish.
+# If it did, the sim would still be carrying an ownership bias.
+#
+# What it buys is that the batch stops making an unpaid directional
+# bet. Building every lineup 18 points under the field only pays if
+# chalk systematically loses, and across 22 real contests it does not.
+# Projected points also come up slightly (99.7 -> 101.7), because
+# ownership and projection agree about most of a slate.
+#
+# And it is not a mere nudge at the extremes: across ownership's real
+# range (floor to ~43%) the term is worth ~5.8x, so a player has to
+# project about 1.8x higher to outweigh the chalkiest option. Across
+# each factor's FULL real range projection still dominates comfortably
+# (~27x for a 5-to-15-point spread against ~5.8x), and the pathological
+# case -- a high projection at near-zero ownership -- is rare precisely
+# because ownership tracks projection. The measured batch-level
+# projection going UP rather than down is the evidence that it does not
+# fire often enough to matter.
+#
+# Degrades to a no-op when a slate carries no ownership data at all:
+# every player floors to the same value, so the term is a constant and
+# cancels out of the sampling weights.
+_ENTRY_OWNERSHIP_EXPONENT = 0.40
+
 # How hard a lineup in progress is steered toward SPENDING the cap.
 # The affordability check below has always guarded one direction only
 # (never overspend); nothing ever stopped a random walk drifting cheap,
@@ -386,24 +443,26 @@ def _duplication_risk(picks: list[dict[str, Any]]) -> float:
 
 
 def _fpts_weight(p: dict[str, Any]) -> float:
-    return max(p["projected_fpts"], _FPTS_FLOOR) ** _FPTS_SAMPLING_EXPONENT
+    """
+    Sampling weight for lineups YOU would enter -- dominated by
+    projected points, with a light ownership tilt so a batch centres on
+    the field instead of sitting ~18 points under it (see
+    _ENTRY_OWNERSHIP_EXPONENT for the measurement). Distinct from
+    _ownership_weight, which models the OPPONENTS.
+    """
+    # .get, unlike _ownership_weight's strict lookup: this one is also
+    # called with hand-built player dicts (stack-team weighting, late
+    # swap) that carry no ownership at all. Missing reads as the floor,
+    # which is the same constant every player gets on a slate with no
+    # ownership data -- so the term cancels rather than misranking.
+    return (max(p["projected_fpts"], _FPTS_FLOOR) ** _FPTS_SAMPLING_EXPONENT) * (
+        max(p.get("ownership_pct") or 0.0, _OWNERSHIP_FLOOR) ** _ENTRY_OWNERSHIP_EXPONENT
+    )
 
 
 # Field sharpness -- how concentrated the simulated opponent field is
 # around the most obvious plays, independent of which real contest
-# (field_size/entry_fee/payout) is being modeled. Mirrors a real
-# competitor DFS tool's own "Contest Archetype" slider (confirmed via
-# its own published help docs): "marquee" (default) is the field this
-# app has always built -- pure ownership-weighted, mirroring a
-# realistic large-field GPP. "low" flattens that toward a more
-# DISPERSED sample -- a real low-stakes field's ownership still skews
-# toward the same obvious chalk, but casual entrants don't converge on
-# the exact same handful of builds the way sharper fields do, so the
-# field as a whole should show more variety, not just more chalk.
-# "high" pulls the sample further toward genuinely good point-per-
-# dollar VALUE on top of ownership -- real high-stakes fields are sharp
-# bettors converging tightly on the objectively best plays, not just
-# whoever happens to be popular.
+# (field_size/entry_fee/payout) is being modeled.
 FIELD_SHARPNESS_LEVELS = ("low", "marquee", "high")
 #
 # These describe the STAKES of the contest, and therefore who is in it.
