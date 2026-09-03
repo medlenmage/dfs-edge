@@ -76,6 +76,20 @@ from collections import Counter
 # not to pin a decimal.
 TOLERANCE = 0.30
 
+# How far the median simulated score may sit from the real contest's own
+# median, in DK points, before it is called a failure. Only checked when
+# --date names the slate, because score level is a property of the board
+# (a 15-game slate and a 2-game turbo are not comparable). 6 points is
+# roughly half the gap that made the at-bat engine's batches read light.
+LEVEL_TOLERANCE = 6.0
+
+# How weakly a batch's simulated means may track the projections it was
+# handed before the engine is judged not to be reproducing its own
+# input. Both engines sit at ~0.998 when healthy; the at-bat engine read
+# 0.24-0.33 while it was compressing hitters. 0.85 is well clear of both
+# and leaves room for genuine simulation noise on a small batch.
+TRACKING_MIN = 0.85
+
 ROSTER_SLOTS = {"P", "C", "1B", "2B", "3B", "SS", "OF"}
 
 
@@ -192,6 +206,15 @@ def read_standings(path: str) -> dict | None:
         "corr_own_points": pearson(cums, points),
         "corr_own_top1": pearson(cums, top1),
         "top10_own": (min(cums[i] for i in best), max(cums[i] for i in best)),
+        # Real SCORE distribution -- what a correctly-calibrated engine
+        # has to reproduce. Correlations alone would pass an engine that
+        # ranks lineups sensibly while scoring the whole slate 7 points
+        # light with a tail too short to ever produce a winner.
+        "pts_p10": sorted(points)[n // 10],
+        "pts_p50": sorted(points)[n // 2],
+        "pts_p90": sorted(points)[9 * n // 10],
+        "pts_p99": sorted(points)[99 * n // 100],
+        "pts_max": max(points),
     }
 
 
@@ -211,6 +234,9 @@ def read_sim_export(path: str) -> dict | None:
     own, top1 = col("total_ownership_pct"), col("top_1pct_pct")
     proj, roi = col("projected_points"), col("roi_pct")
     sim_mean = col("simulated_points_mean")
+    ceiling = col("simulated_points_ceiling") or []
+    p10s = col("simulated_points_p10") or []
+    p90s = col("simulated_points_p90") or []
     if not own or not top1 or len(own) != len(top1):
         return None
 
@@ -219,6 +245,18 @@ def read_sim_export(path: str) -> dict | None:
         "n": len(rows),
         "own_mean": st.mean(own),
         "corr_own_top1": pearson(own, top1),
+        # Score-distribution side. An export carries per-lineup summary
+        # statistics, not the raw trial matrix, so this is what can
+        # honestly be compared: the batch's central level (median of the
+        # per-lineup simulated means) against the real contest's median
+        # score, and the best ceiling the batch produced against the
+        # real contest's own upper tail. The second is the "can this
+        # engine even produce a winner" question.
+        "sim_mean_median": st.median(sim_mean) if sim_mean else float("nan"),
+        "sim_mean_avg": st.mean(sim_mean) if sim_mean else float("nan"),
+        "proj_avg": st.mean(proj) if proj else float("nan"),
+        "best_ceiling": max(ceiling) if ceiling else float("nan"),
+        "avg_spread": st.mean([b - a for a, b in zip(p10s, p90s)]) if p10s and p90s else float("nan"),
         "corr_own_roi": pearson(own, roi) if roi else float("nan"),
         "corr_proj_top1": pearson(proj, top1) if proj else float("nan"),
         # Whether the game model is even simulating the player the
@@ -281,6 +319,12 @@ def main() -> int:
         if s
     ]
 
+    same_day_real: list[dict] = []
+    if args.date:
+        _stamp = args.date.replace("-", "")
+        _mmddyyyy = _stamp[4:] + _stamp[:4]
+        same_day_real = [r for r in real if _mmddyyyy in r["name"] or _stamp in r["name"]]
+
     if not real:
         print("No readable contest-standings exports found in:")
         for d in standings_dirs:
@@ -330,31 +374,93 @@ def main() -> int:
     print(f"{'export':40s} {'n':>6s} {'own':>7s} {'own/top1':>9s} {'own/roi':>8s} "
           f"{'proj/top1':>10s} {'proj/simpts':>12s}  verdict")
 
-    failures = 0
+    corr_failures = 0
+    dist_failures = 0
     for s in sims:
         c = s["corr_own_top1"]
         if c < real_centre - TOLERANCE:
             verdict = f"ANTI-CHALK by {real_centre - c:.2f}"
-            failures += 1
+            corr_failures += 1
         elif c > real_centre + TOLERANCE:
             verdict = f"PRO-CHALK by {c - real_centre:.2f}"
-            failures += 1
+            corr_failures += 1
         else:
             verdict = "ok"
         print(f"{s['name'][:38]:40s} {s['n']:6d} {s['own_mean']:6.1f}% {c:+9.2f} "
               f"{s['corr_own_roi']:+8.2f} {s['corr_proj_top1']:+10.2f} "
               f"{s['corr_proj_simpts']:+12.2f}  {verdict}")
 
-    print("\n  proj/simpts near 1.00 = the bootstrap engine (pools recentered on today's")
-    print("  projection). Well below that = the at-bat engine, which forms its own view of")
-    print("  a player and will legitimately show a weaker proj/top1 as a result.")
+    print("\n  proj/simpts near 1.00 = the engine's marginals are centred on today's")
+    print("  projection, which BOTH engines now are. It reading well below that is a")
+    print("  miscalibration, not a philosophy: the at-bat engine used to sit at +0.54 because")
+    print("  it compressed hitters toward its own league-average priors (slope 0.37), which")
+    print("  read a batch of good lineups ~7 points light and flattened proj/top1 to +0.005.")
+    print("  Its marginals are recentred now; its DEPENDENCE structure -- the real reason to")
+    print("  run it -- is untouched, since scaling cannot change a correlation.")
+
+    # ---- score level and distribution -------------------------------
+    print()
+    print("=" * 100)
+    print("SCORE CALIBRATION -- is the engine centred on its own input?")
+    print("=" * 100)
+    print("  The one clean, unconfounded engine check an export supports: a simulator is")
+    print("  handed today's projections, so its simulated mean should reproduce them. It")
+    print("  needs no --date, because it compares the export against itself.")
+    print()
+    print("  This is what caught the at-bat engine. It ran -6.9 points light on a batch of")
+    print("  good lineups -- not a level bias but a SLOPE problem: it compressed hitters")
+    print("  toward its own league-average priors (per-player slope 0.37), so the better a")
+    print("  lineup was the more it was marked down (-3.6 at Q1 to -10.9 at Q5). That also")
+    print("  flattened corr(projected points, top-1%) to +0.005, since the metric ranks on")
+    print("  simulated points and those had stopped tracking the projection.")
+    print()
+    print(f"  {'export':40s} {'proj':>7s} {'sim mean':>9s} {'gap':>7s} "
+          f"{'proj/simpts':>12s} {'spread':>7s} {'best ceil':>10s}")
+    for s_ in sims:
+        gap = s_["sim_mean_avg"] - s_["proj_avg"]
+        tracks = s_["corr_proj_simpts"]
+        # proj/simpts is the sharper signal of the two. A compressing
+        # engine can still land the batch AVERAGE near the projection
+        # average while getting every individual lineup wrong -- it
+        # marks the good ones down and the bad ones up, and those
+        # cancel. Only the correlation sees that, which is why the
+        # at-bat engine sat at 0.24-0.33 here while its average gap
+        # looked survivable at -1.9.
+        bad_level = abs(gap) > LEVEL_TOLERANCE
+        bad_slope = tracks == tracks and tracks < TRACKING_MIN  # NaN-safe
+        flag = ""
+        if bad_slope:
+            flag = "   <- does not track its own projections"
+        elif bad_level:
+            flag = "   <- not centred on its own projections"
+        print(f"  {s_['name'][:38]:40s} {s_['proj_avg']:7.1f} {s_['sim_mean_avg']:9.1f} "
+              f"{gap:+7.1f} {tracks:+12.3f} {s_['avg_spread']:7.1f} "
+              f"{s_['best_ceiling']:10.1f}{flag}")
+        if bad_level or bad_slope:
+            dist_failures += 1
+
+    # Reported, deliberately NOT failed. The gap between a real contest's
+    # scores and the projections for that slate is RotoWire's accuracy on
+    # the day, not the engine's: on 9/2 real lineups beat their own
+    # projection by ~+15 points at every projection quintile. An engine
+    # faithfully reproducing its input will look "light" against that,
+    # and marking it down for it would be grading the wrong thing --
+    # exactly the like-against-like trap this script exists to avoid.
+    if args.date and same_day_real:
+        ref_p50 = st.median([r["pts_p50"] for r in same_day_real])
+        ref_p99 = st.median([r["pts_p99"] for r in same_day_real])
+        ref_max = st.median([r["pts_max"] for r in same_day_real])
+        print()
+        print(f"  For context, real contests on {args.date} scored:")
+        print(f"    p50 {ref_p50:.1f}   p99 {ref_p99:.1f}   winning score {ref_max:.1f}")
+        print("    A batch whose simulated level sits below this is not necessarily wrong --")
+        print("    it means the PROJECTIONS were light for that slate, which is a different")
+        print("    problem from the engine's, and is not failed here.")
 
     if args.date:
         # Same-date contests only: cumulative ownership scales with the
         # size of the board, so a cross-slate average is not a target.
-        stamp = args.date.replace("-", "")
-        mmddyyyy = stamp[4:] + stamp[:4]
-        same_day = [r for r in real if mmddyyyy in r["name"] or stamp in r["name"]]
+        same_day = same_day_real
         if not same_day:
             print(f"\nNo real contest found for {args.date} -- cannot grade that field, since")
             print("cumulative ownership is only comparable within a slate.")
@@ -363,15 +469,23 @@ def main() -> int:
             asyncio.run(compare_field(args.date, st.mean([r["own_mean"] for r in same_day])))
 
     print()
-    if failures:
-        print(f"FAIL: {failures} of {len(sims)} sim exports sit more than {TOLERANCE:.2f} "
-              f"outside the real range.")
-        print("The field is the first place to look -- rank comes from simulated points")
-        print("alone, so an ownership slope this size means the modelled OPPONENTS are")
-        print("mis-calibrated, not the metric. Re-run with --date to see where the field lands.")
+    if corr_failures:
+        print(f"FAIL (ownership): {corr_failures} of {len(sims)} exports sit more than "
+              f"{TOLERANCE:.2f} from the real median.")
+        print("  The FIELD is the first place to look -- rank comes from simulated points")
+        print("  alone, so an ownership slope this size means the modelled OPPONENTS are")
+        print("  mis-calibrated, not the metric. Re-run with --date to see where it lands.")
+    if dist_failures:
+        print(f"FAIL (scores): {dist_failures} level/tail problem(s) across {len(sims)} exports.")
+        print("  The ENGINE is the place to look. A level miss means its marginals are not")
+        print("  centred on today's projection; a tail miss means it cannot produce a lineup")
+        print("  capable of winning, which no amount of correct ranking can make up for.")
+    if corr_failures or dist_failures:
         return 1
 
-    print(f"PASS: all {len(sims)} sim exports sit within {TOLERANCE:.2f} of the real median.")
+    print(f"PASS: all {len(sims)} sim exports sit within {TOLERANCE:.2f} of the real median"
+          + (", and reproduce the real score distribution." if args.date and same_day_real
+             else " (pass --date to also check the score distribution)."))
     return 0
 
 

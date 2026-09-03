@@ -1120,3 +1120,95 @@ async def simulate_slate_trials(
                     player_trials[pid] = list(zeros)
 
     return player_trials
+
+
+# --------------------------------------------------------------------------
+# Recentering the engine's marginals on today's projection
+# --------------------------------------------------------------------------
+#
+# Measured on a real slate (9/2, 120 players): the engine reproduces
+# today's projection well in LEVEL but badly in SPREAD, and only for
+# hitters.
+#
+#            n     proj mean   sim mean   slope   sd(proj)  sd(sim)
+#   hitters  108      7.32        6.96      0.37     1.90     1.05
+#   pitchers  12     15.05       14.91      1.30     3.78     6.61
+#
+# A hitter slope of 0.37 means the engine flattens the lineup toward
+# its own middle: batting slots 1-7 all simulate BELOW their projection
+# and slots 8-9 ABOVE, and the players it disagrees with most are
+# exactly the best ones (Ohtani 12.06 -> 9.83). That is regression
+# toward the engine's own league-average priors, and it does real
+# damage downstream -- a batch of good lineups reads ~7 points light,
+# and because the compression is proportional to how good a lineup is,
+# corr(projected points, top-1% rate) collapses to +0.005. The engine
+# is not "wrong about who is good" in a way reality supports either:
+# real 9/2 lineups beat their projection by ~+15 points at EVERY
+# projection quintile, so the projection-to-outcome relationship in
+# reality has slope >= 1, not 0.37.
+#
+# The fix is the same one the bootstrap engine got: keep the engine's
+# DEPENDENCE structure, replace its MARGINALS. Scaling each player's
+# own trial array by a constant leaves every pairwise correlation
+# exactly unchanged (Pearson correlation is scale-invariant), so this
+# preserves the entire reason to run an at-bat engine at all -- a big
+# inning still lifts consecutive hitters together, the lineup still
+# turns over, the starter is still anti-correlated with the offence he
+# faced -- while taking the levels from the source that actually knows
+# today (park, weather, platoon, recent form, confirmed batting order).
+#
+# That is exactly the copula split already used elsewhere here:
+# marginals from projections, dependence from the simulation.
+#
+# Deliberately NOT applied inside simulate_slate_trials(): backtesting
+# the engine against real outcomes (scripts/backtest_atbat_engine.py)
+# has to see the engine's own unaided opinion, or it would be grading
+# the projections instead.
+_RECENTER_SCALE_MIN = 0.4
+_RECENTER_SCALE_MAX = 2.5
+_RECENTER_MIN_MEAN = 0.5
+
+
+def recenter_trials_on_projections(
+    player_trials: dict[int, list[float]],
+    slate: dict[str, Any],
+) -> dict[int, list[float]]:
+    """
+    Rescale each player's simulated trial array so its mean equals
+    today's projected fantasy points, preserving shape and every
+    cross-player correlation. Players with no projection, or whose
+    simulated mean is too small to rescale meaningfully, pass through
+    untouched.
+    """
+    projections: dict[int, float] = {}
+    for game in slate.get("games", []):
+        for side_key in ("home", "away"):
+            side = game.get(side_key) or {}
+            people = list(side.get("hitters") or [])
+            starter = side.get("probable_pitcher")
+            if starter:
+                people.append(starter)
+            for person in people:
+                if not person:
+                    continue
+                pid = person.get("id")
+                fpts = (person.get("projection") or {}).get("fpts")
+                if pid is not None and fpts:
+                    projections[pid] = float(fpts)
+
+    recentered: dict[int, list[float]] = {}
+    for pid, trials in player_trials.items():
+        projection = projections.get(pid)
+        if not trials or not projection or projection <= 0:
+            recentered[pid] = trials
+            continue
+        mean = sum(trials) / len(trials)
+        if mean < _RECENTER_MIN_MEAN:
+            # Nothing meaningful to rescale -- multiplying ~zeros by any
+            # factor still cannot reach a projection, and the implied
+            # scale would be enormous.
+            recentered[pid] = trials
+            continue
+        scale = min(_RECENTER_SCALE_MAX, max(_RECENTER_SCALE_MIN, projection / mean))
+        recentered[pid] = [value * scale for value in trials]
+    return recentered
