@@ -3196,9 +3196,14 @@ async def main() -> int:
     low_ratio = contest._field_weight_fn("low")(chalk_player) / contest._field_weight_fn("low")(value_player)
     high_ratio = contest._field_weight_fn("high")(chalk_player) / contest._field_weight_fn("high")(value_player)
 
-    check("'marquee' field_sharpness weighs the chalk player over the value player in "
-          "direct proportion to ownership% (8x)",
-          marquee_ratio == 8.0, str(marquee_ratio))
+    # Marquee used to be raw ownership, an exact 8x here. It now damps
+    # slightly (^0.78), because the raw curve built a field ~6 points
+    # chalkier than any real contest measured -- see the calibration
+    # note on the exponents themselves. Still clearly chalk-leaning,
+    # just no longer literally proportional.
+    check("'marquee' field_sharpness still weighs the chalk player well above the value "
+          "player, but no longer in raw proportion to ownership%",
+          5.0 < marquee_ratio < 8.0, str(marquee_ratio))
     check("'low' (a cheap contest, newer and safer entrants) leans on chalk HARDER than "
           "marquee -- it is the most concentrated field, not the least",
           low_ratio > marquee_ratio,
@@ -6251,14 +6256,63 @@ async def main() -> int:
     marquee_lo_rate = lo_pick_rate("marquee")
     low_lo_rate = lo_pick_rate("low")
     high_lo_rate = lo_pick_rate("high")
+    # The margin here was 1.5x when the levels were set by eye. They are
+    # now calibrated against real DK standings, and the real spread
+    # between stakes is much narrower than the eyeballed one was -- so
+    # this checks the ordering with a modest margin rather than the old
+    # gap, which was itself the thing measurement disproved.
     check("'low' (cheap contest, safer entrants) rosters the lightly-owned alternative "
           "measurably LESS than marquee -- it is the chalkiest field on the board",
-          low_lo_rate * 1.5 < marquee_lo_rate,
+          low_lo_rate * 1.1 < marquee_lo_rate,
           f"low={low_lo_rate:.3f} marquee={marquee_lo_rate:.3f}")
     check("'high' (high stakes) rosters it MOST -- differentiating is how you win a "
           "contest full of people who can all see the chalk",
           high_lo_rate > marquee_lo_rate > low_lo_rate,
           f"high={high_lo_rate:.3f} > marquee={marquee_lo_rate:.3f} > low={low_lo_rate:.3f}")
+
+    # The calibration itself. Four real DK standings exports (9/1-9/2,
+    # 3,539-7,113 entries, all cheap contests) put a real field at
+    # 130.6-134.9% cumulative ownership. The old exponents put the LOW
+    # field at 152% -- and since ranks come from simulated points alone,
+    # a field 20 points chalkier than reality IS the ownership penalty:
+    # a chalky entry moves with the field it is ranked against and can
+    # never separate, while a contrarian one swings free. That is what
+    # made the simulator read as anti-chalk.
+    _REAL_FIELD_OWN_LOW, _REAL_FIELD_OWN_HIGH = 130.6, 134.9
+    check("the low-stakes exponent no longer sharpens the ownership curve -- sharpening it "
+          "is what put the modelled field 20 points chalkier than any real contest",
+          contest._LOW_STAKES_OWNERSHIP_EXPONENT < 1.0,
+          str(contest._LOW_STAKES_OWNERSHIP_EXPONENT))
+    check("...and the levels stay ordered by how hard each leans on chalk",
+          contest._LOW_STAKES_OWNERSHIP_EXPONENT
+          > contest._MARQUEE_OWNERSHIP_EXPONENT
+          > contest._HIGH_STAKES_OWNERSHIP_EXPONENT,
+          f"{contest._LOW_STAKES_OWNERSHIP_EXPONENT} > "
+          f"{contest._MARQUEE_OWNERSHIP_EXPONENT} > "
+          f"{contest._HIGH_STAKES_OWNERSHIP_EXPONENT}")
+    check("the high-stakes edge exponent is off the duplication cliff -- at 12 a quarter of "
+          "the field was an exact copy of another lineup (real contests run 8-11%) while "
+          "buying no extra matchup quality over 4",
+          contest._HIGH_STAKES_EDGE_EXPONENT <= 6.0,
+          str(contest._HIGH_STAKES_EDGE_EXPONENT))
+
+    # The metric itself has no ownership term and must not grow one:
+    # ownership belongs in the PAYOUT step (shared with duplicates),
+    # never in the probability of finishing anywhere.
+    import inspect as _inspect
+    _eval_src = _inspect.getsource(contest.evaluate_batch_simulated)
+    _rank_block = _eval_src[_eval_src.index("top_1pct_threshold"):_eval_src.index("field_signatures")]
+    # Code only -- the comments in this stretch legitimately DISCUSS
+    # ownership (they explain why duplication is handled later, at the
+    # payout step), and matching prose would fail on an accurate comment.
+    _rank_code = " ".join(
+        ln for ln in _rank_block.splitlines() if not ln.strip().startswith("#")
+    )
+    check("top_1pct/top_10pct/first_place are computed from simulated rank alone -- no "
+          "ownership, duplication or leverage term in the code between the threshold and "
+          "the point duplication starts being counted",
+          not any(w in _rank_code for w in ("ownership", "duplication_risk", "leverage")),
+          _rank_code.strip()[:120])
 
     # sample_size=250 is a deliberate exact divisor of both field_size
     # values used below (500 and 100,000) -- when field_size isn't an

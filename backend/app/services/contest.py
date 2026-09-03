@@ -425,7 +425,37 @@ FIELD_SHARPNESS_LEVELS = ("low", "marquee", "high")
 #
 # Exponent > 1 sharpens the ownership curve (chalk pulls even harder);
 # exponent < 1 flattens it (chalk still leads, by less).
-_LOW_STAKES_OWNERSHIP_EXPONENT = 1.5
+#
+# CALIBRATED AGAINST REAL CONTESTS (scripts/calibrate_sim.py, 4 real DK
+# standings exports, 9/1-9/2, 3,539-7,113 entries each). Every one of
+# them is a cheap contest ($0.10-$0.25) -- "low stakes" by these very
+# definitions -- and every one landed at essentially the same place:
+#
+#     real cumulative ownership   mean 130.6-134.9%, sd 28-31
+#
+# The old exponents were set by eye and put the LOW field at 152%, more
+# than 20 points chalkier than any real cheap contest measured. That is
+# the whole reason the simulator looked anti-chalk: nothing in
+# top_1pct_pct penalises ownership (see evaluate_batch_simulated --
+# ranks come from simulated points alone), but a field 20 points
+# chalkier than reality means a chalky ENTRY moves in lockstep with the
+# field it is ranked against and can never separate from it, while a
+# contrarian entry is uncorrelated with the field and its rank swings
+# free. Over-chalking the opponents IS the ownership penalty, applied
+# where nobody thought to look for it.
+#
+# These three now bracket the measured value rather than sitting above
+# it: low 133.9%, marquee 129.6%, high ~122%.
+#
+# Honest limit on this: every contest we can measure is at the cheap
+# end, so `low` is anchored to real data and the other two are still a
+# modelled belief about how fields change with stakes -- but a belief
+# with a much NARROWER spread than before, because the one point we can
+# check came in far below where the model had put it. Re-run
+# calibrate_sim.py against a real high-stakes export if one ever turns
+# up; that is the number that would move `high`.
+_LOW_STAKES_OWNERSHIP_EXPONENT = 0.90
+_MARQUEE_OWNERSHIP_EXPONENT = 0.78
 _HIGH_STAKES_OWNERSHIP_EXPONENT = 0.5
 
 # But "high stakes" is not "contrarian for its own sake", and modelling
@@ -443,13 +473,28 @@ _HIGH_STAKES_OWNERSHIP_EXPONENT = 0.5
 # scoring.py's matchup multiplier, carrying park, weather, opposing
 # starter and bullpen quality, platoon and recent form, centered on 1.00.
 #
-# Weighting by it lifts the share of GOOD low-owned picks from 30.6% to
-# 49.5% while keeping cumulative ownership below the marquee field. The
-# exponent is steep because the multiplier's real range is narrow
-# (0.82-1.20 on a live slate), so a gentler one moves nothing: at 12, a
-# top environment is worth ~9x an average one before ownership is
-# considered, which is the intended "hunt the spot the field missed".
-_HIGH_STAKES_EDGE_EXPONENT = 12.0
+# Weighting by it lifts the share of GOOD low-owned picks while keeping
+# cumulative ownership below the marquee field.
+#
+# The exponent was 12, chosen because the multiplier's range is narrow
+# (0.82-1.20 live) so a gentle one moves nothing. Sweeping it against a
+# real slate showed 12 was well past the point of any benefit, and paid
+# for the overshoot in duplication:
+#
+#     edge exp    cumulative own    exact dupes    good low-owned picks
+#        2            120.3%            2.3%              20.8%
+#        4            121.9%            5.3%              21.7%
+#        6            124.1%            5.4%              21.5%
+#       12            124.5%           25.5%              21.8%
+#
+# The thing the exponent exists to buy -- low-owned picks that are
+# actually in a good spot -- is flat from 4 upward (21.7% vs 21.8%).
+# What kept climbing was duplication: at 12 a quarter of the field is
+# an exact copy of another lineup, against 8-11% in the four real
+# contests measured. That collapse is self-defeating on its own terms,
+# since a field that all finds the same "hidden" edge is no longer
+# hunting anything, and it distorts every entry ranked against it.
+_HIGH_STAKES_EDGE_EXPONENT = 4.0
 
 
 def _field_weight_fn(field_sharpness: str) -> Callable[[dict[str, Any]], float]:
@@ -472,8 +517,8 @@ def _field_weight_fn(field_sharpness: str) -> Callable[[dict[str, Any]], float]:
             )
 
         return _high_stakes_weight
-    # Marquee: the ownership curve as it is, no thumb on the scale.
-    return _ownership_weight
+    # Marquee: a milly-maker's mix of both, so it sits between them.
+    return lambda p: _ownership_weight(p) ** _MARQUEE_OWNERSHIP_EXPONENT
 
 
 def _team_hitter_pools(
