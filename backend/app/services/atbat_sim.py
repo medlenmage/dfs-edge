@@ -1168,6 +1168,46 @@ _RECENTER_SCALE_MIN = 0.4
 _RECENTER_SCALE_MAX = 2.5
 _RECENTER_MIN_MEAN = 0.5
 
+# WHY THIS IS A REGRESSION FIT AND NOT A PER-PLAYER PIN
+#
+# The first version of this scaled every player's array so his own mean
+# landed exactly on his own projection. That removed the compression,
+# but it also removed everything else: if every player's mean IS his
+# projection, then a lineup's simulated mean is the sum of its
+# projections, and corr(projected points, simulated mean) is 1.000 by
+# construction. Measured at exactly that, across 108 lineups. At that
+# point the engine is a deterministic function of its input and there
+# is no reason to run it -- the bootstrap engine is far cheaper and
+# gives the same answer.
+#
+# The compression has two parts and only one of them is wrong:
+#
+#   systematic   the group-wide slope (0.37 for hitters), which says
+#                the engine marks good players down and weak players
+#                up. Reality does not support it: real lineups beat
+#                their projection by ~+15 points at EVERY projection
+#                quintile, flat, so the real slope is >= 1.
+#
+#   idiosyncratic this player's own departure from that line, which is
+#                what actually came out of simulating his plate
+#                appearances against today's pitcher. That is real
+#                information the projection does not contain.
+#
+# Fitting the line per group and re-centring on it removes the first
+# and keeps the second. A player the engine likes more than the line
+# expects still simulates above his projection afterwards.
+#
+# _RESIDUAL_TRUST scales how much of that disagreement survives. 1.0
+# keeps it whole, which is the honest default: the residual is a
+# measurement, not a guess, and damping it would be a second opinion
+# about an opinion. Lower it only if the residuals are ever shown to be
+# noise rather than signal.
+_RESIDUAL_TRUST = 1.0
+
+# Below this many players in a group there is no slope worth fitting,
+# and the fallback pins on the projection instead.
+_RECENTER_MIN_SAMPLE = 8
+
 
 def recenter_trials_on_projections(
     player_trials: dict[int, list[float]],
@@ -1181,20 +1221,43 @@ def recenter_trials_on_projections(
     untouched.
     """
     projections: dict[int, float] = {}
+    groups: dict[int, str] = {}
     for game in slate.get("games", []):
         for side_key in ("home", "away"):
             side = game.get(side_key) or {}
-            people = list(side.get("hitters") or [])
+            people = [(p, "H") for p in (side.get("hitters") or []) if p]
             starter = side.get("probable_pitcher")
             if starter:
-                people.append(starter)
-            for person in people:
-                if not person:
-                    continue
+                people.append((starter, "P"))
+            for person, group in people:
                 pid = person.get("id")
                 fpts = (person.get("projection") or {}).get("fpts")
                 if pid is not None and fpts:
                     projections[pid] = float(fpts)
+                    groups[pid] = group
+
+    # Fit the systematic part per GROUP. Hitters and pitchers sit on
+    # completely different lines -- measured slope 0.37 for hitters
+    # against 1.30 for pitchers -- so one fit across both would correct
+    # neither.
+    fits: dict[str, tuple[float, float]] = {}
+    for group in ("H", "P"):
+        pairs = [
+            (projections[pid], sum(t) / len(t))
+            for pid, t in player_trials.items()
+            if t and groups.get(pid) == group and pid in projections
+            and sum(t) / len(t) >= _RECENTER_MIN_MEAN
+        ]
+        if len(pairs) < _RECENTER_MIN_SAMPLE:
+            continue
+        n = len(pairs)
+        mx = sum(x for x, _ in pairs) / n
+        my = sum(y for _, y in pairs) / n
+        sxx = sum((x - mx) ** 2 for x, _ in pairs)
+        if sxx <= 0:
+            continue
+        beta = sum((x - mx) * (y - my) for x, y in pairs) / sxx
+        fits[group] = (my - beta * mx, beta)
 
     recentered: dict[int, list[float]] = {}
     for pid, trials in player_trials.items():
@@ -1209,6 +1272,27 @@ def recenter_trials_on_projections(
             # scale would be enormous.
             recentered[pid] = trials
             continue
-        scale = min(_RECENTER_SCALE_MAX, max(_RECENTER_SCALE_MIN, projection / mean))
+
+        fit = fits.get(groups.get(pid, ""))
+        if fit is None:
+            # Too few players in this group to fit a line. Fall back to
+            # pinning this one player on his projection: cruder, but a
+            # slate this thin has no systematic slope to estimate.
+            target = projection
+        else:
+            alpha, beta = fit
+            # The engine's own disagreement with the projection for THIS
+            # player, measured against the group's fitted line rather
+            # than against the projection itself. Keeping it is the
+            # whole point: it is the part that came from simulating his
+            # plate appearances, and it is what makes this engine worth
+            # running instead of the bootstrap one.
+            residual = mean - (alpha + beta * projection)
+            target = projection + _RESIDUAL_TRUST * residual
+
+        if target <= 0:
+            recentered[pid] = trials
+            continue
+        scale = min(_RECENTER_SCALE_MAX, max(_RECENTER_SCALE_MIN, target / mean))
         recentered[pid] = [value * scale for value in trials]
     return recentered

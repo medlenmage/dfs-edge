@@ -4806,6 +4806,63 @@ async def main() -> int:
           _mean(atbat_sim.recenter_trials_on_projections({1: [0.6, 0.6, 0.6, 0.6]}, _rc_slate)[1])
           <= 0.6 * atbat_sim._RECENTER_SCALE_MAX + 1e-9)
 
+    # Above _RECENTER_MIN_SAMPLE players the correction fits a LINE per
+    # group instead of pinning each player on his own projection.
+    #
+    # This distinction is the whole design. Pinning removed the
+    # compression but also removed the engine: if every player's mean
+    # IS his projection, a lineup's simulated mean is the sum of its
+    # projections and corr(projected points, simulated mean) is 1.000 by
+    # construction -- measured at exactly that, at which point the
+    # engine is a deterministic function of its input and there is no
+    # reason to run it. The compression has a systematic part (the
+    # group slope, which reality contradicts) and an idiosyncratic part
+    # (what simulating this player's plate appearances actually said).
+    # Only the first is wrong.
+    _big_hitters = []
+    _big_trials = {}
+    for _i in range(12):
+        _proj = 4.0 + _i * 0.8                     # 4.0 .. 12.8
+        # A compressing engine: slope 0.4 about the group mean, plus one
+        # player (id 106) the engine genuinely likes more than the line.
+        _sim = 8.0 + 0.4 * (_proj - 8.0) + (2.0 if _i == 6 else 0.0)
+        _pid = 100 + _i
+        _big_hitters.append({"id": _pid, "name": f"H{_i}", "projection": {"fpts": _proj}})
+        _big_trials[_pid] = [_sim * 0.5, _sim, _sim * 1.5]
+    _big_slate = {"games": [{
+        "home": {"abbrev": "AAA", "hitters": _big_hitters, "probable_pitcher": None},
+        "away": {"abbrev": "BBB", "hitters": [], "probable_pitcher": None},
+    }]}
+    _big = atbat_sim.recenter_trials_on_projections(_big_trials, _big_slate)
+
+    _projs = [h["projection"]["fpts"] for h in _big_hitters]
+    _after = [_mean(_big[h["id"]]) for h in _big_hitters]
+    _n = len(_projs)
+    _mp, _ma = sum(_projs) / _n, sum(_after) / _n
+    _slope = (sum((p - _mp) * (a - _ma) for p, a in zip(_projs, _after))
+              / sum((p - _mp) ** 2 for p in _projs))
+    check("with a real group to fit, the systematic compression is removed -- the group's "
+          "slope against projection comes back to 1.0 from the 0.4 the fixture engine had",
+          abs(_slope - 1.0) < 0.02, f"slope {_slope:.4f}")
+
+    _corr_after = _corr(_projs, _after)
+    check("...but the engine is NOT pinned to the projection: one player it liked more than "
+          "the fitted line still simulates above his own projection afterwards, so the "
+          "correlation stays below 1.0 and the engine keeps an opinion of its own",
+          _corr_after < 0.999, f"corr {_corr_after:.4f}")
+    check("...and it is specifically that player who keeps the surplus -- the residual is "
+          "preserved in place, not smeared across the group",
+          _after[6] - _projs[6] > 1.0
+          and all(abs(_after[i] - _projs[i]) < 0.5 for i in (0, 3, 9, 11)),
+          f"liked player {_after[6] - _projs[6]:+.2f}, others "
+          f"{[round(_after[i] - _projs[i], 2) for i in (0, 3, 9, 11)]}")
+    check("the group still lands on the projections ON AVERAGE, which is what a level "
+          "correction is for -- without pinning any individual player to his own",
+          abs(_ma - _mp) < 0.25, f"group mean {_ma:.2f} vs projected {_mp:.2f}")
+    check("recentering by a fitted line is still per-player scaling, so it STILL cannot "
+          "change any correlation -- the dependence structure survives this version too",
+          abs(_corr(_big[100], _big[106]) - _corr(_big_trials[100], _big_trials[106])) < 1e-12)
+
     print("\nAt-bat-level baserunner advancement (atbat_sim._advance_runners)")
 
     _rng0 = random.Random(0)  # deterministic branch selection below via explicit thresholds
