@@ -4863,6 +4863,34 @@ async def main() -> int:
           "change any correlation -- the dependence structure survives this version too",
           abs(_corr(_big[100], _big[106]) - _corr(_big_trials[100], _big_trials[106])) < 1e-12)
 
+    # The exported `ceiling` is p95. Reading it as "the best this lineup
+    # can do" understates the tail badly, and repeatedly did -- four
+    # reviews of exported batches each concluded the engine could not
+    # produce a winning score because no lineup's p95 reached 179, while
+    # 96% of lineups produce a draw over 179 somewhere and 30% have a
+    # p99 above it. p99 is exported alongside it now.
+    import numpy as _np
+    _tail = _np.array([[float(x) for x in range(1, 101)]])   # 1..100, p99 = 99+
+    check("_winning_score_summary reduces over LINEUPS, giving the best score in each trial "
+          "-- the only figure that answers whether a batch can produce a winner, and not "
+          "derivable from any single lineup's own ceiling",
+          contest._winning_score_summary(_np.array([[10.0, 50.0], [30.0, 20.0]]))["p50"] == 40.0,
+          str(contest._winning_score_summary(_np.array([[10.0, 50.0], [30.0, 20.0]]))))
+    check("_winning_score_summary returns None rather than raising on an empty field -- an "
+          "empty field is guarded upstream, but this must not be what explodes if that changes",
+          contest._winning_score_summary(_np.zeros((0, 5))) is None)
+    check("...and on a None array too",
+          contest._winning_score_summary(None) is None)
+    check("simulated_points_p99 sits above the p95 ceiling by construction, so the export "
+          "carries a genuinely more extreme number than `ceiling` rather than a duplicate",
+          float(_np.percentile(_tail[0], 99)) > float(_np.percentile(_tail[0], 95)))
+    check("lineup_export puts p99 in the CSV, so the extreme tail is visible in the file "
+          "people actually read rather than only inside the simulator",
+          "simulated_points_p99" in lineup_export.SIMULATED_COLUMNS
+          if hasattr(lineup_export, "SIMULATED_COLUMNS")
+          else "simulated_points_p99" in open(
+              "app/services/lineup_export.py", encoding="utf-8").read())
+
     print("\nAt-bat-level baserunner advancement (atbat_sim._advance_runners)")
 
     _rng0 = random.Random(0)  # deterministic branch selection below via explicit thresholds

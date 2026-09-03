@@ -692,6 +692,15 @@ export function ContestSimulatorPanel({ date, batch, projectionSource = 'rotowir
                 {state.summary.avg_roi_pct >= 0 ? '+' : ''}
                 {state.summary.avg_roi_pct}% avg ROI
               </span>
+              {state.simulated_winning_score && (
+                <span
+                  className="badge"
+                  title="The best score in the whole field, per simulated contest -- what it actually takes to WIN this one. Not comparable to any single lineup's ceiling: a ceiling is a statistic about one lineup, a winning score is the maximum over thousands of them, so it is always far higher."
+                >
+                  {state.simulated_winning_score.p50} wins it (
+                  {state.simulated_winning_score.p10}&ndash;{state.simulated_winning_score.p90})
+                </span>
+              )}
               <span className="badge">${state.summary.total_entry_cost.toLocaleString()} cost</span>
               <span
                 className="badge"
