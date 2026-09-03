@@ -841,11 +841,12 @@ def main() -> int:
     # first-place hits, so sorting by it ranks lineups substantially by
     # which ones got lucky in this run's draws. Same ordering the MLB
     # side already uses.
-    check("build_contest_entries_simulated's entries are ranked by top-1% rate, ROI as tiebreak",
-          all((-sim["results"][i]["top_1pct_pct"], -sim["results"][i]["roi_pct"])
-              <= (-sim["results"][i + 1]["top_1pct_pct"], -sim["results"][i + 1]["roi_pct"])
+    check("build_contest_entries_simulated's entries are ranked by ROI, highest first, with "
+          "top-1% rate as the tiebreak -- same ordering the MLB side uses",
+          all((-sim["results"][i]["roi_pct"], -sim["results"][i]["top_1pct_pct"])
+              <= (-sim["results"][i + 1]["roi_pct"], -sim["results"][i + 1]["top_1pct_pct"])
               for i in range(len(sim["results"]) - 1)),
-          str([(r["top_1pct_pct"], r["roi_pct"]) for r in sim["results"]]))
+          str([(r["roi_pct"], r["top_1pct_pct"]) for r in sim["results"]]))
     check("first_place_pct defaults to the gpp_small preset's own value (15.0) when not overridden",
           sim["first_place_pct"] == 15.0, str(sim["first_place_pct"]))
 
