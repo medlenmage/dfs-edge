@@ -104,6 +104,15 @@ _SIMULATED_RESULT_FIELDS = [
     "simulated_points_p90",
     "simulated_points_floor",
     "simulated_points_ceiling",
+    # `ceiling` is p95. Reading it as "the best this lineup can do"
+    # understates the tail badly -- and repeatedly did, across four
+    # reviews of exported batches that each concluded the engine could
+    # not produce a winning score. p99 is exported alongside it so the
+    # extreme tail is visible in the file rather than only in the
+    # simulator. Neither is the winning score: that is a maximum over
+    # thousands of lineups and lives on the batch summary as
+    # `simulated_winning_score`.
+    "simulated_points_p99",
 ]
 
 
