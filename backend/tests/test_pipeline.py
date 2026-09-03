@@ -3525,6 +3525,60 @@ async def main() -> int:
     check("entries (points-weighted) score meaningfully higher on average than the ownership-weighted field",
           avg_entry_points > avg_field_points, str((avg_entry_points, avg_field_points)))
 
+    # Entry generation carries a light ownership tilt. It used to be
+    # entirely ownership-blind, which produced a systematic contrarian
+    # lean -- ~18 points of cumulative ownership below the real field on
+    # 9/2, and -14 to -31 against the modelled field on every slate
+    # checked. That would only be correct if real winners were
+    # contrarian, and across 22 archived contests the top-10 finishers
+    # average -1.2 points against their OWN field: winners land on the
+    # field, they do not sit under it.
+    _hi_own = {"projected_fpts": 10.0, "ownership_pct": 40.0}
+    _lo_own = {"projected_fpts": 10.0, "ownership_pct": 2.0}
+    check("between two equally-projected players, entry sampling now prefers the one the "
+          "field is actually on -- the batch centres on the field instead of under it",
+          contest._fpts_weight(_hi_own) > contest._fpts_weight(_lo_own),
+          f"{contest._fpts_weight(_hi_own):.2f} vs {contest._fpts_weight(_lo_own):.2f}")
+
+    # ...but projection has to stay the dominant factor, or entry
+    # generation has quietly become a second field sampler and nothing
+    # is building good lineups any more. The honest comparison is each
+    # factor across its OWN real range on a slate: hitters project
+    # roughly 5-15 fpts (3x, cubed = 27x), ownership runs from the floor
+    # to about 43% (86x, but heavily damped = ~5.8x).
+    _proj_span = (15.0 / 5.0) ** contest._FPTS_SAMPLING_EXPONENT
+    _own_span = (43.0 / 0.5) ** contest._ENTRY_OWNERSHIP_EXPONENT
+    check("across each factor's full real range on a slate, projection dominates ownership "
+          "by a wide margin -- this is a tilt, not a takeover",
+          _proj_span > 3 * _own_span,
+          f"projection span {_proj_span:.1f}x vs ownership span {_own_span:.1f}x")
+
+    # Stated rather than glossed: the tilt IS strong enough that a very
+    # chalky player outweighs a moderately better-projected one. That is
+    # the cost of closing an 18-point gap. What must not happen is chalk
+    # overriding a LARGE projection edge.
+    _crossover = _own_span ** (1.0 / contest._FPTS_SAMPLING_EXPONENT)
+    check("a player must project meaningfully higher -- but not absurdly so -- to outweigh "
+          "the chalkiest option on the board; chalk overriding a large projection edge would "
+          "mean the sampler had stopped caring who is good",
+          1.5 < _crossover < 2.2,
+          f"needs {_crossover:.2f}x the projection to beat full-range chalk")
+
+    # Graceful degradation: _fpts_weight is also called with hand-built
+    # player dicts that carry no ownership (stack-team weighting, late
+    # swap), and on slates with no ownership data at all.
+    check("a player dict with no ownership_pct at all still weights, ranking purely on "
+          "projection rather than raising",
+          contest._fpts_weight({"projected_fpts": 14.0})
+          > contest._fpts_weight({"projected_fpts": 10.0}))
+    check("...and with ownership absent everywhere the term is a constant, so the ratio "
+          "between two players is exactly what it was before the tilt existed",
+          abs(
+              contest._fpts_weight({"projected_fpts": 14.0})
+              / contest._fpts_weight({"projected_fpts": 10.0})
+              - (14.0 / 10.0) ** contest._FPTS_SAMPLING_EXPONENT
+          ) < 1e-9)
+
     # The cap is enforced against the REQUESTED count (20), not
     # however many entries the batch actually ends up with -- a tight
     # cap can legitimately return fewer than requested once enough
