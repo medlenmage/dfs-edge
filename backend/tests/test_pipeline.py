@@ -5686,13 +5686,21 @@ async def main() -> int:
           "own mean) and never below zero",
           (_pe_shifted != _pe_matrix).any() and (_pe_shifted >= 0).all(), str(_pe_shifted))
 
-    check("results come back ranked by top-1% rate (ROI as tiebreak), not raw ROI -- per-lineup "
-          "ROI is dominated by rare first-place hits, so ranking by it ranks luck",
+    # Highest ROI down, top-1% rate as the tiebreak -- ROI is the number
+    # the decision turns on, so it leads. The tiebreak is not decoration:
+    # per-lineup ROI is dominated by rare first-place hits, so top-1%
+    # rate (measured from ~100x more trial hits) is what separates two
+    # lineups whose ROI landed the same.
+    check("results come back ranked by ROI, highest first, with top-1% rate as the tiebreak",
           all(
-              (a["top_1pct_pct"], a["roi_pct"]) >= (b["top_1pct_pct"], b["roi_pct"])
+              (a["roi_pct"], a["top_1pct_pct"]) >= (b["roi_pct"], b["top_1pct_pct"])
               for a, b in zip(sim_batch["results"], sim_batch["results"][1:])
           ),
-          str([(r["top_1pct_pct"], r["roi_pct"]) for r in sim_batch["results"]]))
+          str([(r["roi_pct"], r["top_1pct_pct"]) for r in sim_batch["results"]]))
+    check("...and every row carries the Monte Carlo standard error on its own ROI, so a lineup "
+          "whose ROI is indistinguishable from noise says so on its face rather than just "
+          "sitting at the top of the list",
+          all("roi_se_pct" in r for r in sim_batch["results"]))
 
     # Determinism: the same seed must reproduce the identical batch --
     # entries, field AND sim draws -- while a different seed must not.
@@ -6051,10 +6059,9 @@ async def main() -> int:
           "(no cap tight enough here to prevent filling it)",
           real_reshape["num_kept"] == 5, str(real_reshape["num_kept"]))
 
-    sim_sort_keys = [(r["top_1pct_pct"], r["roi_pct"]) for r in sim_batch["results"]]
-    check("build_contest_entries_simulated ranks results by top-1% rate (ROI as tiebreak) -- "
-          "per-lineup ROI is dominated by rare first-place hits, so raw-ROI ordering ranks "
-          "this run's luck rather than the build's real spike potential",
+    sim_sort_keys = [(r["roi_pct"], r["top_1pct_pct"]) for r in sim_batch["results"]]
+    check("build_contest_entries_simulated ranks results by ROI, highest first, with top-1% "
+          "rate as the tiebreak",
           sim_sort_keys == sorted(sim_sort_keys, reverse=True), str(sim_sort_keys))
     check("build_contest_entries_simulated's entries/results stay index-aligned after sorting "
           "(each result's lineup_index matches its position)",
@@ -6199,8 +6206,8 @@ async def main() -> int:
           sim_entries_self_play["sample_size"] == sim_entries_self_play["num_entries_built"],
           str((sim_entries_self_play["sample_size"], sim_entries_self_play["num_entries_built"])))
     self_play_roi_order = [r["roi_pct"] for r in sim_entries_self_play["results"]]
-    self_play_keys = [(r["top_1pct_pct"], r["roi_pct"]) for r in sim_entries_self_play["results"]]
-    check("build_contest_entries_simulated(self_play=True) still ranks by top-1% then ROI",
+    self_play_keys = [(r["roi_pct"], r["top_1pct_pct"]) for r in sim_entries_self_play["results"]]
+    check("build_contest_entries_simulated(self_play=True) uses the same ROI-first ordering",
           self_play_keys == sorted(self_play_keys, reverse=True), str(self_play_keys))
     check("build_contest_entries_simulated(self_play=True)'s cash probabilities are all valid percentages",
           all(0.0 <= r["cash_probability_pct"] <= 100.0 for r in sim_entries_self_play["results"]),

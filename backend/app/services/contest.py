@@ -2892,24 +2892,32 @@ def _rank_and_summarize_simulated(
     already built, the generator/simulator hand-off) produce byte-for-byte
     the same response shape rather than two summaries that drift apart.
     """
-    # Best entries first -- ranked by top-1% rate with ROI as the
-    # tiebreak, NOT by raw ROI. In a top-heavy GPP, per-lineup ROI is
-    # dominated by rare first-place hits (a play worth ~0.02% P(1st)
-    # lands 2 hits in 10,000 trials, and one extra hit swings ROI by
-    # 100+ points), so sorting by ROI ranks lineups substantially by
-    # which ones got lucky in THIS run's draws. top_1pct_pct measures
-    # the same "can this build spike?" quality from ~100x more trial
-    # hits, so it's far more stable draw to draw. Each row still
-    # carries its roi_pct (and its roi_se_pct, so the noise is visible
-    # rather than hidden). entries and results are re-ordered together
-    # (same permutation) so every downstream consumer -- the JSON
-    # response, the sample-entries preview, and the cached batch behind
-    # the CSV download -- gets the sorted order for free.
+    # Best entries first -- highest ROI down, with top-1% rate as the
+    # tiebreak. Ordering by ROI is what the output is read for: it is
+    # the number the decision actually turns on.
+    #
+    # Worth knowing what it costs, because it is real and it is why this
+    # used to sort the other way round. In a top-heavy GPP, per-lineup
+    # ROI is dominated by rare first-place hits -- a play worth ~0.02%
+    # P(1st) lands 2 hits in 10,000 trials, and ONE extra hit swings its
+    # ROI by 100+ points -- so the top of an ROI-sorted list is partly
+    # the lineups that got lucky in THIS run's draws. top_1pct_pct
+    # measures the same "can this build spike?" quality from ~100x more
+    # trial hits and is far steadier draw to draw, which is why it is
+    # the tiebreak rather than being dropped.
+    #
+    # Every row still carries its own roi_se_pct, the Monte Carlo
+    # standard error on that ROI in the same units, so a lineup whose
+    # ROI is indistinguishable from noise says so on its face. Raising
+    # num_trials is what actually narrows it. entries and results are
+    # re-ordered together (same permutation) so every downstream
+    # consumer -- the JSON response, the sample-entries preview, and the
+    # cached batch behind the CSV download -- gets the order for free.
     order = sorted(
         range(len(entries)),
         key=lambda i: (
-            -evaluation["results"][i].get("top_1pct_pct", 0),
             -evaluation["results"][i]["roi_pct"],
+            -evaluation["results"][i].get("top_1pct_pct", 0),
         ),
     )
     entries = [entries[i] for i in order]

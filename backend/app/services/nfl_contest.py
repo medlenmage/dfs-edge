@@ -1383,18 +1383,20 @@ def _rank_and_summarize_simulated(
     drift apart. Mirrors contest._rank_and_summarize_simulated() on the
     MLB side.
     """
-    # Best entries first -- ranked by top-1% rate with ROI as the
-    # tiebreak, NOT by raw ROI. In a top-heavy GPP, per-lineup ROI is
-    # dominated by rare first-place hits, so sorting by it ranks
-    # lineups substantially by which ones got lucky in THIS run's
-    # draws. top_1pct_pct measures the same "can this build spike?"
-    # quality from far more trial hits, so it's much more stable draw
-    # to draw. Same ordering contest.py's MLB version already uses.
+    # Best entries first -- highest ROI down, with top-1% rate as the
+    # tiebreak. Same ordering contest.py's MLB version uses, and the
+    # same caveat applies: in a top-heavy GPP, per-lineup ROI is
+    # dominated by rare first-place hits, so the top of an ROI-sorted
+    # list is partly whichever lineups got lucky in THIS run's draws.
+    # top_1pct_pct measures the same "can this build spike?" quality
+    # from far more trial hits and stays as the tiebreak for that
+    # reason; each row's own roi_se_pct shows how much of its ROI is
+    # noise.
     order = sorted(
         range(len(entries)),
         key=lambda i: (
-            -evaluation["results"][i].get("top_1pct_pct", 0),
             -evaluation["results"][i]["roi_pct"],
+            -evaluation["results"][i].get("top_1pct_pct", 0),
         ),
     )
     entries = [entries[i] for i in order]
