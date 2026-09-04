@@ -2010,6 +2010,78 @@ def main() -> int:
               "than scoring as zero",
               "ZZZ-NOBODY" in str(exc), str(exc)[:80])
 
+    print("")
+    print("td_coupling, fitted against its joint target")
+
+    _cnames = ["WR1", "WR2", "WR3", "TE", "RB1", "RB2"]
+    _cpos = ["WR", "WR", "WR", "TE", "RB", "RB"]
+    _cpriors = dict(
+        names=_cnames, positions=_cpos,
+        target_share=np.array([0.26, 0.19, 0.11, 0.17, 0.19, 0.08]),
+        td_share=np.array([0.31, 0.20, 0.08, 0.22, 0.14, 0.05]),
+        yards_per_rec=np.array([14.2, 13.0, 10.4, 11.1, 8.0, 7.2]),
+        script_beta=np.array([0.008, 0.008, 0.008, -0.042, 0.105, 0.105]),
+    )
+    _cteam = nfl_team_draws.simulate_game(24.5, 22.0, num_sims=30000, seed=13)["home"]
+
+    def _joint(coupling):
+        out = nfl_shares.allocate_passing(
+            np.random.default_rng(3), _cteam,
+            nfl_shares.PassPriors(td_coupling=coupling, **_cpriors))
+        return float(np.nanmean([
+            np.corrcoef(out["target_share"][:, i], out["rec_tds"][:, i])[0, 1]
+            for i in range(len(_cnames))
+        ])), out
+
+    # THE joint target: within a player, across his games, how strongly
+    # does his volume share move with his touchdowns? Measured
+    # 2022-2025 at +0.216 receiving and +0.223 rushing, and strikingly
+    # consistent by position (WR +0.207, TE +0.227, RB +0.227).
+    _fitted, _out = _joint(nfl_shares.DEFAULT_TD_COUPLING)
+    check("the fitted td_coupling reproduces the REAL correlation between a player's volume "
+          "share and his touchdowns in the same game (+0.216 measured over 770 player-seasons)",
+          abs(_fitted - 0.216) < 0.05, f"{_fitted:+.3f} vs real +0.216")
+    _placeholder, _ = _joint(0.75)
+    check("...which the old 0.75 placeholder did not -- it sat a quarter short, so the biggest "
+          "usage games were not also the biggest scoring chances",
+          _placeholder < _fitted - 0.02, f"0.75 gives {_placeholder:+.3f}")
+    _zero, _ = _joint(0.0)
+    check("at coupling 0 a player's touchdowns are independent of the volume he actually drew, "
+          "which is the failure this constant exists to prevent",
+          abs(_zero) < 0.05, f"{_zero:+.3f}")
+
+    # The reason to fit it on the joint target rather than on scoring SD.
+    def _sd_ratio(coupling, i=0):
+        _, out = _joint(coupling)
+        pts = nfl_dk_points.game_points_vectorized(
+            receptions=out["receptions"][:, i], receiving_yards=out["rec_yards"][:, i],
+            receiving_tds=out["rec_tds"][:, i])
+        return float(pts.std() / pts.mean())
+
+    _sd_lo, _sd_hi = _sd_ratio(0.75), _sd_ratio(1.0)
+    check("coupling is nearly ORTHOGONAL to per-player scoring SD -- moving it a third barely "
+          "touches the spread, which is exactly why fitting it against SD would have let it "
+          "trade off against s and k and land anywhere",
+          abs(_sd_hi - _sd_lo) < 0.03 and _fitted - _placeholder > 0.02,
+          f"sd/mean {_sd_lo:.3f} -> {_sd_hi:.3f} while joint {_placeholder:+.3f} -> {_fitted:+.3f}")
+
+    # Step (c): the levels, checked against the real week-to-week figures.
+    _ratios = {}
+    for i, nm in enumerate(_cnames):
+        pts = nfl_dk_points.game_points_vectorized(
+            receptions=_out["receptions"][:, i], receiving_yards=_out["rec_yards"][:, i],
+            receiving_tds=_out["rec_tds"][:, i])
+        _ratios[nm] = float(pts.std() / max(pts.mean(), 1e-9))
+    check("step (c): simulated per-player DK-point SD lands in the right neighbourhood of the "
+          "real week-to-week figures rather than being tight or wild -- every pass catcher "
+          "between 0.5 and 1.1 sd/mean, against a real 0.56-0.84",
+          all(0.5 < v < 1.1 for v in _ratios.values()),
+          str({k: round(v, 3) for k, v in _ratios.items()}))
+    check("...and SD falls as a player's role grows, the way it does in reality -- a WR1 is "
+          "proportionally steadier than a WR3",
+          _ratios["WR1"] < _ratios["WR2"] < _ratios["WR3"],
+          f"WR1 {_ratios['WR1']:.3f} < WR2 {_ratios['WR2']:.3f} < WR3 {_ratios['WR3']:.3f}")
+
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
     if FAILED:

@@ -46,9 +46,39 @@ The order that works, from the design this implements:
 Skipping to (c) compensates for an error in one layer with an
 offsetting error in another.
 
-(a) and (b) are done -- see the constants below and
-`scripts/fit_nfl_shares.py`, which re-derives them from real game logs.
-(c) needs the team layer, so it is genuinely open.
+All three are done. (a) and (b) are the constants below, re-derived by
+`scripts/fit_nfl_shares.py`. (c) is in `scripts/fit_nfl_team_draws.py`,
+which now also fits td_coupling against its joint target and prints
+simulated per-player DK-point SD beside the real week-to-week figures.
+
+WHAT STEP (c) SHOWED, AND THE ONE THING IT LEAVES OPEN
+
+Simulated sd/mean against the real figure at a matched mean:
+
+    WR1  0.598 / 0.564  (+0.034)     RB1  0.461 / 0.492  (-0.032)
+    WR2  0.734 / 0.642  (+0.092)     RB2  0.730 / 0.782  (-0.052)
+    WR3  0.953 / 0.840  (+0.113)     QB   0.377 / 0.397  (-0.020)
+    TE   0.726 / 0.648  (+0.078)
+
+Backs and quarterbacks are close and slightly tight. PASS CATCHERS ARE
+CONSISTENTLY WIDE, by +0.03 to +0.11, and that one-directional pattern
+is worth naming rather than averaging away.
+
+The likely cause is  itself. It was fitted from the SD of a
+player's realized weekly target share -- which includes his ROLE
+changing between weeks, a WR3 who spends four games as the WR1 because
+someone ahead of him is hurt. That is real variance in the history and
+none of it belongs inside a single simulated week, where the role is
+given. Applying an across-week k within a week therefore over-disperses
+shares, most for the players whose roles move most, which is the shape
+of the miss.
+
+Nothing is retuned on that suspicion. Fixing it properly means
+decomposing a player's share variance into within-role and
+between-role parts and refitting k on the first, which is a real piece
+of work rather than a constant nudge -- and nudging s or k to close the
+gap by hand is exactly the compensating-error trap the calibration
+order exists to avoid.
 """
 
 from __future__ import annotations
@@ -117,14 +147,33 @@ DEFAULT_RUSHING_EXPLOSIVENESS = 0.45
 # of his own. RB 0.772 / WR 0.619 / TE 0.718.
 LEAGUE_CATCH_RATE: dict[str, float] = {"RB": 0.772, "WR": 0.619, "TE": 0.718, "QB": 0.650}
 
-# How hard touchdown odds follow a volume-share surprise. Without this,
-# a sim where the WR1 draws a 40% target share still gives him only his
+# How hard touchdown odds follow a volume-share surprise. Without it, a
+# sim where the WR1 draws a 40% target share still gives him only his
 # baseline TD odds, which flattens the upper tail exactly where GPP
-# equity lives. 0 decouples them; 1 moves TD odds one-for-one with the
-# share surprise. Not yet fitted against real data -- it needs the team
-# layer to check a simulated fantasy-point distribution against
-# history, which is calibration step (c).
-DEFAULT_TD_COUPLING = 0.75
+# equity lives. 0 decouples them; 1 moves TD odds one-for-one.
+#
+# FITTED AGAINST A JOINT TARGET, NOT A MARGINAL ONE. The diagnostic is
+# the empirical correlation, within a player across his own games,
+# between his realized volume SHARE and his touchdown count in the same
+# game. Measured 2022-2025 it is strikingly consistent:
+#
+#     receiving   WR +0.207   TE +0.227   RB +0.227   (all +0.216)
+#     rushing     RB +0.221   QB +0.228   (all +0.223)
+#
+# Swept against that, on a league-average offence:
+#
+#     coupling   0.00   0.25   0.50   0.75   1.00   1.25
+#     joint     -0.000 +0.055 +0.110 +0.161 +0.212 +0.256
+#
+# 1.0 is the fit. The previous 0.75 was a placeholder and sat at +0.161,
+# a quarter short.
+#
+# Fitting it on per-player scoring SD instead would have let it trade
+# off against s and k and land anywhere. It does not, in fact, trade off
+# much: moving 0.75 -> 1.0 shifts a WR1's sd/mean only 0.605 -> 0.613
+# while moving the joint correlation 0.161 -> 0.212. Nearly orthogonal,
+# which is exactly why the joint target is the right one to fit against.
+DEFAULT_TD_COUPLING = 1.0
 
 # Game-script elasticity magnitudes that are defensible out loud: at
 # script = +2 (heavily trailing) a beta of 0.35 multiplies a player's

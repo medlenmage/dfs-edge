@@ -16,6 +16,10 @@ than taken on trust:
   5. QB-WR1 DK-point correlation is ~0.35, not the 0.60-0.70 the brief
      names as the validation target.
 
+Finally it runs the last two steps of the calibration order: fitting
+td_coupling against its JOINT target, and step (c) -- simulated
+per-player DK-point SD beside the real week-to-week figures.
+
 TWO TRAPS THIS SCRIPT EXISTS TO AVOID
 
 Fit the scoring-opportunity count WITHIN implied-total buckets. Pooled,
@@ -52,6 +56,7 @@ from app.clients import nfl  # noqa: E402
 from app.clients.http import get_bytes  # noqa: E402
 from app.clients.nfl_pbp import PBP_URL_TEMPLATE  # noqa: E402
 from app.services import nfl_dk_points as dk  # noqa: E402
+from app.services import nfl_shares  # noqa: E402
 from app.services import nfl_team_draws as L2  # noqa: E402
 
 DEFAULT_SEASONS = (2022, 2023, 2024, 2025)
@@ -254,6 +259,175 @@ async def main() -> int:
 
     print("\nQB-WR1 AND FRIENDS -- the brief's validation target, measured")
     await _player_correlations(seasons)
+
+    print("\nTD_COUPLING -- fitted against a JOINT target, never a marginal one")
+    await _coupling_target(seasons)
+    _coupling_sweep()
+
+    print("\nSTEP (c) -- simulated per-player DK-point SD against real week-to-week")
+    await _step_c(seasons)
+    return 0
+
+
+async def _coupling_target(seasons) -> None:
+    """
+    The real diagnostic: within a player, across his own games, how
+    strongly does his volume SHARE move with his touchdown count?
+
+    Fitting td_coupling against per-player scoring SD instead would let
+    it trade off against layer 3's s and k and land somewhere arbitrary.
+    This quantity is nearly orthogonal to those, which is what makes it
+    the right thing to fit against.
+    """
+    receiving: dict = defaultdict(list)
+    rushing: dict = defaultdict(list)
+    for season in seasons:
+        grouped = await nfl.get_grouped_season_stats(season)
+        totals: dict = defaultdict(lambda: defaultdict(float))
+        for rows in grouped.values():
+            for r in rows:
+                team, week = r.get("team"), r.get("week")
+                if team and week:
+                    totals[(week, team)]["targets"] += r["targets"]
+                    totals[(week, team)]["carries"] += r["carries"]
+        for rows in grouped.values():
+            position = rows[0].get("position") if rows else None
+            if position not in ("QB", "RB", "WR", "TE"):
+                continue
+            tgt, rec_td, car, rush_td = [], [], [], []
+            for r in rows:
+                team, week = r.get("team"), r.get("week")
+                if not team or not week:
+                    continue
+                team_totals = totals[(week, team)]
+                if team_totals["targets"] >= 15:
+                    tgt.append(r["targets"] / team_totals["targets"])
+                    rec_td.append(r["receiving_tds"])
+                if team_totals["carries"] >= 15:
+                    car.append(r["carries"] / team_totals["carries"])
+                    rush_td.append(r["rushing_tds"])
+            if len(tgt) >= 10 and np.std(tgt) > 0 and np.std(rec_td) > 0 and st.mean(tgt) >= 0.04:
+                receiving[position].append(float(np.corrcoef(tgt, rec_td)[0, 1]))
+            if len(car) >= 10 and np.std(car) > 0 and np.std(rush_td) > 0 and st.mean(car) >= 0.10:
+                rushing[position].append(float(np.corrcoef(car, rush_td)[0, 1]))
+
+    for label, store, group in (("receiving", receiving, ("WR", "TE", "RB")),
+                                ("rushing", rushing, ("RB", "QB"))):
+        pooled = [v for pos in group for v in store.get(pos, [])]
+        if not pooled:
+            continue
+        detail = "  ".join(
+            f"{pos} {st.mean(store[pos]):+.3f}" for pos in group if len(store.get(pos, [])) >= 20
+        )
+        print(f"  {label:10s} n={len(pooled):4d}  ALL {st.mean(pooled):+.3f}   {detail}")
+
+
+def _coupling_sweep() -> None:
+    """Sweep the constant against that target on a league-average offence."""
+    names = ["WR1", "WR2", "WR3", "TE", "RB1", "RB2"]
+    positions = ["WR", "WR", "WR", "TE", "RB", "RB"]
+    priors = dict(
+        names=names, positions=positions,
+        target_share=np.array([0.26, 0.19, 0.11, 0.17, 0.19, 0.08]),
+        td_share=np.array([0.31, 0.20, 0.08, 0.22, 0.14, 0.05]),
+        yards_per_rec=np.array([14.2, 13.0, 10.4, 11.1, 8.0, 7.2]),
+        script_beta=np.array([0.008, 0.008, 0.008, -0.042, 0.105, 0.105]),
+    )
+    team = L2.simulate_game(24.5, 22.0, num_sims=40000, seed=13)["home"]
+    print(f"  {'coupling':>9s} {'joint corr':>11s}   (real +0.216)")
+    for coupling in (0.0, 0.25, 0.5, 0.75, 1.0, 1.25):
+        out = nfl_shares.allocate_passing(
+            np.random.default_rng(3), team,
+            nfl_shares.PassPriors(td_coupling=coupling, **priors),
+        )
+        joint = float(np.nanmean([
+            np.corrcoef(out["target_share"][:, i], out["rec_tds"][:, i])[0, 1]
+            for i in range(len(names))
+        ]))
+        mark = "  <- in use" if abs(coupling - nfl_shares.DEFAULT_TD_COUPLING) < 1e-9 else ""
+        print(f"  {coupling:9.2f} {joint:+11.3f}{mark}")
+
+
+async def _step_c(seasons) -> None:
+    """
+    Simulated per-player DK-point SD against the real week-to-week SD.
+
+    The two are not quite the same quantity, and the difference matters
+    when reading this: a real player's week-to-week SD includes his ROLE
+    changing between weeks, while the simulator draws one week given
+    today's role. It should therefore read TIGHTER than history for
+    low-usage players, whose roles move most.
+    """
+    real: dict = defaultdict(list)
+    for season in seasons:
+        grouped = await nfl.get_grouped_season_stats(season)
+        for rows in grouped.values():
+            position = rows[0].get("position") if rows else None
+            if position not in ("QB", "RB", "WR", "TE") or len(rows) < 10:
+                continue
+            points = [dk.game_points(r) for r in rows]
+            if st.mean(points) >= 4:
+                real[position].append((st.mean(points), st.pstdev(points)))
+
+    def real_band(position: str, mean: float) -> float | None:
+        near = [s_ / m for m, s_ in real.get(position, []) if abs(m - mean) < 3.0]
+        return st.mean(near) if len(near) >= 10 else None
+
+    names = ["WR1", "WR2", "WR3", "TE", "RB1", "RB2"]
+    positions = ["WR", "WR", "WR", "TE", "RB", "RB"]
+    team = L2.simulate_game(24.5, 22.0, num_sims=40000, seed=13)["home"]
+    passing = nfl_shares.allocate_passing(
+        np.random.default_rng(3), team,
+        nfl_shares.PassPriors(
+            names=names, positions=positions,
+            target_share=np.array([0.26, 0.19, 0.11, 0.17, 0.19, 0.08]),
+            td_share=np.array([0.31, 0.20, 0.08, 0.22, 0.14, 0.05]),
+            yards_per_rec=np.array([14.2, 13.0, 10.4, 11.1, 8.0, 7.2]),
+            script_beta=np.array([0.008, 0.008, 0.008, -0.042, 0.105, 0.105]),
+        ),
+    )
+    rushing = nfl_shares.allocate_rushing(
+        np.random.default_rng(4), team,
+        nfl_shares.RushPriors(
+            names=["RB1", "RB2", "QB", "WR1"], positions=["RB", "RB", "QB", "WR"],
+            rush_share=np.array([0.58, 0.24, 0.15, 0.03]),
+            td_share=np.array([0.55, 0.18, 0.25, 0.02]),
+            yards_per_carry=np.array([4.5, 4.2, 5.4, 7.5]),
+            script_beta=np.array([0.0, 0.0, 0.043, 0.0]),
+        ),
+    )
+    rush_names = ["RB1", "RB2", "QB", "WR1"]
+
+    print(f"  {'player':7s} {'pos':4s} {'mean':>7s} {'sim sd/mean':>12s} {'real':>7s} {'gap':>7s}")
+    for i, name in enumerate(names):
+        kwargs = dict(receptions=passing["receptions"][:, i],
+                      receiving_yards=passing["rec_yards"][:, i],
+                      receiving_tds=passing["rec_tds"][:, i])
+        if name in rush_names:
+            j = rush_names.index(name)
+            kwargs.update(rushing_yards=rushing["rush_yards"][:, j],
+                          rushing_tds=rushing["rush_tds"][:, j])
+        points = dk.game_points_vectorized(**kwargs)
+        ratio = float(points.std() / max(points.mean(), 1e-9))
+        target = real_band(positions[i], float(points.mean()))
+        gap = f"{ratio - target:+.3f}" if target else "    n/a"
+        print(f"  {name:7s} {positions[i]:4s} {points.mean():7.2f} {ratio:12.3f} "
+              f"{target if target else float('nan'):7.3f} {gap:>7s}")
+
+    qb_points = dk.game_points_vectorized(
+        passing_yards=passing["rec_yards"].sum(axis=1), passing_tds=team.pass_tds,
+        interceptions=team.ints, rushing_yards=rushing["rush_yards"][:, 2],
+        rushing_tds=rushing["rush_tds"][:, 2])
+    ratio = float(qb_points.std() / qb_points.mean())
+    target = real_band("QB", float(qb_points.mean()))
+    print(f"  {'QB':7s} {'QB':4s} {qb_points.mean():7.2f} {ratio:12.3f} "
+          f"{target if target else float('nan'):7.3f} "
+          f"{f'{ratio - target:+.3f}' if target else '    n/a':>7s}")
+    print("  Backs and QBs are close and slightly tight. PASS CATCHERS ARE CONSISTENTLY WIDE,")
+    print("  which points at k: it was fitted on across-week share SD, and part of that is a")
+    print("  player's ROLE changing between weeks -- variance that does not belong inside one")
+    print("  simulated week. See nfl_shares.py. Not nudged by hand, which would just move the")
+    print("  error somewhere less visible.")
     return 0
 
 
