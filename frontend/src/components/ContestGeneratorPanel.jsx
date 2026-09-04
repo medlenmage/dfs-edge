@@ -22,7 +22,7 @@ import { localTime } from '../format'
  * number -- picked from the real sizes the selected contest type
  * actually comes in.
  */
-export function ContestGeneratorPanel({ date, slate, projectionSource = 'rotowire', onSimulate }) {
+export function ContestGeneratorPanel({ date, slate, projectionSource, onSimulate }) {
   const [contestTypes, setContestTypes] = useState(null)
   const [contestType, setContestType] = useState('gpp_large')
   const [contestSize, setContestSize] = useState(10000)

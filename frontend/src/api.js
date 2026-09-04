@@ -43,6 +43,15 @@ async function uploadFile(path, file) {
   return res.json()
 }
 
+// Which FPTS/ownership numbers a request is built against.
+//
+// Deliberately has NO client-side default. Every one of these calls used
+// to default to 'rotowire' here and send it explicitly, which meant the
+// server's own DEFAULT_PROJECTION_SOURCE could never apply -- switching
+// the backend default changed nothing for any caller that didn't thread
+// a value through by hand, which is exactly the bug this comment exists
+// to prevent recurring. Leaving it undefined omits the key from the JSON
+// body (JSON.stringify drops undefined properties), so the server picks.
 export const api = {
   health: () => request('/api/health'),
 
@@ -111,7 +120,7 @@ export const api = {
     date,
     {
       numLineups = 1,
-      projectionSource = 'rotowire',
+      projectionSource = undefined,
       stackGroups = null,
       stackTeams = null,
       maxExposurePct = null,
@@ -166,7 +175,7 @@ export const api = {
   // order (P, P, C, 1B, 2B, 3B, SS, OF, OF, OF) -- game_pk from the
   // SAME slate the lineup was built from, so the backend can tell
   // which of this lineup's players have a game that's already locked.
-  lateSwap: (date, picks, { projectionSource = 'rotowire' } = {}) =>
+  lateSwap: (date, picks, { projectionSource = undefined } = {}) =>
     request('/api/mlb/late-swap', {
       method: 'POST',
       body: JSON.stringify({ date, picks, projection_source: projectionSource }),
@@ -184,7 +193,7 @@ export const api = {
     contestType,
     lineups,
     {
-      projectionSource = 'rotowire',
+      projectionSource = undefined,
       fieldSize = null,
       sampleSize = null,
       includedGamePks = null,
@@ -218,7 +227,7 @@ export const api = {
     contestType,
     contestSize,
     {
-      projectionSource = 'rotowire',
+      projectionSource = undefined,
       includedGamePks = null,
       reroll = 0,
       useMyLineups = false,
@@ -324,7 +333,7 @@ export const api = {
     {
       date = null,
       mode = 'repair',
-      projectionSource = 'rotowire',
+      projectionSource = undefined,
       includedGamePks = null,
       swapField = true,
       resimulate = true,
@@ -347,7 +356,7 @@ export const api = {
     contestType,
     numLineups,
     {
-      projectionSource = 'rotowire',
+      projectionSource = undefined,
       maxExposurePct = null,
       fieldSize = null,
       sampleSize = null,
@@ -431,7 +440,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ date, text, save, replace }),
     }),
-  addMyLineups: (date, lineups, { source = 'manual', replace = false, projectionSource = 'rotowire' } = {}) =>
+  addMyLineups: (date, lineups, { source = 'manual', replace = false, projectionSource = undefined } = {}) =>
     request('/api/mlb/my-lineups', {
       method: 'POST',
       body: JSON.stringify({
@@ -490,7 +499,7 @@ export const api = {
       firstPlacePct,
       payoutPct,
       shape,
-      projectionSource = 'rotowire',
+      projectionSource = undefined,
       sampleSize = null,
       includedGamePks = null,
       minSalary = 47000,

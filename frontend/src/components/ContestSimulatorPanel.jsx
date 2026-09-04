@@ -17,7 +17,7 @@ import { api } from '../api'
  * size times the entry fee (less rake), so it sets every payout and
  * therefore every ROI on the page.
  */
-export function ContestSimulatorPanel({ date, batch, projectionSource = 'rotowire', onOpenGenerator }) {
+export function ContestSimulatorPanel({ date, batch, projectionSource, onOpenGenerator }) {
   const [mode, setMode] = useState('built') // 'built' | 'dk-entries'
 
   // Simulation inputs. Entry cost seeds from whatever the built

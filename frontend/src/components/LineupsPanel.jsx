@@ -51,7 +51,7 @@ function lineupToPicks(lineup) {
  * Generates one or many optimal DraftKings Classic MLB lineups from
  * whatever salary + projections CSVs are loaded for the date.
  */
-export function LineupsPanel({ date, slate, projectionSource = 'rotowire', onPoolChange }) {
+export function LineupsPanel({ date, slate, projectionSource, onPoolChange }) {
   const [state, setState] = useState({ status: 'idle' })
   const [numLineups, setNumLineups] = useState(1)
   const [stackShape, setStackShape] = useState('no stack')
