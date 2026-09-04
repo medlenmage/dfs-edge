@@ -33,6 +33,7 @@ from app.services import (  # noqa: E402
     nfl_scoring,
     nfl_shares,
     nfl_slate,
+    nfl_team_draws,
     nfl_stack_rating,
     nfl_variance,
     player_match,
@@ -1750,6 +1751,152 @@ def main() -> int:
           "distribution at all",
           all(v > 0 for v in nfl_shares.RECEIVING_EXPLOSIVENESS.values())
           and all(v > 0 for v in nfl_shares.RUSHING_EXPLOSIVENESS.values()))
+
+    print("")
+    print("NFL team draws -- layer 2 (nfl_team_draws.py)")
+
+    _g = nfl_team_draws.simulate_game(26.0, 21.5, num_sims=30000, seed=7)
+    _h, _a = _g["home"], _g["away"]
+    _plays = _h.pass_attempts + _h.sacks + _h.rush_attempts
+    _td = _h.pass_tds + _h.rush_tds
+
+    # The contract with layer 3. pass_attempts is ATTEMPTS: dropbacks
+    # minus sacks. Feeding dropbacks inflates every receiver's target
+    # count by about 7%, which no downstream check would catch.
+    check("pass_attempts excludes sacks, so attempts + sacks + rushes accounts for every "
+          "play -- feeding dropbacks instead would inflate every target count ~7%",
+          abs(float(_plays.mean()) - 61.7) < 1.5, f"{_plays.mean():.2f} plays vs real 61.7")
+    check("simulated pass attempts land on the real league mean",
+          abs(float(_h.pass_attempts.mean()) - 33.0) < 1.5,
+          f"{_h.pass_attempts.mean():.2f} vs real 33.0")
+    check("...and so do sacks and interceptions, which QB and DST scoring both need",
+          abs(float(_h.sacks.mean()) - 2.44) < 0.4 and abs(float(_h.ints.mean()) - 0.74) < 0.2,
+          f"sacks {_h.sacks.mean():.2f}/2.44  ints {_h.ints.mean():.2f}/0.74")
+    check("script is unit-SD by construction -- layer 3 applies exp(beta*script), so if this "
+          "drifts every script_beta silently changes meaning",
+          abs(float(_h.script.std()) - 1.0) < 0.08, f"{_h.script.std():.3f}")
+
+    # The distribution-family finding. A negative binomial cannot
+    # produce var/mean below 1, so the brief's prescription is
+    # structurally impossible for this quantity.
+    check("team touchdowns come out UNDER-dispersed relative to Poisson, matching reality -- "
+          "a negative binomial can only produce var/mean >= 1 and is the wrong family here",
+          float(_td.var() / _td.mean()) < 0.95,
+          f"var/mean {_td.var()/_td.mean():.3f} (real 0.82 pooled, 0.69 within bucket)")
+    check("scoring scales with the implied total the way it really does -- steeply for "
+          "touchdowns, almost flat for field goals",
+          nfl_team_draws.TD_SLOPE > 10 * nfl_team_draws.FG_SLOPE,
+          f"TD {nfl_team_draws.TD_SLOPE} vs FG {nfl_team_draws.FG_SLOPE} per point")
+
+    # Joint structure: the whole reason both teams are drawn together.
+    _plays_a = _a.pass_attempts + _a.sacks + _a.rush_attempts
+    check("opponents' play counts are NEGATIVELY correlated -- possessions inside a fixed "
+          "clock are close to zero-sum, which is the opposite of the shared-pace effect the "
+          "brief expects",
+          float(np.corrcoef(_plays, _plays_a)[0, 1]) < -0.3,
+          f"{np.corrcoef(_plays, _plays_a)[0,1]:+.3f} vs real -0.480")
+    check("but opponents' TOUCHDOWNS are positively correlated -- the shootout is in scoring, "
+          "not in volume, which is why a double-stack pays",
+          float(np.corrcoef(_td, _a.pass_tds + _a.rush_tds)[0, 1]) > 0.05,
+          f"{np.corrcoef(_td, _a.pass_tds+_a.rush_tds)[0,1]:+.3f} vs real +0.121")
+    _margin = _h.points - _a.points
+    check("game script is driven by margin: the trailing team leans pass, the leading team "
+          "leans run, with no correlation asserted anywhere",
+          _h.script[_margin < -7].mean() > _h.script[_margin > 7].mean(),
+          f"trailing {_h.script[_margin < -7].mean():+.2f} vs "
+          f"leading {_h.script[_margin > 7].mean():+.2f}")
+    check("...and rushing takes a larger share of touchdowns with a lead (goal-line volume)",
+          (_h.rush_tds[_margin > 7].sum() / max(_td[_margin > 7].sum(), 1))
+          > (_h.rush_tds[_margin < -7].sum() / max(_td[_margin < -7].sum(), 1)))
+    check("the favourite scores more than the underdog, anchored to the implied totals given",
+          _h.points.mean() > _a.points.mean()
+          and abs(float(_h.points.mean()) - 26.0) < 1.0,
+          f"home {_h.points.mean():.2f} (implied 26.0), away {_a.points.mean():.2f} (21.5)")
+    check("the same seed reproduces the identical game, so lineups are scored against common "
+          "random numbers rather than reshuffling between runs",
+          bool(np.array_equal(
+              nfl_team_draws.simulate_game(26.0, 21.5, num_sims=500, seed=7)["home"].pass_attempts,
+              nfl_team_draws.simulate_game(26.0, 21.5, num_sims=500, seed=7)["home"].pass_attempts)))
+
+    # Section 7: the check that otherwise corrupts calibration silently.
+    _pri = nfl_shares.PassPriors(
+        names=["WR1", "WR2", "TE"], positions=["WR", "WR", "TE"],
+        target_share=np.array([0.40, 0.33, 0.27]),
+        td_share=np.array([0.40, 0.33, 0.27]),
+        yards_per_rec=np.array([13.8, 12.2, 10.8]),
+        script_beta=np.zeros(3))
+    _implied_ypa = float(np.sum(_pri.target_share * _pri.catch_rate * _pri.yards_per_rec))
+    _consistent = float(_h.pass_attempts.mean()) * _implied_ypa
+    check("reconcile() passes when the player priors already imply the projected team passing "
+          "yards -- team yards are an EMERGENT sum of player draws, not something layer 2 sets",
+          nfl_team_draws.reconcile(
+              _h, target_share=_pri.target_share, catch_rate=_pri.catch_rate,
+              yards_per_rec=_pri.yards_per_rec,
+              projected_team_pass_yards=_consistent)["ok"])
+    check("...and FAILS when they disagree, which is the point: otherwise pass_eff quietly "
+          "absorbs a level bias and calibration 'fixes' it by distorting variance, leaving "
+          "plausible per-player marginals sitting on wrong correlations",
+          not nfl_team_draws.reconcile(
+              _h, target_share=_pri.target_share, catch_rate=_pri.catch_rate,
+              yards_per_rec=_pri.yards_per_rec,
+              projected_team_pass_yards=_consistent * 1.15)["ok"])
+
+    print("")
+    print("Vectorized DK scoring (must agree with the scalar scorer exactly)")
+
+    _r = random.Random(4)
+    _lines = []
+    for _ in range(400):
+        _lines.append({
+            "passing_yards": _r.choice([0, 0, 120, 245, 299, 300, 388]),
+            "passing_tds": _r.randint(0, 4), "passing_interceptions": _r.randint(0, 3),
+            "rushing_yards": _r.choice([0, 0, 14, 62, 99, 100, 155]),
+            "rushing_tds": _r.randint(0, 2),
+            "receptions": _r.randint(0, 12),
+            "receiving_yards": _r.choice([0, 0, 22, 74, 99, 100, 143]),
+            "receiving_tds": _r.randint(0, 3),
+            "rushing_fumbles_lost": _r.randint(0, 1),
+            "rushing_2pt_conversions": _r.randint(0, 1),
+            "special_teams_tds": 0,
+        })
+    _scalar = np.array([nfl_dk_points.game_points(x) for x in _lines])
+    _vector = nfl_dk_points.game_points_vectorized(
+        passing_yards=np.array([x["passing_yards"] for x in _lines], dtype=float),
+        passing_tds=np.array([x["passing_tds"] for x in _lines], dtype=float),
+        interceptions=np.array([x["passing_interceptions"] for x in _lines], dtype=float),
+        rushing_yards=np.array([x["rushing_yards"] for x in _lines], dtype=float),
+        rushing_tds=np.array([x["rushing_tds"] for x in _lines], dtype=float),
+        receptions=np.array([x["receptions"] for x in _lines], dtype=float),
+        receiving_yards=np.array([x["receiving_yards"] for x in _lines], dtype=float),
+        receiving_tds=np.array([x["receiving_tds"] for x in _lines], dtype=float),
+        fumbles_lost=np.array([x["rushing_fumbles_lost"] for x in _lines], dtype=float),
+        two_point_conversions=np.array([x["rushing_2pt_conversions"] for x in _lines], dtype=float),
+    )
+    check("the vectorized scorer agrees with game_points() on 400 random stat lines, including "
+          "every 100/300-yard bonus boundary -- a simulator scoring differently from the rest "
+          "of the app would make every ranking wrong with nothing else to catch it",
+          float(np.abs(_scalar - _vector).max()) < 0.005,
+          f"max difference {np.abs(_scalar - _vector).max():.6f}")
+    check("full PPR, not half -- one point per reception, the usual mismatch point",
+          float(nfl_dk_points.game_points_vectorized(receptions=np.array([10.0]))[0]) == 10.0)
+    check("the yardage bonuses are per category and STACK, so 100 rushing and 100 receiving "
+          "collects both",
+          float(nfl_dk_points.game_points_vectorized(
+              rushing_yards=np.array([100.0]), receiving_yards=np.array([100.0]))[0]) == 26.0,
+          str(nfl_dk_points.game_points_vectorized(
+              rushing_yards=np.array([100.0]), receiving_yards=np.array([100.0]))[0]))
+
+    _pa = np.array([0.0, 3.0, 7.0, 14.0, 21.0, 28.0, 35.0, 52.0])
+    _dst_v = nfl_dk_points.dst_points_vectorized(points_allowed=_pa)
+    _dst_s = np.array([nfl_dk_points.dst_game_points({"points_allowed": float(x)}) for x in _pa])
+    check("DST points-allowed tiers match the scalar scorer at every boundary, including the "
+          "shutout and the 35+ floor",
+          bool(np.array_equal(_dst_v, _dst_s)),
+          f"{list(_dst_v)} vs {list(_dst_s)}")
+    check("a DST's score depends on the OPPONENT's points, which is the strongest single "
+          "reason layer 2 draws both teams of a matchup together",
+          nfl_dk_points.dst_points_vectorized(points_allowed=_a.points).mean()
+          > nfl_dk_points.dst_points_vectorized(points_allowed=_a.points + 21).mean())
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")

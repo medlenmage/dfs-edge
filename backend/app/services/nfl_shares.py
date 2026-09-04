@@ -347,7 +347,32 @@ class RushPriors:
 
 @dataclass
 class TeamDraws:
-    """Per-sim team-level draws from the team layer, all shape (S,)."""
+    """
+    Per-sim team-level draws from the team layer, all shape (S,).
+
+    `pass_attempts` is ATTEMPTS, not dropbacks. Dropbacks = attempts +
+    sacks + scrambles; feeding dropbacks here inflates every receiver's
+    target count by about 7%. Scrambles are rushes and are already in
+    `rush_attempts`, which also includes QB carries because RushPriors
+    carries a QB row.
+
+    `script` is in z-units, positive = pass-leaning. Layer 3 applies it
+    as exp(beta * script), so the scale of script and the scale of beta
+    are jointly identified -- script is fixed at unit SD and beta
+    carries the magnitude. Do not let both float.
+
+    `pass_eff` multiplies PLAYER yards-per-reception, not team yards per
+    attempt, so at pass_eff = 1.0 the player priors must already imply
+    the projected team passing yards. nfl_team_draws.reconcile() is the
+    check; see its docstring for why skipping it corrupts calibration
+    silently.
+
+    sacks/ints/fumbles_lost are carried because QB scoring needs INTs
+    (-1 each) and sack yardage, and DST scoring needs the OPPONENT's
+    sacks, turnovers and points allowed. DST is the most correlated
+    position on a slate, which is the strongest single argument for
+    drawing both teams of a matchup jointly.
+    """
 
     pass_attempts: np.ndarray
     pass_tds: np.ndarray
@@ -356,6 +381,10 @@ class TeamDraws:
     rush_tds: np.ndarray
     rush_eff: np.ndarray
     script: np.ndarray
+    sacks: np.ndarray | None = None
+    ints: np.ndarray | None = None
+    fumbles_lost: np.ndarray | None = None
+    points: np.ndarray | None = None
 
 
 # --------------------------------------------------------------------------

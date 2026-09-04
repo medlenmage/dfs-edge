@@ -112,3 +112,112 @@ def dst_game_points(row: dict[str, Any]) -> float:
         else:
             pts -= 4
     return round(pts, 2)
+
+
+# --------------------------------------------------------------------------
+# Vectorized forms, for the simulator
+# --------------------------------------------------------------------------
+#
+# game_points()/dst_game_points() take one dict and are the definition.
+# These take numpy arrays and must agree with them exactly -- a test
+# feeds random stat lines through both and asserts equality, because a
+# scorer that silently disagrees with the one used everywhere else would
+# make every simulated ranking wrong in a way nothing else would catch.
+#
+# The two documented mismatch points are handled the same way here as
+# above: full PPR (1.0 per reception, not 0.5), and the 100/300-yard
+# bonuses are per category and stack, so a 120-rush/110-receive game
+# collects both.
+#
+# Deliberately NOT rounded, unlike the scalar versions. Rounding to two
+# decimals is right for display; inside a simulation it would quantize
+# every one of millions of draws for no benefit. The equality test
+# compares against the rounded scalar within that tolerance.
+
+
+def game_points_vectorized(
+    *,
+    passing_yards=None,
+    passing_tds=None,
+    interceptions=None,
+    rushing_yards=None,
+    rushing_tds=None,
+    receptions=None,
+    receiving_yards=None,
+    receiving_tds=None,
+    fumbles_lost=None,
+    two_point_conversions=None,
+    special_teams_tds=None,
+):
+    """Array form of game_points(). Every argument is optional and
+    defaults to zero, so a receiver-only call needs no passing stats."""
+    import numpy as np
+
+    arrays = [
+        a for a in (
+            passing_yards, passing_tds, interceptions, rushing_yards, rushing_tds,
+            receptions, receiving_yards, receiving_tds, fumbles_lost,
+            two_point_conversions, special_teams_tds,
+        ) if a is not None
+    ]
+    if not arrays:
+        raise ValueError("game_points_vectorized needs at least one stat array")
+    zero = np.zeros_like(np.asarray(arrays[0], dtype=float))
+
+    def _a(value):
+        return zero if value is None else np.asarray(value, dtype=float)
+
+    py, ry, rey = _a(passing_yards), _a(rushing_yards), _a(receiving_yards)
+    pts = py * 0.04 + _a(passing_tds) * 4.0 - _a(interceptions)
+    pts = pts + np.where(py >= 300, 3.0, 0.0)
+    pts = pts + ry * 0.1 + _a(rushing_tds) * 6.0 + np.where(ry >= 100, 3.0, 0.0)
+    pts = pts + _a(receptions) + rey * 0.1 + _a(receiving_tds) * 6.0
+    pts = pts + np.where(rey >= 100, 3.0, 0.0)
+    pts = pts - _a(fumbles_lost) + _a(two_point_conversions) * 2.0
+    return pts + _a(special_teams_tds) * 6.0
+
+
+# DK's points-allowed tiers, as (upper_bound_inclusive, points). The last
+# entry catches everything above.
+DST_POINTS_ALLOWED_TIERS = ((0, 10.0), (6, 7.0), (13, 4.0), (20, 1.0), (27, 0.0), (34, -1.0))
+DST_POINTS_ALLOWED_WORST = -4.0
+
+
+def dst_points_vectorized(
+    *,
+    points_allowed,
+    sacks=None,
+    interceptions=None,
+    fumble_recoveries=None,
+    defensive_tds=None,
+    safeties=None,
+    blocked_kicks=None,
+):
+    """
+    Array form of dst_game_points().
+
+    `points_allowed` is the OPPONENT's simulated points, which is the
+    single strongest reason the team layer draws both sides of a matchup
+    together -- a DST's score is mostly a function of the other team's
+    draw, and it is the most correlated position on a slate.
+    """
+    import numpy as np
+
+    pa = np.asarray(points_allowed, dtype=float)
+    zero = np.zeros_like(pa)
+
+    def _a(value):
+        return zero if value is None else np.asarray(value, dtype=float)
+
+    pts = (
+        _a(sacks)
+        + _a(interceptions) * 2.0
+        + _a(fumble_recoveries) * 2.0
+        + _a(defensive_tds) * 6.0
+        + _a(safeties) * 2.0
+        + _a(blocked_kicks) * 2.0
+    )
+    tier = np.full_like(pa, DST_POINTS_ALLOWED_WORST)
+    for bound, value in reversed(DST_POINTS_ALLOWED_TIERS):
+        tier = np.where(pa <= bound, value, tier)
+    return pts + tier
