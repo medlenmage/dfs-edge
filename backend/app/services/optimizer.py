@@ -446,6 +446,21 @@ def build_player_pool(
     other_source = next(s for s in PROJECTION_SOURCES if s != projection_source)
     _, fallback_ownership_key = PROJECTION_SOURCES[other_source]
 
+    # DOUBLEHEADERS PUT THE SAME PLAYER ON THE BOARD TWICE. A team
+    # playing two games in a day appears in two slate entries, so every
+    # one of its players would land in the pool once per game -- 18 of
+    # 262 on a real 2026-09-04 board, the whole Cleveland roster.
+    #
+    # That is not merely cosmetic. The MILP keys its variables on
+    # (player id, slot), so two pool entries for one player SHARE a
+    # variable and then add it to that slot's count constraint twice:
+    # the slot reads him as two players, and locking him is outright
+    # infeasible (measured -- OptimizerError, on a player who is plainly
+    # rosterable). Salary double-counts the same way.
+    #
+    # Deduplicating on id, after the game filter so a narrowed slate
+    # still keeps the right copy, is what makes one player one player.
+    seen_ids: set[Any] = set()
     pool: list[dict[str, Any]] = []
     for game in slate.get("games") or []:
         if included_game_pks is not None and game.get("game_pk") not in included_game_pks:
@@ -477,6 +492,9 @@ def build_player_pool(
                 slots = _eligible_slots(salary_info.get("position") or "")
                 if not slots:
                     continue
+                if pid in seen_ids:
+                    continue
+                seen_ids.add(pid)
                 pool.append(
                     {
                         "id": pid,
