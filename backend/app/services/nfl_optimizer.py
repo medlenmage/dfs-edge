@@ -65,8 +65,19 @@ def _eligible_slots(position: str) -> list[str]:
     return []
 
 
+# Which numbers a pool is built from. Mirrors optimizer.py's own map
+# exactly, so "inhouse" means the same thing on both sports.
+PROJECTION_SOURCES = {
+    "rotowire": ("fpts", "ownership_pct"),
+    "inhouse": ("inhouse_fpts", "inhouse_ownership_pct"),
+}
+
+
 def build_player_pool(
-    slate: dict[str, Any], *, included_game_pks: list[Any] | None = None
+    slate: dict[str, Any],
+    *,
+    included_game_pks: list[Any] | None = None,
+    projection_source: str = "rotowire",
 ) -> list[dict[str, Any]]:
     """
     Flatten every rostered player across the slate's games into one
@@ -83,6 +94,13 @@ def build_player_pool(
     which the contest field sampler reads to model a sharp field.
     Mirrors MLB's pool exactly.
     """
+    if projection_source not in PROJECTION_SOURCES:
+        raise OptimizerError(
+            f"Unknown projection_source '{projection_source}'. "
+            f"Expected one of: {sorted(PROJECTION_SOURCES)}."
+        )
+    fpts_key, ownership_key = PROJECTION_SOURCES[projection_source]
+
     wanted = {str(g) for g in included_game_pks} if included_game_pks else None
     pool: list[dict[str, Any]] = []
     for game in slate.get("games") or []:
@@ -95,7 +113,7 @@ def build_player_pool(
                 if not p.get("dk_id") or p.get("salary") is None:
                     continue
                 proj = p.get("projection")
-                if not proj or proj.get("fpts") is None:
+                if not proj or proj.get(fpts_key) is None:
                     continue
                 position = (p.get("position") or "").strip().upper()
                 slots = _eligible_slots(position)
@@ -110,8 +128,8 @@ def build_player_pool(
                         "opponent": opponent,
                         "position": position,
                         "salary": p["salary"],
-                        "projected_fpts": proj["fpts"],
-                        "ownership_pct": proj.get("ownership_pct") or 0,
+                        "projected_fpts": proj[fpts_key],
+                        "ownership_pct": proj.get(ownership_key) or 0,
                         "slots": slots,
                         # nfl_scoring's own matchup multiplier (1.00 =
                         # dead average), under the same name MLB's pool
@@ -324,6 +342,7 @@ def generate_lineups(
     slate: dict[str, Any],
     *,
     num_lineups: int = 1,
+    projection_source: str = "rotowire",
     max_exposure_pct: float | None = None,
     exposure_by_slot: dict[str, float] | None = None,
     team_exposure_cap: dict[str, float] | None = None,
@@ -378,7 +397,9 @@ def generate_lineups(
     if num_lineups > MAX_LINEUPS:
         raise OptimizerError(f"Generating more than {MAX_LINEUPS} lineups at once isn't supported.")
 
-    pool = build_player_pool(slate, included_game_pks=included_game_pks)
+    pool = build_player_pool(
+        slate, included_game_pks=included_game_pks, projection_source=projection_source
+    )
     if not pool:
         if included_game_pks:
             # Worth saying separately: a week has more games than a DK

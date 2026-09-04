@@ -2318,6 +2318,44 @@ def main() -> int:
                 if t == player_match.normalize_team("CAR")
                 and (r.get("position") or "").upper().startswith("DST")), None) is not None)
 
+    print("")
+    print("NFL contest-build parity with MLB's")
+
+    _cs = _oslate()
+    _cpool = nfl_optimizer.build_player_pool(_cs)
+    check("the NFL pool can be built from the in-house projections as well as RotoWire's, "
+          "the same 'projection_source' switch MLB's carries",
+          nfl_optimizer.PROJECTION_SOURCES["inhouse"] == ("inhouse_fpts", "inhouse_ownership_pct"))
+    try:
+        nfl_optimizer.build_player_pool(_cs, projection_source="nonsense")
+        check("an unknown projection_source is refused", False, "no error")
+    except nfl_optimizer.OptimizerError as exc:
+        check("an unknown projection_source is refused by name rather than silently falling "
+              "back to RotoWire", "nonsense" in str(exc), str(exc)[:60])
+
+    _g1 = nfl_optimizer.build_player_pool(_cs, included_game_pks=["G1"])
+    check("the contest generator's own pool honours included_game_pks, so a Sunday contest "
+          "cannot be built out of Thursday players",
+          {p["team"] for p in _g1} == {"AAA", "BBB"},
+          str(sorted({p["team"] for p in _g1})))
+
+    _entries = nfl_contest.generate_entries(_cs, 12, seed=3, min_salary=0)
+    check("every generated NFL entry now carries a duplication_risk -- cumulative (log-product) "
+          "ownership, the real 'how likely is another entry an exact copy of this' signal a "
+          "plain ownership sum cannot see",
+          all("duplication_risk" in e for e in _entries),
+          str(round(_entries[0]["duplication_risk"], 2)))
+    _tight = nfl_contest.generate_entries(_cs, 12, seed=3, min_salary=0,
+                                          max_duplication_risk=-21.2)
+    check("max_duplication_risk rejects a lineup whose own risk exceeds the cap and retries, "
+          "the same mechanism the salary range uses",
+          all(e["duplication_risk"] <= -21.2 for e in _tight),
+          f"{len(_tight)} entries, worst {max(e['duplication_risk'] for e in _tight):.2f}")
+    _field = nfl_contest.generate_field(_cs, 20, seed=3, min_salary=0)
+    check("...but the opponent FIELD is not filtered on it, because a real field does contain "
+          "its duplicates and pretending otherwise would misprice every entry ranked against it",
+          len(_field) == 20)
+
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
     if FAILED:
