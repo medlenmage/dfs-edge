@@ -1401,18 +1401,29 @@ async def main() -> int:
 
     print("\nLineup optimizer (DraftKings Classic MLB)")
 
+    # These fixtures carry BOTH projection sources with the same numbers,
+    # so an optimizer test exercises stacks/exposure/salary rather than
+    # accidentally testing which source is the default. The tests that
+    # genuinely care about source selection build their own slate with
+    # deliberately DIFFERENT rotowire and inhouse values.
     def opt_hitter(pid, name, team, pos, salary, fpts, own=None):
         return {
             "id": pid, "name": name,
             "salary": {"salary": salary, "position": pos, "avg_points": None, "value": None},
-            "projection": {"fpts": fpts, "ownership_pct": own},
+            "projection": {
+                "fpts": fpts, "ownership_pct": own,
+                "inhouse_fpts": fpts, "inhouse_ownership_pct": own,
+            },
         }
 
     def opt_pitcher(pid, name, salary, fpts, own=None):
         return {
             "id": pid, "name": name,
             "salary": {"salary": salary, "position": "P", "avg_points": None, "value": None},
-            "projection": {"fpts": fpts, "ownership_pct": own},
+            "projection": {
+                "fpts": fpts, "ownership_pct": own,
+                "inhouse_fpts": fpts, "inhouse_ownership_pct": own,
+            },
         }
 
     # Deliberately more hitter depth than the shared fixture has, since a
@@ -1518,13 +1529,25 @@ async def main() -> int:
             }
         ]
     }
-    rotowire_pool = {p["id"]: p["projected_fpts"] for p in optimizer.build_player_pool(source_slate)}
+    rotowire_pool = {
+        p["id"]: p["projected_fpts"]
+        for p in optimizer.build_player_pool(source_slate, projection_source="rotowire")
+    }
     inhouse_pool = {
         p["id"]: p["projected_fpts"]
         for p in optimizer.build_player_pool(source_slate, projection_source="inhouse")
     }
-    check("build_player_pool defaults to RotoWire's fpts",
+    default_pool = {p["id"]: p["projected_fpts"] for p in optimizer.build_player_pool(source_slate)}
+    check("build_player_pool(projection_source='rotowire') reads RotoWire's fpts",
           rotowire_pool == {9301: 15.0, 9302: 3.0}, str(rotowire_pool))
+    check("the DEFAULT source is now in-house, not RotoWire -- the in-house ownership model "
+          "measures at 2.21pp MAE against real archived DK standings across 10 slates, and "
+          "RotoWire stays available on every endpoint as the cross-check",
+          default_pool == inhouse_pool and default_pool != rotowire_pool,
+          str((default_pool, rotowire_pool)))
+    check("and DEFAULT_PROJECTION_SOURCE is the single place that decides it",
+          optimizer.DEFAULT_PROJECTION_SOURCE == "inhouse",
+          optimizer.DEFAULT_PROJECTION_SOURCE)
     check("build_player_pool(projection_source='inhouse') reads inhouse_fpts instead",
           inhouse_pool == {9301: 3.0, 9302: 15.0}, str(inhouse_pool))
 
@@ -1569,7 +1592,10 @@ async def main() -> int:
             }
         ]
     }
-    fpts_floor_pool = {p["id"] for p in optimizer.build_player_pool(fpts_floor_slate)}
+    fpts_floor_pool = {
+        p["id"]
+        for p in optimizer.build_player_pool(fpts_floor_slate, projection_source="rotowire")
+    }
     check("build_player_pool excludes a player projected below MIN_POOL_FPTS (a real proxy for "
           "'not actually going to play'), but keeps one projected right at or above it",
           fpts_floor_pool == {9501, 9502}, str(fpts_floor_pool))
@@ -1610,7 +1636,13 @@ async def main() -> int:
             }
         ]
     }
-    fallback_pool = {p["id"]: p["ownership_pct"] for p in optimizer.build_player_pool(fallback_slate)}
+    # Pinned to rotowire: this is about ownership falling back BETWEEN
+    # sources, and 9402 deliberately has no inhouse_fpts at all, so the
+    # in-house default would drop him before the fallback is reached.
+    fallback_pool = {
+        p["id"]: p["ownership_pct"]
+        for p in optimizer.build_player_pool(fallback_slate, projection_source="rotowire")
+    }
     check("ownership_pct falls back to the other source's ownership when RotoWire's own is missing",
           fallback_pool[9401] == 12.5, str(fallback_pool))
     check("ownership_pct floors to 0 (not a crash) when neither source has it",
@@ -2890,6 +2922,95 @@ async def main() -> int:
               {"k_per_9": 9.0}, 8.0, None, None, market_k_line=None,
           ) == k_model_only,
           str(k_model_only))
+
+    print("\nOwnership: batting-order spot and the punt guard rail")
+
+    def own_bat(pid, name, pos, salary, fpts, order, team="OWN"):
+        return {
+            "id": pid, "name": name, "position": pos, "positions": [pos],
+            "salary": salary, "fpts": fpts, "team": team,
+            "implied_runs": 4.6, "batting_order": order,
+        }
+
+    # Two hitters identical in every priced respect -- same slot, same
+    # salary, same projection, same team -- separated only by where they
+    # bat tonight. Before this change the model could not tell them apart.
+    same_but_order = [
+        own_bat(1, "Leadoff", "OF", 4500, 9.0, 1),
+        own_bat(2, "SevenHole", "OF", 4500, 9.0, 7),
+        own_bat(3, "Filler A", "OF", 4000, 8.0, 4),
+        own_bat(4, "Filler B", "OF", 3500, 7.0, 5),
+    ]
+    owned = inhouse_projections.project_ownership(same_but_order)
+    check("two hitters identical on salary, projection and team are separated by BATTING "
+          "ORDER -- the model's single largest measured bias was not having this at all "
+          "(slot-1 bias was -3.48pp across 2,027 real archived observations)",
+          owned[1] > owned[2], str({k: owned[k] for k in (1, 2)}))
+
+    # The measured bias was flat across slots 7-9, so the factor must be
+    # flat there too rather than inventing a gradient the data denies.
+    check("batting_order_ownership_factor is 1.0 at leadoff and 0 from the 7-hole back, "
+          "matching the SHAPE of the measured bias rather than assuming one",
+          inhouse_projections.batting_order_ownership_factor(1, None) == 1.0
+          and inhouse_projections.batting_order_ownership_factor(7, None) == 0.0
+          and inhouse_projections.batting_order_ownership_factor(9, None) == 0.0,
+          str([inhouse_projections.batting_order_ownership_factor(i, None) for i in range(1, 10)]))
+    check("and it falls monotonically from slot 1 through slot 7",
+          all(
+              inhouse_projections.batting_order_ownership_factor(i, None)
+              >= inhouse_projections.batting_order_ownership_factor(i + 1, None)
+              for i in range(1, 7)
+          ), "")
+    check("an unknown slot returns None (no term at all) rather than a fabricated middle "
+          "value -- players with no lineup spot were really drafted 0.21% of the time",
+          inhouse_projections.batting_order_ownership_factor(None, None) is None
+          and inhouse_projections.batting_order_ownership_factor(0, None) is None, "")
+    check("RotoWire's projected slot is used before lineups confirm",
+          inhouse_projections.batting_order_ownership_factor(None, 2) > 0, "")
+
+    # A confirmed slot must win over a projected one -- the lineup card
+    # posting is exactly the moment the guess stops being needed.
+    check("a CONFIRMED slot overrides RotoWire's projected one",
+          inhouse_projections.batting_order_ownership_factor(9, 1)
+          == inhouse_projections.batting_order_ownership_factor(9, None), "")
+
+    # --- the punt guard rail ---
+    punt_pool = [
+        own_bat(10, "CheapNineHole", "OF", 2500, 9.5, 9),
+        own_bat(11, "Ordinary", "OF", 5000, 6.0, 3),
+        own_bat(12, "Ordinary2", "OF", 5000, 6.0, 4),
+    ]
+    punt_owned = inhouse_projections.project_ownership(punt_pool)
+    check("a hitter batting 7-9 under $3,000 is capped at 15% owned however good his value "
+          "looks -- across 10 real slates the most-owned such hitter was really drafted "
+          "13.6%, and not one of 242 cleared 15%",
+          punt_owned[10] <= inhouse_projections._PUNT_OWNERSHIP_CAP + 1e-6,
+          str(punt_owned))
+
+    # The cap must not quietly delete ownership -- a DK slot group has to
+    # keep summing to the roster spots it stands for.
+    uncapped_pool = [
+        own_bat(20, "CheapNineHole", "OF", 3200, 9.5, 9),   # $3.2K: above the punt line
+        own_bat(21, "Ordinary", "OF", 5000, 6.0, 3),
+        own_bat(22, "Ordinary2", "OF", 5000, 6.0, 4),
+    ]
+    capped_total = sum(punt_owned.values())
+    uncapped_total = sum(inhouse_projections.project_ownership(uncapped_pool).values())
+    check("clipped ownership is redistributed to the rest of the group, not dropped -- the "
+          "group still sums to the roster spots it represents",
+          abs(capped_total - uncapped_total) < 0.5,
+          str((round(capped_total, 2), round(uncapped_total, 2))))
+
+    check("the cap leaves an expensive bottom-of-the-order bat alone -- it is a punt rule, "
+          "not a batting-order rule",
+          inhouse_projections._PUNT_MAX_SALARY == 3000
+          and inhouse_projections._PUNT_MAX_ORDER_SLOT == 7, "")
+
+    # A cheap 9-hole bat the field genuinely liked must still be allowed
+    # to be moderately owned -- the rail caps a runaway, not the tier.
+    check("and a cheap bottom-of-order hitter can still project into double digits below "
+          "the cap rather than being flattened to zero",
+          punt_owned[10] > 1.0, str(punt_owned))
 
     print("\nPitcher skill beyond ERA (pitcher_metrics.py / pitcher_skill.py)")
 

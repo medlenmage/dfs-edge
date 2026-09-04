@@ -516,6 +516,12 @@ async def _attach_inhouse_projections(out_games: list[dict[str, Any]], season: i
                             "salary": salary_info["salary"],
                             "fpts": fpts,
                             "implied_runs": implied_runs,
+                            # Tonight's lineup slot, confirmed or (before
+                            # lineups post) RotoWire's projected one.
+                            # project_ownership's single largest measured
+                            # bias was not having this at all.
+                            "batting_order": hitter.get("batting_order"),
+                            "projected_batting_order": hitter.get("projected_batting_order"),
                             "opponent_pitcher_id": opponent_pitcher_id,
                             # Feeds project_ownership()'s team-stack layer --
                             # MLB hitter ownership is driven team-first, so

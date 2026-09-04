@@ -611,7 +611,7 @@ async def generate_lineups(
     date: str | None = Body(None, embed=True),
     num_lineups: int = Body(1, embed=True, description="How many distinct lineups to build"),
     projection_source: str = Body(
-        "rotowire", embed=True, description="Which FPTS/ownership numbers to optimize against: 'rotowire' or 'inhouse'"
+        optimizer.DEFAULT_PROJECTION_SOURCE, embed=True, description="Which FPTS/ownership numbers to optimize against: 'rotowire' or 'inhouse'"
     ),
     stack_groups: list[int] | None = Body(
         None, embed=True, description="Hitter-group sizes to force, e.g. [4, 2, 2] for a 4-2-2 stack"
@@ -720,7 +720,7 @@ async def late_swap(
         ),
     ),
     projection_source: str = Body(
-        "rotowire", embed=True, description="Which FPTS/ownership numbers to fill open slots with: 'rotowire' or 'inhouse'"
+        optimizer.DEFAULT_PROJECTION_SOURCE, embed=True, description="Which FPTS/ownership numbers to fill open slots with: 'rotowire' or 'inhouse'"
     ),
 ) -> dict[str, Any]:
     """
@@ -754,7 +754,7 @@ async def build_contest_field(
         ..., embed=True, description="Lineup objects as returned by POST /lineups' 'lineups' array"
     ),
     projection_source: str = Body(
-        "rotowire", embed=True, description="Which ownership% to sample the field by: 'rotowire' or 'inhouse'"
+        optimizer.DEFAULT_PROJECTION_SOURCE, embed=True, description="Which ownership% to sample the field by: 'rotowire' or 'inhouse'"
     ),
     field_size: int | None = Body(
         None, embed=True, description="Override the preset's real contest size (entries)"
@@ -831,7 +831,7 @@ async def build_contest_entries(
         ),
     ),
     projection_source: str = Body(
-        "rotowire", embed=True, description="Which FPTS/ownership numbers to build against: 'rotowire' or 'inhouse'"
+        optimizer.DEFAULT_PROJECTION_SOURCE, embed=True, description="Which FPTS/ownership numbers to build against: 'rotowire' or 'inhouse'"
     ),
     included_game_pks: list[int] | None = Body(
         None, embed=True, description="Restrict the pool to these games only -- e.g. to match a specific DK slate"
@@ -1057,7 +1057,7 @@ async def build_contest_entries_simulated(
     contest_type: str = Body(..., embed=True, description="One of GET /contest-types' keys"),
     num_lineups: int = Body(..., embed=True, description=f"How many of your own entries to build, up to {contest.MAX_USER_LINEUPS:,}"),
     projection_source: str = Body(
-        "rotowire", embed=True, description="Which FPTS/ownership numbers to build against: 'rotowire' or 'inhouse'"
+        optimizer.DEFAULT_PROJECTION_SOURCE, embed=True, description="Which FPTS/ownership numbers to build against: 'rotowire' or 'inhouse'"
     ),
     max_exposure_pct: float | None = Body(
         None, embed=True, description="Cap how often any one player appears across the whole batch"
@@ -1202,7 +1202,7 @@ async def late_swap_contest_entries(
         description="'repair' swaps only DEAD players (scratched, or in a postponed game); "
         "'refresh' also swaps anyone whose projection has fallen materially since the batch was built",
     ),
-    projection_source: str = Body("rotowire", embed=True),
+    projection_source: str = Body(optimizer.DEFAULT_PROJECTION_SOURCE, embed=True),
     included_game_pks: list[int] | None = Body(None, embed=True),
     swap_field: bool = Body(
         True,
@@ -1701,7 +1701,7 @@ async def add_my_lineups(
     ),
     source: str = Body("manual", embed=True, description="manual or optimizer"),
     replace: bool = Body(False, embed=True, description="Replace the day's tray instead of adding to it"),
-    projection_source: str = Body("rotowire", embed=True),
+    projection_source: str = Body(optimizer.DEFAULT_PROJECTION_SOURCE, embed=True),
     included_game_pks: list[int] | None = Body(None, embed=True),
 ) -> dict[str, Any]:
     """
@@ -1820,7 +1820,7 @@ async def add_my_lineups_from_text(
         description="False validates and reports without touching the pool -- a dry run",
     ),
     replace: bool = Body(False, embed=True),
-    projection_source: str = Body("rotowire", embed=True),
+    projection_source: str = Body(optimizer.DEFAULT_PROJECTION_SOURCE, embed=True),
 ) -> dict[str, Any]:
     """
     Take lineups back from wherever they were built and put them in the
@@ -1953,7 +1953,7 @@ async def simulate_dk_entries(
     payout_pct: float = Body(0.20, embed=True, description="Fraction of field_size that cashes"),
     shape: str = Body("top_heavy", embed=True, description="'top_heavy' (GPP) or 'flat' (double-up/50-50)"),
     projection_source: str = Body(
-        "rotowire", embed=True, description="Which ownership% to sample the field by: 'rotowire' or 'inhouse'"
+        optimizer.DEFAULT_PROJECTION_SOURCE, embed=True, description="Which ownership% to sample the field by: 'rotowire' or 'inhouse'"
     ),
     sample_size: int | None = Body(
         None, embed=True, description="How many lineups to actually simulate as the field sample (capped)"
