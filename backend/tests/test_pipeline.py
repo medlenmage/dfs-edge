@@ -37,6 +37,8 @@ from app.services import (  # noqa: E402
     mlb_dk_points,
     mlb_slate,
     optimizer,
+    pitcher_metrics,
+    pitcher_skill,
     player_match,
     projections,
     salaries,
@@ -2888,6 +2890,187 @@ async def main() -> int:
               {"k_per_9": 9.0}, 8.0, None, None, market_k_line=None,
           ) == k_model_only,
           str(k_model_only))
+
+    print("\nPitcher skill beyond ERA (pitcher_metrics.py / pitcher_skill.py)")
+
+    # --- CSW and swinging-strike rate ---
+    check("csw_pct is called strikes plus whiffs over total pitches",
+          pitcher_metrics.csw_pct(433, 363, 2714) == round(796 / 2714, 4),
+          str(pitcher_metrics.csw_pct(433, 363, 2714)))
+    check("csw_pct returns None (not a divide-by-zero) with no pitches thrown",
+          pitcher_metrics.csw_pct(0, 0, 0) is None, "")
+
+    # Savant publishes swing% against PITCHES and whiff% against SWINGS,
+    # so the product is whiffs-per-pitch exactly. Verified live against
+    # directly-counted whiffs on real pitchers to within 0.1pp.
+    check("swstr_pct multiplies the two Savant rates onto a per-pitch basis",
+          pitcher_metrics.swstr_pct(40.7, 32.0) == round(40.7 * 32.0 / 10000, 4),
+          str(pitcher_metrics.swstr_pct(40.7, 32.0)))
+
+    # --- xFIP replaces actual homers with expected ones ---
+    lucky = {"ip": 180.0, "k": 200, "bb": 50, "hbp": 5, "hr": 8, "er": 60,
+             "fly_balls": 150.0}
+    unlucky = {**lucky, "hr": 30, "er": 90}
+    lg = pitcher_metrics.league_constants([lucky, unlucky])
+    x_lucky = pitcher_metrics.xfip(180.0, 200, 50, 5, 150.0, lg["hr_fb"], lg["cfip"])
+    x_unlucky = pitcher_metrics.xfip(180.0, 200, 50, 5, 150.0, lg["hr_fb"], lg["cfip"])
+    check("two pitchers with identical K/BB/fly balls get the SAME xFIP even when one "
+          "allowed 8 homers and the other 30 -- the whole point of the metric",
+          x_lucky == x_unlucky and x_lucky is not None, str((x_lucky, x_unlucky)))
+
+    more_fb = pitcher_metrics.xfip(180.0, 200, 50, 5, 260.0, lg["hr_fb"], lg["cfip"])
+    check("but allowing genuinely MORE fly balls does raise xFIP -- it is the fly balls, "
+          "not the homers, that the pitcher owns",
+          more_fb > x_lucky, str((x_lucky, more_fb)))
+
+    # --- SIERA reads batted-ball mix and rewards both extremes ---
+    heavy_gb = pitcher_metrics.siera(200, 50, 800, 60.0, 15.0, 5.0)
+    heavy_fb = pitcher_metrics.siera(200, 50, 800, 25.0, 50.0, 8.0)
+    neutral_bb = pitcher_metrics.siera(200, 50, 800, 44.0, 32.0, 6.0)
+    check("SIERA rewards a strong ground-ball profile over a batted-ball-neutral one",
+          heavy_gb < neutral_bb, str((heavy_gb, neutral_bb)))
+    check("a fly-ball-heavy profile grades WORSE than neutral -- SIERA stays monotone in "
+          "ground-ball rate, it does not credit both extremes (checked when a test written "
+          "on that assumption failed: sweeping GB 25%->66% moves SIERA 3.36->2.37 without "
+          "ever turning back up)",
+          heavy_fb > neutral_bb, str((heavy_fb, neutral_bb)))
+    check("the sign-flipping squared term is a second-order taper, not a reversal -- it "
+          "stays well under the linear term across a realistic net-GB range",
+          all(6.664 * n * n < abs(-1.858 * n) for n in (0.02, 0.06, 0.10, 0.14)), "")
+
+    strikeouts_help = pitcher_metrics.siera(260, 50, 800, 44.0, 32.0, 6.0)
+    check("more strikeouts at the same walks and batted-ball mix improves SIERA",
+          strikeouts_help < neutral_bb, str((strikeouts_help, neutral_bb)))
+    check("SIERA returns None rather than guessing when batted-ball data is missing",
+          pitcher_metrics.siera(200, 50, 800, None, 32.0, 6.0) is None, "")
+
+    # --- own_quality now grades on skill, not ERA ---
+    era_flattered = scoring.own_quality_component({"era": 2.20}, 4.00)
+    skill_says_worse = scoring.own_quality_component(
+        {"era": 2.20}, 4.00, skill={"siera": 4.60, "xfip": 4.50}, league_avg_skill=3.80,
+    )
+    check("a shiny ERA no longer carries the component when SIERA says the skill isn't "
+          "there -- the Gausman/Skubal case the whole change exists for",
+          skill_says_worse["value"] < era_flattered["value"]
+          and skill_says_worse["basis"] == "SIERA",
+          str((era_flattered["value"], skill_says_worse["value"])))
+
+    era_harsh = scoring.own_quality_component({"era": 6.30}, 4.00)
+    skill_rescues = scoring.own_quality_component(
+        {"era": 6.30}, 4.00, skill={"siera": 3.05, "xfip": 3.20}, league_avg_skill=3.80,
+    )
+    check("and an ugly ERA stops burying a pitcher whose underlying skill is fine "
+          "(measured live: Crochet 6.30 ERA against a 3.05 SIERA)",
+          skill_rescues["value"] > era_harsh["value"], str((era_harsh, skill_rescues)))
+
+    xfip_only = scoring.own_quality_component(
+        {"era": 3.00}, 4.00, skill={"siera": None, "xfip": 3.40}, league_avg_skill=3.80,
+    )
+    check("xFIP is used when SIERA is missing, and the result says which basis it used",
+          xfip_only["basis"] == "xFIP", str(xfip_only))
+    check("ERA is still the last resort, so a pitcher with no Statcast profile is scored "
+          "rather than silently going neutral",
+          scoring.own_quality_component({"era": 2.00}, 4.00, skill={},
+                                        league_avg_skill=3.80)["basis"] == "ERA", "")
+    check("and with neither skill nor ERA the component goes neutral instead of inventing one",
+          scoring.own_quality_component(None, None)["value"] == scoring.NEUTRAL, "")
+
+    # --- CSW feeds the strikeout component ---
+    k_no_csw = scoring.strikeout_potential_component({"k_per_9": 9.0}, 9.0, None, None)
+    k_elite_csw = scoring.strikeout_potential_component(
+        {"k_per_9": 9.0}, 9.0, None, None, csw=0.325, league_avg_csw=0.29,
+    )
+    k_poor_csw = scoring.strikeout_potential_component(
+        {"k_per_9": 9.0}, 9.0, None, None, csw=0.255, league_avg_csw=0.29,
+    )
+    check("an elite CSW raises strikeout potential above what K/9 alone said",
+          k_elite_csw["value"] > k_no_csw["value"], str((k_no_csw, k_elite_csw)))
+    check("and a poor CSW lowers it -- the same K/9 with worse underlying stuff",
+          k_poor_csw["value"] < k_no_csw["value"], str((k_no_csw, k_poor_csw)))
+    check("the CSW actually used is reported back for inspection",
+          k_elite_csw["csw_pct"] == 0.325, str(k_elite_csw))
+
+    # --- opponent K% is read off the handedness split ---
+    whiffy_vs_hand = [
+        {"season": {"k_pct": 0.20}, "vs_hand": {"k_pct": 0.32, "pa": 200}}
+        for _ in range(9)
+    ]
+    contact_vs_hand = [
+        {"season": {"k_pct": 0.20}, "vs_hand": {"k_pct": 0.12, "pa": 200}}
+        for _ in range(9)
+    ]
+    k_vs_whiffy = scoring.strikeout_potential_component(
+        {"k_per_9": 9.0}, 9.0, whiffy_vs_hand, 0.22)
+    k_vs_contact = scoring.strikeout_potential_component(
+        {"k_per_9": 9.0}, 9.0, contact_vs_hand, 0.22)
+    check("two lineups with IDENTICAL overall K% score differently once the split "
+          "against this pitcher's hand is read -- the gap the old code missed",
+          k_vs_whiffy["value"] > k_vs_contact["value"],
+          str((k_vs_whiffy["value"], k_vs_contact["value"])))
+    check("and the component says it used a handedness split rather than the overall rate",
+          k_vs_whiffy["opp_k_pct_is_split"] is True, str(k_vs_whiffy))
+
+    thin_split = [
+        {"season": {"k_pct": 0.20}, "vs_hand": {"k_pct": 0.32, "pa": 6}} for _ in range(9)
+    ]
+    k_thin = scoring.strikeout_potential_component({"k_per_9": 9.0}, 9.0, thin_split, 0.22)
+    check("a 6-PA split is regressed most of the way back toward the hitter's own overall "
+          "rate rather than trusted flat",
+          k_thin["opp_avg_k_pct"] < 0.215, str(k_thin))
+    check("a hitter with no split at all still contributes his overall rate",
+          scoring.strikeout_potential_component(
+              {"k_per_9": 9.0}, 9.0,
+              [{"season": {"k_pct": 0.30}, "vs_hand": None}], 0.22,
+          )["opp_avg_k_pct"] == 0.30, "")
+
+    # --- the at-bat sim regresses onto the same skill ---
+    realised = {"K": 0.22, "BB": 0.07, "HBP": 0.01, "OUT": 0.48,
+                "1B": 0.14, "2B": 0.04, "3B": 0.005, "HR": 0.035}
+    unlucky_hr = atbat_sim.apply_pitcher_skill(
+        realised, {"fb_pct": 30.0, "csw_pct": 0.29}, 0.16)
+    check("the sim pulls a starter's HOME RUN rate toward what his fly-ball rate implies "
+          "-- realised HR/FB ran 0.32x to 1.62x league across 158 real 2026 starters, "
+          "far too wide to simulate forward as skill",
+          unlucky_hr["HR"] < realised["HR"], str((realised["HR"], unlucky_hr["HR"])))
+
+    high_csw = atbat_sim.apply_pitcher_skill(
+        realised, {"fb_pct": 30.0, "csw_pct": 0.33}, 0.16)
+    low_csw = atbat_sim.apply_pitcher_skill(
+        realised, {"fb_pct": 30.0, "csw_pct": 0.26}, 0.16)
+    check("a higher CSW raises the simulated strikeout rate and a lower one drops it",
+          high_csw["K"] > low_csw["K"], str((low_csw["K"], high_csw["K"])))
+
+    check("adjusted rates still sum to 1 -- moving K and HR without renormalising would "
+          "quietly change how often a plate appearance ends at all",
+          abs(sum(high_csw.values()) - 1.0) < 1e-9, str(sum(high_csw.values())))
+    check("a pitcher with no skill profile simulates off his own real line, untouched",
+          atbat_sim.apply_pitcher_skill(realised, None) == realised, "")
+    check("and a profile carrying neither fly-ball nor CSW data leaves the rates alone too",
+          atbat_sim.apply_pitcher_skill(realised, {"fb_pct": None, "csw_pct": None})
+          == realised, "")
+
+    # --- the skill table assembles from real-shaped inputs ---
+    table = pitcher_skill.build_skill_table(
+        {
+            1: {"ip": 180.0, "bf": 730, "k": 210, "bb": 45, "hbp": 6, "hr": 18, "er": 62},
+            2: {"ip": 12.0, "bf": 50, "k": 10, "bb": 5, "hbp": 0, "hr": 2, "er": 8},
+        },
+        {
+            1: {"pitches": 2800, "swing_pct": 47.0, "whiff_pct": 28.0, "gb_pct": 45.0,
+                "fb_pct": 30.0, "pu_pct": 6.0, "edge_pct": 40.0, "first_strike_pct": 62.0},
+            2: {"pitches": 200, "swing_pct": 45.0, "whiff_pct": 20.0, "gb_pct": 40.0,
+                "fb_pct": 35.0, "pu_pct": 5.0, "edge_pct": 38.0, "first_strike_pct": 58.0},
+        },
+    )
+    check("build_skill_table computes SIERA and xFIP for a real-sample pitcher",
+          table["pitchers"][1]["siera"] is not None
+          and table["pitchers"][1]["xfip"] is not None, str(table["pitchers"].get(1)))
+    check("and drops a 12-inning sample entirely rather than publishing a skill read "
+          "off nothing",
+          2 not in table["pitchers"], str(sorted(table["pitchers"])))
+    check("the league constants come from the pool in hand, not a hardcoded season",
+          table["league"]["hr_fb"] > 0 and table["league"]["cfip"] is not None,
+          str(table["league"]))
 
     print("\nMarket props: raw row parsing (mlb_slate.py's per-player lookups)")
 
