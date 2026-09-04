@@ -33,6 +33,7 @@ from app.services import (  # noqa: E402
     nfl_scoring,
     nfl_shares,
     nfl_slate,
+    nfl_structural,
     nfl_team_draws,
     nfl_stack_rating,
     nfl_variance,
@@ -1897,6 +1898,117 @@ def main() -> int:
           "reason layer 2 draws both teams of a matchup together",
           nfl_dk_points.dst_points_vectorized(points_allowed=_a.points).mean()
           > nfl_dk_points.dst_points_vectorized(points_allowed=_a.points + 21).mean())
+
+    print("")
+    print("NFL structural engine wired into the contest path (nfl_structural.py)")
+
+    def _sslate_side(team, implied, roster):
+        return {"abbrev": team, "implied_total": implied, "favored": False, "players": [
+            {"dk_id": f"{team}-{nm}", "nflverse_id": None, "name": nm, "team": team,
+             "position": pos, "salary": sal, "projection": {"fpts": f, "ownership_pct": 12.0}}
+            for nm, pos, sal, f in roster]}
+
+    _ROSTER = [("QB", "QB", 7600, 20.0), ("WR1", "WR", 6800, 15.0), ("WR2", "WR", 5200, 11.0),
+               ("TE", "TE", 4600, 9.0), ("RB", "RB", 6400, 14.0), ("DST", "DST", 3000, 7.0)]
+    _sslate = {"games": [
+        {"home": _sslate_side("AAA", 27.0, _ROSTER), "away": _sslate_side("BBB", 23.0, _ROSTER)},
+        {"home": _sslate_side("CCC", 25.0, _ROSTER), "away": _sslate_side("DDD", 21.0, _ROSTER)},
+    ]}
+
+    _strials = asyncio.run(nfl_structural.simulate_slate_trials(
+        _sslate, 2025, num_trials=6000, seed=5))
+
+    # Nobody in this fixture has an nflverse id, so every share comes
+    # from the projection fallback. That path has to work: a team of
+    # rookies still has to produce outcomes, or every lineup containing
+    # one of them gets refused.
+    check("every player on the slate gets simulated outcomes even when NONE of them has usage "
+          "history -- shares fall back to projections rather than the team producing nothing",
+          len(_strials) == 24, f"{len(_strials)} of 24")
+
+    check("a DST is anti-correlated with the opposing quarterback -- it scores off that team's "
+          "own simulated points, which is the correlation a bootstrap engine cannot produce "
+          "at all",
+          float(np.corrcoef(_strials["AAA-DST"], _strials["BBB-QB"])[0, 1]) < -0.1,
+          f"{np.corrcoef(_strials['AAA-DST'], _strials['BBB-QB'])[0,1]:+.3f}")
+    check("...and is near-uncorrelated with its OWN quarterback, who is a different unit "
+          "entirely",
+          abs(float(np.corrcoef(_strials["AAA-DST"], _strials["AAA-QB"])[0, 1])) < 0.2,
+          f"{np.corrcoef(_strials['AAA-DST'], _strials['AAA-QB'])[0,1]:+.3f}")
+    check("players in DIFFERENT games are independent -- each game is drawn from its own seed, "
+          "so no correlation leaks across the slate",
+          abs(float(np.corrcoef(_strials["AAA-QB"], _strials["CCC-QB"])[0, 1])) < 0.05,
+          f"{np.corrcoef(_strials['AAA-QB'], _strials['CCC-QB'])[0,1]:+.3f}")
+    check("a quarterback is positively correlated with his own pass catchers, because his "
+          "passing yards ARE the sum of what they caught rather than an independent draw",
+          float(np.corrcoef(_strials["AAA-QB"], _strials["AAA-WR1"])[0, 1]) > 0.05,
+          f"{np.corrcoef(_strials['AAA-QB'], _strials['AAA-WR1'])[0,1]:+.3f}")
+    check("two receivers on one team compete for the same targets, so they are NOT positively "
+          "correlated the way a shared team multiplier would make them",
+          float(np.corrcoef(_strials["AAA-WR1"], _strials["AAA-WR2"])[0, 1]) < 0.15,
+          f"{np.corrcoef(_strials['AAA-WR1'], _strials['AAA-WR2'])[0,1]:+.3f}")
+    check("the favourite's players outscore the underdog's, since the whole game is anchored "
+          "to the market's implied totals",
+          _strials["AAA-QB"].mean() > _strials["BBB-QB"].mean(),
+          f"{_strials['AAA-QB'].mean():.2f} (implied 27) vs {_strials['BBB-QB'].mean():.2f} (23)")
+
+    def _slineup(*keys):
+        return {"players": [
+            {"id": k, "name": k, "team": k.split("-")[0], "position": k.split("-")[1][:2],
+             "salary": 5000, "projected_fpts": 12.0, "ownership_pct": 12.0, "nflverse_id": None}
+            for k in keys]}
+
+    _sentries = [
+        _slineup("AAA-QB", "AAA-WR1", "AAA-TE", "AAA-RB", "BBB-WR1", "CCC-WR1", "AAA-DST"),
+        _slineup("BBB-QB", "BBB-WR1", "BBB-WR2", "CCC-RB", "DDD-WR1", "AAA-RB", "CCC-DST"),
+        _slineup("CCC-QB", "CCC-WR1", "CCC-TE", "DDD-RB", "AAA-WR2", "BBB-TE", "DDD-DST"),
+    ] * 4
+    _scontest = dict(nfl_contest.CONTEST_TYPES["gpp_small"])
+    _scontest["field_size"] = 100
+
+    _sresult = asyncio.run(nfl_contest.evaluate_field_mirrored(
+        _sentries, _scontest, season=2025, num_trials=1500, seed=11,
+        engine="structural", slate=_sslate))
+    check("the structural engine runs through the real contest path and returns one result per "
+          "entry, the same shape the bootstrap engine does",
+          len(_sresult["results"]) == len(_sentries))
+    check("...producing real simulated NFL scores rather than the near-zero a degenerate "
+          "outcome pool would give",
+          80.0 < float(np.mean([r["simulated_points_mean"] for r in _sresult["results"]])) < 220.0,
+          f"{np.mean([r['simulated_points_mean'] for r in _sresult['results']]):.1f}")
+
+    check("engine defaults to bootstrap, so wiring this in changed nothing for existing callers",
+          inspect_module.signature(
+              nfl_contest.evaluate_field_mirrored).parameters["engine"].default == "bootstrap")
+    try:
+        asyncio.run(nfl_contest.evaluate_field_mirrored(
+            _sentries, _scontest, season=2025, num_trials=200, seed=1, engine="structural"))
+        check("engine='structural' without a slate raises", False, "no error")
+    except nfl_contest.ContestError as exc:
+        check("engine='structural' without a slate raises rather than silently falling back to "
+              "the other engine", "slate" in str(exc).lower(), str(exc)[:70])
+
+    _noline = {"games": [{"home": dict(_sslate["games"][0]["home"], implied_total=None),
+                          "away": dict(_sslate["games"][0]["away"], implied_total=None)}]}
+    try:
+        asyncio.run(nfl_contest.evaluate_field_mirrored(
+            _sentries[:3], _scontest, season=2025, num_trials=200, seed=1,
+            engine="structural", slate=_noline))
+        check("a game with no Vegas line is refused", False, "no error")
+    except nfl_contest.ContestError as exc:
+        check("a game with no Vegas line is refused outright -- the model is anchored to the "
+              "market, and inventing a total would be worse than declining",
+              "vegas" in str(exc).lower() or "implied" in str(exc).lower(), str(exc)[:70])
+
+    try:
+        asyncio.run(nfl_contest.evaluate_field_mirrored(
+            [_slineup("AAA-QB", "ZZZ-NOBODY")], _scontest, season=2025, num_trials=200,
+            seed=1, engine="structural", slate=_sslate))
+        check("a lineup player missing from the slate is refused", False, "no error")
+    except nfl_contest.ContestError as exc:
+        check("a lineup player who is not on the simulated slate is named in the error rather "
+              "than scoring as zero",
+              "ZZZ-NOBODY" in str(exc), str(exc)[:80])
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")

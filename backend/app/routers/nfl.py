@@ -411,6 +411,11 @@ async def simulate_contest_batch(
         embed=True,
         description="How sharp the sampled public field is: 'low', 'marquee' (default) or 'high'. Only used when self_play is false.",
     ),
+    engine: str = Body(
+        "bootstrap",
+        embed=True,
+        description="'bootstrap' (default) samples each player's own historical DK-point outcome pool and imposes a team correlation. 'structural' instead draws each GAME from its Vegas-implied totals and allocates that volume among the players, so correlation is produced rather than assumed -- teammates divide one team's touchdowns, a pass-catching back's targets rise when his team trails, and a DST scores off the opponent's own draw. Needs a Vegas line for every game on the slate; two of its constants are still unfitted, so it is opt-in.",
+    ),
     reroll: int = Body(
         0, embed=True, description="Bump for a genuinely different set of simulated draws on the same batch."
     ),
@@ -436,7 +441,10 @@ async def simulate_contest_batch(
     resolved_season = cached.get("season")
     resolved_week = cached.get("week")
     slate = None
-    if not self_play:
+    # The structural engine needs the slate in BOTH modes -- it draws
+    # the games themselves -- where the sampled public field only needs
+    # it to build opponents.
+    if not self_play or engine == "structural":
         slate = await nfl_slate.build_slate(resolved_season, resolved_week)
     try:
         result = await nfl_contest.simulate_contest_batch(
@@ -450,9 +458,10 @@ async def simulate_contest_batch(
             first_place_pct=first_place_pct,
             self_play=self_play,
             field_sharpness=field_sharpness,
+            engine=engine,
             seed=_nfl_sim_seed(
                 resolved_season, resolved_week, cached.get("contest_type", ""),
-                f"sim:{batch_id}:{entry_fee}:{self_play}", reroll,
+                f"sim:{batch_id}:{entry_fee}:{self_play}:{engine}", reroll,
             ),
         )
     except nfl_contest.ContestError as exc:

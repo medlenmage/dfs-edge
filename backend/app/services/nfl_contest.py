@@ -95,7 +95,7 @@ from typing import Any
 import numpy as np
 
 from app.clients import nfl
-from app.services import nfl_variance
+from app.services import nfl_structural, nfl_variance
 from app.services.contest import (
     CONTEST_TYPES,
     FIELD_SHARPNESS_LEVELS,
@@ -1081,6 +1081,53 @@ async def build_contest_entries(
     }
 
 
+async def _simulate_lineups_structural(
+    lineups: list[dict[str, Any]],
+    slate: dict[str, Any],
+    season: int,
+    *,
+    num_trials: int,
+    seed: int | None,
+) -> np.ndarray:
+    """
+    The `engine="structural"` counterpart to nfl_variance's bootstrap
+    pools: builds each lineup's per-trial total by summing
+    nfl_structural.simulate_slate_trials()'s simulated game results for
+    its own players.
+
+    Correlation is already baked into those arrays by construction --
+    teammates divide one team's volume, a DST scores off the opponent's
+    own draw in the same simulated game -- so unlike the bootstrap path
+    there is no separate team-multiplier step. Returns the same
+    (len(lineups), num_trials) shape simulate_batch does, so every
+    ranking and payout calculation downstream is unchanged.
+    """
+    trials = await nfl_structural.simulate_slate_trials(
+        slate, season, num_trials=num_trials, seed=seed
+    )
+    if not trials:
+        raise ContestError(
+            "The structural engine needs Vegas lines for the slate's games -- none of "
+            "this week's games have an implied total yet."
+        )
+
+    missing = sorted({
+        p["id"] for lineup in lineups for p in lineup["players"] if p["id"] not in trials
+    })
+    if missing:
+        preview = ", ".join(str(m) for m in missing[:5])
+        suffix = "..." if len(missing) > 5 else ""
+        raise ContestError(
+            f"The structural engine has no simulated outcome for player id(s) {preview}"
+            f"{suffix} -- they are in a lineup but not on the simulated slate."
+        )
+
+    out = np.empty((len(lineups), num_trials), dtype=float)
+    for i, lineup in enumerate(lineups):
+        out[i] = np.sum([trials[p["id"]] for p in lineup["players"]], axis=0)
+    return out
+
+
 async def evaluate_batch_simulated(
     entries: list[dict[str, Any]],
     field: list[dict[str, Any]],
@@ -1090,6 +1137,8 @@ async def evaluate_batch_simulated(
     num_trials: int = 2000,
     seed: int | None = None,
     first_place_pct: float | None = None,
+    engine: str = "bootstrap",
+    slate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Ranks `entries` against nfl_variance.simulate_batch()'s real Monte
@@ -1098,7 +1147,15 @@ async def evaluate_batch_simulated(
     trial. See contest.py's evaluate_batch_simulated() for the full
     "distinct ranks within one trial" rationale, which applies
     unchanged here (only the simulation source differs: nfl_variance
-    instead of variance.py, no `engine="atbat"` alternative).
+    instead of variance.py).
+
+    `engine="structural"` swaps the bootstrap pools for the layer-2 plus
+    layer-3 simulator (nfl_structural.py), which draws each game from
+    its market-implied totals and then allocates that volume among the
+    players, so correlation is produced rather than assumed. It needs
+    `slate` -- the full nfl_slate.build_slate() output, not just player
+    ids -- and every game needs a Vegas line. Opt-in: two of its
+    constants are still unfitted (see nfl_structural's own docstring).
     """
     if not entries:
         raise ContestError("Need at least one entry to simulate.")
@@ -1128,8 +1185,17 @@ async def evaluate_batch_simulated(
     smoothing_boundaries = np.unique(ranks_for_beaten)
     smoothed_payouts = _block_average_payouts(full_payouts, smoothing_boundaries, field_size)
 
-    player_pools = await nfl_variance.player_pools_for_entries(entries + field, season)
-    sim = nfl_variance.simulate_batch(entries + field, player_pools, num_trials=num_trials, seed=seed)
+    if engine == "structural":
+        if slate is None:
+            raise ContestError("engine='structural' requires the full slate.")
+        sim = await _simulate_lineups_structural(
+            entries + field, slate, season, num_trials=num_trials, seed=seed
+        )
+    else:
+        player_pools = await nfl_variance.player_pools_for_entries(entries + field, season)
+        sim = nfl_variance.simulate_batch(
+            entries + field, player_pools, num_trials=num_trials, seed=seed
+        )
     entry_sim, field_sim = sim[:num_entries], sim[num_entries:]
 
     field_sorted = np.sort(field_sim, axis=0)
@@ -1202,6 +1268,8 @@ async def evaluate_field_mirrored(
     num_trials: int = 10_000,
     seed: int | None = None,
     first_place_pct: float | None = None,
+    engine: str = "bootstrap",
+    slate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Self-play: `field_lineups` (your own batch) as one self-contained
@@ -1239,8 +1307,17 @@ async def evaluate_field_mirrored(
         real_ranks_by_k = np.array([1])
     smoothed_payouts = _block_average_payouts(full_payouts, real_ranks_by_k, field_size)
 
-    player_pools = await nfl_variance.player_pools_for_entries(field_lineups, season)
-    sim = nfl_variance.simulate_batch(field_lineups, player_pools, num_trials=num_trials, seed=seed)
+    if engine == "structural":
+        if slate is None:
+            raise ContestError("engine='structural' requires the full slate.")
+        sim = await _simulate_lineups_structural(
+            field_lineups, slate, season, num_trials=num_trials, seed=seed
+        )
+    else:
+        player_pools = await nfl_variance.player_pools_for_entries(field_lineups, season)
+        sim = nfl_variance.simulate_batch(
+            field_lineups, player_pools, num_trials=num_trials, seed=seed
+        )
 
     order = np.argsort(-sim, axis=0)
     final_rank = np.empty_like(order)
@@ -1307,6 +1384,7 @@ async def build_contest_entries_simulated(
     self_play: bool = False,
     field_sharpness: str = "marquee",
     first_place_pct: float | None = None,
+    engine: str = "bootstrap",
 ) -> dict[str, Any]:
     """
     Like build_contest_entries, but ranks the batch against a real
@@ -1332,7 +1410,7 @@ async def build_contest_entries_simulated(
         )
         evaluation = await evaluate_field_mirrored(
             entries, contest, season=season, num_trials=num_trials, seed=seed,
-            first_place_pct=first_place_pct,
+            first_place_pct=first_place_pct, engine=engine, slate=slate,
         )
     else:
         contest, entries, field = _build_entries_and_field(
@@ -1345,7 +1423,7 @@ async def build_contest_entries_simulated(
         evaluation = await evaluate_batch_simulated(
             entries, field, contest, season=season, num_trials=num_trials,
             seed=(seed + 2) if seed is not None else None,
-            first_place_pct=first_place_pct,
+            first_place_pct=first_place_pct, engine=engine, slate=slate,
         )
 
     return _rank_and_summarize_simulated(
@@ -1473,6 +1551,7 @@ async def simulate_contest_batch(
     self_play: bool = True,
     field_sharpness: str = "marquee",
     seed: int | None = None,
+    engine: str = "bootstrap",
 ) -> dict[str, Any]:
     """
     Simulate an NFL contest that has ALREADY been built -- the simulator
@@ -1516,7 +1595,7 @@ async def simulate_contest_batch(
     if self_play:
         evaluation = await evaluate_field_mirrored(
             simulated, contest, season=season, num_trials=num_trials, seed=seed,
-            first_place_pct=first_place_pct,
+            first_place_pct=first_place_pct, engine=engine, slate=slate,
         )
     else:
         if slate is None:
@@ -1535,7 +1614,7 @@ async def simulate_contest_batch(
         evaluation = await evaluate_batch_simulated(
             simulated, field, contest, season=season, num_trials=num_trials,
             seed=(seed + 2) if seed is not None else None,
-            first_place_pct=first_place_pct,
+            first_place_pct=first_place_pct, engine=engine, slate=slate,
         )
 
     result = _rank_and_summarize_simulated(
