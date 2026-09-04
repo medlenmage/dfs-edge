@@ -16,6 +16,8 @@ import copy
 import inspect as inspect_module
 import random
 import sys
+
+import numpy as np
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,6 +31,7 @@ from app.services import (  # noqa: E402
     nfl_inhouse_projections,
     nfl_optimizer,
     nfl_scoring,
+    nfl_shares,
     nfl_slate,
     nfl_stack_rating,
     nfl_variance,
@@ -1610,6 +1613,143 @@ def main() -> int:
            nfl_inhouse_projections.project_fpts(10.0, 0.55)) == (14.5, 5.5),
           (nfl_inhouse_projections.project_fpts(10.0, 1.45),
            nfl_inhouse_projections.project_fpts(10.0, 0.55)))
+
+    print("")
+    print("NFL player-level volume allocation (nfl_shares.py)")
+
+    _rng = np.random.default_rng(11)
+    _S = 20000
+    _script = _rng.normal(0.0, 1.0, _S)
+    _team = nfl_shares.TeamDraws(
+        pass_attempts=np.full(_S, 34, dtype=np.int64),
+        pass_tds=_rng.poisson(1.75, _S),
+        pass_eff=np.ones(_S),
+        rush_attempts=np.full(_S, 26, dtype=np.int64),
+        rush_tds=_rng.poisson(0.85, _S),
+        rush_eff=np.ones(_S),
+        script=_script,
+    )
+    _pass = nfl_shares.PassPriors(
+        names=["WR1", "WR2", "TE", "RB1"],
+        positions=["WR", "WR", "TE", "RB"],
+        target_share=np.array([0.34, 0.24, 0.22, 0.20]),
+        td_share=np.array([0.36, 0.24, 0.26, 0.14]),
+        yards_per_rec=np.array([14.2, 13.0, 11.1, 8.0]),
+        # RB1 is the pass-down back: his share should RISE when trailing.
+        script_beta=np.array([0.02, 0.00, 0.00, 0.25]),
+    )
+    _out = nfl_shares.allocate_passing(_rng, _team, _pass)
+
+    # The exactness is the point: it is what makes teammates' touchdowns
+    # correctly NEGATIVELY correlated, because a team's TDs are a fixed
+    # quantity being divided rather than independent draws.
+    check("player targets sum to the team's pass attempts in EVERY sim -- the multinomial is "
+          "exact, not approximate",
+          bool(np.array_equal(_out["targets"].sum(axis=1), _team.pass_attempts)))
+    check("player receiving TDs sum to the team's pass TDs in every sim",
+          bool(np.array_equal(_out["rec_tds"].sum(axis=1), _team.pass_tds)))
+    check("...so two teammates' touchdowns come out NEGATIVELY correlated, which is the whole "
+          "reason to allocate rather than draw each player independently",
+          float(np.corrcoef(_out["rec_tds"][:, 0], _out["rec_tds"][:, 1])[0, 1]) < 0,
+          f"{np.corrcoef(_out['rec_tds'][:, 0], _out['rec_tds'][:, 1])[0, 1]:+.3f}")
+    check("receptions never exceed targets",
+          bool((_out["receptions"] <= _out["targets"]).all()))
+    check("a player with no receptions is given exactly zero yards, not a small positive draw",
+          float(_out["rec_yards"][_out["receptions"] == 0].max(initial=0.0)) == 0.0)
+
+    # Shares must VARY -- that is what a fixed-share model cannot do, and
+    # it is where the one-man-ate-the-game outcomes come from.
+    _wr1 = _out["target_share"][:, 0]
+    check("target share genuinely varies around projection rather than sitting on it -- the "
+          "single-player explosions a fixed-share model cannot produce",
+          float(_wr1.std()) > 0.03,
+          f"mean {_wr1.mean():.3f} sd {_wr1.std():.3f}")
+    # Mean preservation is a property of the Dirichlet, and it holds only
+    # because the concentration is a SCALAR. Checked with script betas at
+    # zero so the renormalization tilt cannot confound it.
+    _flat = nfl_shares.PassPriors(
+        names=["WR1", "WR2", "TE", "RB1"], positions=["WR", "WR", "TE", "RB"],
+        target_share=np.array([0.34, 0.24, 0.22, 0.20]),
+        td_share=np.array([0.36, 0.24, 0.26, 0.14]),
+        yards_per_rec=np.array([14.2, 13.0, 11.1, 8.0]),
+        script_beta=np.zeros(4))
+    _flat_out = nfl_shares.allocate_passing(np.random.default_rng(12), _team, _flat)
+    _drift = float(np.abs(_flat_out["target_share"].mean(axis=0) - _flat.target_share).max())
+    check("the drawn shares average to the projection they were built from, so variance is "
+          "added without moving the central case",
+          _drift < 0.01, f"max drift {_drift:.4f}")
+    check("...which holds only because the concentration is a SCALAR. Giving each player his "
+          "own fitted k makes the Dirichlet mean k_i*p_i/sum(k_j*p_j) instead of p_i, which "
+          "biased a 34% share to 30.3% before any variance was added",
+          isinstance(_flat.k, float),
+          f"k={_flat.k!r}")
+    check("the scalar is the share-weighted blend of the per-position fits, so it still "
+          "reflects the players who actually carry the volume",
+          nfl_shares.TARGET_CONCENTRATION["WR"] < _flat.k < nfl_shares.TARGET_CONCENTRATION["TE"],
+          f"{_flat.k:.2f} between WR {nfl_shares.TARGET_CONCENTRATION['WR']} "
+          f"and TE {nfl_shares.TARGET_CONCENTRATION['TE']}")
+
+    # Game script: the correlation falls out of the mechanism.
+    _trailing, _leading = _script > 1.0, _script < -1.0
+    check("the pass-down back's target share RISES in the sims where his team is trailing -- "
+          "correlation produced by the mechanism, not asserted by a coefficient",
+          _out["targets"][_trailing, 3].mean() > _out["targets"][_leading, 3].mean(),
+          f"trailing {_out['targets'][_trailing, 3].mean():.2f} vs "
+          f"leading {_out['targets'][_leading, 3].mean():.2f}")
+    # A beta of 0 does NOT mean "unaffected". Shares are renormalized
+    # after the tilt, so growing one man's share necessarily shrinks
+    # everyone else's -- betas are RELATIVE, not absolute. Worth pinning,
+    # because it is the obvious thing to get wrong when setting them.
+    check("a script-neutral receiver still LOSES usage when a teammate's share grows -- "
+          "shares renormalize, so betas are relative to the group and setting one player's "
+          "positive silently makes everyone else's negative",
+          _out["targets"][_trailing, 1].mean() < _out["targets"][_leading, 1].mean(),
+          f"trailing {_out['targets'][_trailing, 1].mean():.2f} vs "
+          f"leading {_out['targets'][_leading, 1].mean():.2f}")
+
+    # The two fitted quantities.
+    _implied_sd = (0.25 * 0.75 / 26.0) ** 0.5
+    check("solve_concentration inverts Var = p(1-p)/(k+1) -- feeding it the SD that a known k "
+          "implies returns that k",
+          abs(nfl_shares.solve_concentration(np.array([0.25]), np.array([_implied_sd])) - 25.0)
+          < 0.5,
+          str(nfl_shares.solve_concentration(np.array([0.25]), np.array([_implied_sd]))))
+    check("solve_concentration drops players whose implied k is impossible rather than "
+          "clipping them -- clipping would drag the median toward whatever bound was picked",
+          np.isnan(nfl_shares.solve_concentration(np.array([0.25]), np.array([10.0]))))
+
+    _lo = nfl_shares.gamma_yards(np.random.default_rng(1), np.full((8000, 1), 4),
+                                 np.array([12.0]), np.ones(8000), np.array([0.5]))
+    _hi = nfl_shares.gamma_yards(np.random.default_rng(1), np.full((8000, 1), 4),
+                                 np.array([12.0]), np.ones(8000), np.array([4.0]))
+    check("a LOWER explosiveness s means a fatter yardage tail at the same mean -- s is the "
+          "knob, and it is fitted per position because the measured values differ by more "
+          "than 2x (WR receiving 1.27 against RB rushing 0.42)",
+          _lo.std() > _hi.std() and abs(_lo.mean() - _hi.mean()) < 3.0,
+          f"sd {_lo.std():.1f} vs {_hi.std():.1f}; means {_lo.mean():.1f}/{_hi.mean():.1f}")
+    _many = nfl_shares.gamma_yards(np.random.default_rng(2), np.full((8000, 1), 12),
+                                   np.array([12.0]), np.ones(8000), np.array([1.27]))
+    _few = nfl_shares.gamma_yards(np.random.default_rng(2), np.full((8000, 1), 2),
+                                  np.array([12.0]), np.ones(8000), np.array([1.27]))
+    check("per-touch yardage variance falls as touches rise -- a 12-catch game is "
+          "proportionally tighter than a 2-catch one, because the Gamma shape scales with "
+          "the count",
+          _many.std() / 12.0 < _few.std() / 2.0,
+          f"{_many.std() / 12.0:.2f} vs {_few.std() / 2.0:.2f}")
+
+    _defaults = nfl_shares.PassPriors(
+        names=["a", "b"], positions=["WR", "TE"],
+        target_share=np.array([0.5, 0.5]), td_share=np.array([0.5, 0.5]),
+        yards_per_rec=np.array([13.0, 11.0]), script_beta=np.zeros(2))
+    check("priors default to the per-position FITTED constants rather than one scalar -- the "
+          "single defaults this design ships with are off in both directions on real data",
+          list(_defaults.s) == [nfl_shares.RECEIVING_EXPLOSIVENESS["WR"],
+                                nfl_shares.RECEIVING_EXPLOSIVENESS["TE"]],
+          str(list(_defaults.s)))
+    check("every fitted explosiveness constant is positive -- a non-positive s is not a "
+          "distribution at all",
+          all(v > 0 for v in nfl_shares.RECEIVING_EXPLOSIVENESS.values())
+          and all(v > 0 for v in nfl_shares.RUSHING_EXPLOSIVENESS.values()))
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
