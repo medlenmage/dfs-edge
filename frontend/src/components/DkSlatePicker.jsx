@@ -3,15 +3,29 @@ import { api } from '../api'
 import { localTime } from '../format'
 
 /**
- * Loads a real, live DraftKings Classic MLB slate -- players and
- * salaries -- directly from DraftKings' own public API, no manual
- * salary CSV needed. "Browse slates" lists every real slate live for
- * the date (Early, Main, Night, single-game pools, ...) so you can
- * pick exactly the one you're actually playing; once one's loaded,
- * "Refresh" re-pulls that same slate's players/salaries live (for
- * late scratches or swaps close to lock) without needing to re-pick.
+ * Loads a real, live DraftKings Classic slate -- players and salaries --
+ * directly from DraftKings' own public API, no manual salary CSV
+ * needed. "Browse slates" lists every real slate live for the period
+ * (Early, Main, Night, single-game pools, ...) so you can pick exactly
+ * the one you're actually playing; once one's loaded, "Refresh"
+ * re-pulls that same slate's players/salaries live (for late scratches
+ * or swaps close to lock) without needing to re-pick.
+ *
+ * Sport-agnostic by parameter rather than by copy. MLB keys a slate by
+ * DATE and NFL by (season, week) -- a football week spans Thursday to
+ * Monday, so several real slates with different start dates belong to
+ * the same week -- which is the only thing that actually differs. The
+ * caller supplies the two calls and the key that resets state; MLB's
+ * defaults keep its own call site unchanged.
  */
-export function DkSlatePicker({ date, onLoaded }) {
+export function DkSlatePicker({
+  date,
+  onLoaded,
+  resetKey,
+  fetchSlates,
+  loadSlate,
+  emptyLabel = 'No live DraftKings Classic slates found for this date yet.',
+}) {
   const [open, setOpen] = useState(false)
   const [slates, setSlates] = useState(null)
   const [browsing, setBrowsing] = useState(false)
@@ -20,15 +34,16 @@ export function DkSlatePicker({ date, onLoaded }) {
   const [loaded, setLoaded] = useState(null) // { draftGroupId, label, playersLoaded }
   const [error, setError] = useState(null)
 
-  // This component stays mounted across a date change (App.jsx doesn't
-  // remount it), so a stale "DK: Early (250)" label from the previous
-  // date would otherwise linger and mislead.
+  // This component stays mounted across a date or week change (neither
+  // panel remounts it), so a stale "DK: Early (250)" label from the
+  // previous one would otherwise linger and mislead.
+  const key = resetKey ?? date
   useEffect(() => {
     setOpen(false)
     setSlates(null)
     setLoaded(null)
     setError(null)
-  }, [date])
+  }, [key])
 
   async function browse() {
     setOpen((v) => !v)
@@ -36,7 +51,9 @@ export function DkSlatePicker({ date, onLoaded }) {
     setBrowsing(true)
     setError(null)
     try {
-      const result = await api.dkSlates(date)
+      const result = fetchSlates
+        ? await fetchSlates()
+        : await api.dkSlates(date)
       setSlates(result.slates)
     } catch (err) {
       setError(err.message)
@@ -49,7 +66,9 @@ export function DkSlatePicker({ date, onLoaded }) {
     setLoadingId(slate.draft_group_id)
     setError(null)
     try {
-      const result = await api.loadDkSlate(date, slate.draft_group_id)
+      const result = loadSlate
+        ? await loadSlate(slate.draft_group_id)
+        : await api.loadDkSlate(date, slate.draft_group_id)
       setLoaded({
         draftGroupId: slate.draft_group_id,
         label: slate.label,
@@ -69,7 +88,9 @@ export function DkSlatePicker({ date, onLoaded }) {
     setRefreshing(true)
     setError(null)
     try {
-      const result = await api.loadDkSlate(date, loaded.draftGroupId, { refresh: true })
+      const result = loadSlate
+        ? await loadSlate(loaded.draftGroupId, { refresh: true })
+        : await api.loadDkSlate(date, loaded.draftGroupId, { refresh: true })
       setLoaded((prev) => ({ ...prev, playersLoaded: result.players_loaded }))
       onLoaded?.()
     } catch (err) {
@@ -117,7 +138,7 @@ export function DkSlatePicker({ date, onLoaded }) {
           {error && <div className="notice error" style={{ fontSize: 13 }}>{error}</div>}
           {!browsing && slates && slates.length === 0 && (
             <div className="dim" style={{ fontSize: 13 }}>
-              No live DraftKings Classic slates found for this date yet.
+              {emptyLabel}
             </div>
           )}
           {!browsing &&

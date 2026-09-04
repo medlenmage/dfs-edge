@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache  # noqa: E402
-from app.clients import fantasylabs, nfl, nfl_pbp, rotowire_nfl  # noqa: E402
+from app.clients import draftkings, fantasylabs, nfl, nfl_pbp, rotowire_nfl  # noqa: E402
 from app.services import (  # noqa: E402
     nfl_contest,
     nfl_correlations,
@@ -2081,6 +2081,97 @@ def main() -> int:
           "proportionally steadier than a WR3",
           _ratios["WR1"] < _ratios["WR2"] < _ratios["WR3"],
           f"WR1 {_ratios['WR1']:.3f} < WR2 {_ratios['WR2']:.3f} < WR3 {_ratios['WR3']:.3f}")
+
+    print("")
+    print("DraftKings slate picking for NFL (clients/draftkings.py)")
+
+    _dk_payload = {
+        "GameSets": [
+            {"GameSetKey": "wk1", "Competitions": [
+                {"GameId": 1, "Description": "NE @ SEA", "StartDate": "2026-09-10T00:20:00Z"},
+                {"GameId": 2, "Description": "TB @ CIN", "StartDate": "2026-09-13T17:00:00Z"},
+            ]},
+        ],
+        "DraftGroups": [
+            # The real Classic slates: one Thursday-through-Monday, one Sunday.
+            {"DraftGroupId": 111, "GameTypeId": 1, "GameCount": 16, "GameSetKey": "wk1",
+             "StartDateEst": "2026-09-09T20:20:00", "StartDate": "2026-09-10T00:20:00Z",
+             "ContestStartTimeSuffix": " (Wed-Mon)"},
+            {"DraftGroupId": 222, "GameTypeId": 1, "GameCount": 12, "GameSetKey": "wk1",
+             "StartDateEst": "2026-09-13T13:00:00", "StartDate": "2026-09-13T17:00:00Z",
+             "ContestStartTimeSuffix": ""},
+            # Formats this app does not support, all live in the same lobby.
+            {"DraftGroupId": 333, "GameTypeId": 189, "GameCount": 12, "GameSetKey": "wk1",
+             "StartDateEst": "2026-09-13T13:00:00", "StartDate": "2026-09-13T17:00:00Z",
+             "ContestStartTimeSuffix": ""},
+            {"DraftGroupId": 444, "GameTypeId": 145, "GameCount": 16, "GameSetKey": "wk1",
+             "StartDateEst": "2026-09-09T20:20:00", "StartDate": "2026-09-10T00:20:00Z",
+             "ContestStartTimeSuffix": " (Sit & Go)"},
+            {"DraftGroupId": 555, "GameTypeId": 158, "GameCount": 3, "GameSetKey": "wk1",
+             "StartDateEst": "2026-09-08T12:00:00", "StartDate": "2026-09-08T16:00:00Z",
+             "ContestStartTimeSuffix": " (Madden Stream)"},
+            # A Classic slate from a DIFFERENT week.
+            {"DraftGroupId": 666, "GameTypeId": 1, "GameCount": 14, "GameSetKey": "wk1",
+             "StartDateEst": "2026-09-20T13:00:00", "StartDate": "2026-09-20T17:00:00Z",
+             "ContestStartTimeSuffix": ""},
+        ],
+    }
+
+    # A football week is not a day: the Thursday slate and the Sunday one
+    # start on different dates and both belong to week 1.
+    _week_days = ["2026-09-09", "2026-09-10", "2026-09-13", "2026-09-14"]
+    _nfl_slates = draftkings._parse_slates(
+        _dk_payload, _week_days, draftkings.SPORT_CLASSIC_GAME_TYPE_IDS["NFL"])
+    check("an NFL week returns every Classic slate across ALL its dates -- a Thursday-to-Monday "
+          "slate and the Sunday one inside it start on different days and both belong to the "
+          "same week, which is the one thing that differs from the MLB picker",
+          [s["draft_group_id"] for s in _nfl_slates] == [111, 222],
+          str([s["draft_group_id"] for s in _nfl_slates]))
+    check("DK leaves the biggest slate of the period unlabelled, so it is shown as 'Main'",
+          [s["label"] for s in _nfl_slates] == ["Wed-Mon", "Main"],
+          str([s["label"] for s in _nfl_slates]))
+    check("Sit & Go, Madden Stream and the other draft formats living in the same lobby are "
+          "excluded -- they carry no salaries and no DST, so they are not slates this app can "
+          "build a lineup for",
+          all(s["draft_group_id"] not in (333, 444, 555) for s in _nfl_slates))
+    check("a Classic slate from a different WEEK is excluded, not just a different day",
+          all(s["draft_group_id"] != 666 for s in _nfl_slates))
+
+    # The game-type ids are genuinely different per sport, which is the
+    # thing that would silently return nothing if it were assumed shared.
+    check("NFL Classic is GameTypeId 1 and MLB Classic is 2 -- the ids are NOT shared, and "
+          "using MLB's set against an NFL lobby returns nothing at all",
+          draftkings._parse_slates(
+              _dk_payload, _week_days, draftkings.SPORT_CLASSIC_GAME_TYPE_IDS["MLB"]) == [],
+          "MLB ids against an NFL payload")
+    check("...and the MLB picker still parses a single date the way it always did",
+          [s["draft_group_id"] for s in draftkings._parse_slates(
+              _dk_payload, "2026-09-13", {1})] == [222],
+          "single-date call unchanged")
+
+    # DK returns one row per ROSTER SLOT, not per player.
+    _draftables = {"draftables": [
+        {"playerDkId": 1, "displayName": "Flex Guy", "teamAbbreviation": "KC",
+         "position": "RB", "salary": 8000, "rosterSlotId": 67,
+         "competition": {"name": "KC @ BUF"}},
+        {"playerDkId": 1, "displayName": "Flex Guy", "teamAbbreviation": "KC",
+         "position": "RB", "salary": 8000, "rosterSlotId": 70,
+         "competition": {"name": "KC @ BUF"}},
+        {"playerDkId": 2, "displayName": "Only Once", "teamAbbreviation": "BUF",
+         "position": "QB", "salary": 7000, "rosterSlotId": 66,
+         "competition": {"name": "KC @ BUF"}},
+        {"playerDkId": 3, "displayName": "Benched", "teamAbbreviation": "BUF",
+         "position": "WR", "salary": 4000, "rosterSlotId": 68, "isDisabled": True,
+         "competition": {"name": "KC @ BUF"}},
+    ]}
+    _parsed = draftkings._parse_draftables(_draftables)
+    check("a player eligible at more than one roster slot is returned ONCE -- DK lists him at "
+          "his position and again at FLEX, and on a real 12-game NFL slate that was 628 of 744 "
+          "players duplicated, which would have put the same man in a lineup twice",
+          [r["name"] for r in _parsed] == ["Flex Guy", "Only Once"],
+          str([r["name"] for r in _parsed]))
+    check("...and a disabled player is still excluded",
+          all(r["name"] != "Benched" for r in _parsed))
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
