@@ -28,11 +28,7 @@ over many separate passes was ported:
     bootstrap outcome-pool engine (nfl_variance.py).
   - No DK-entries-file import/mirroring (contest.py's
     build_dk_entries_simulated) and no post-hoc reshape/filter step
-    (contest.py's reshape_batch) -- neither was on the requested list.
-  - No `included_game_pks`/`projection_source` params --
-    nfl_optimizer.build_player_pool() doesn't support either yet (NFL
-    has no in-house projection model and no per-game slate filter),
-    so there's nothing to thread through here either.
+    (contest.py's reshape_batch).
 
 Player ids are strings throughout (DK's own numeric id, matching
 nfl_optimizer.py's convention), not the ints contest.py's MLB player
@@ -110,6 +106,7 @@ from app.services.contest import (
     _custom_payout_curve,
     _evaluate_batch_against_field,
     _field_baseline,
+    _duplication_risk,
     _field_weight_fn,
     _ownership_weight,
     _split_duplicate_payouts,
@@ -336,10 +333,19 @@ def _pick_stack_plan(
     return primary, secondary_teams
 
 
-def _build_candidate_pool(slate: dict[str, Any]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+def _build_candidate_pool(
+    slate: dict[str, Any],
+    *,
+    included_game_pks: list[Any] | None = None,
+    projection_source: str = "rotowire",
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
     """Shared setup: the eligible-by-slot pool and the fixed 9-slot fill
     order, or a ContestError if either is empty."""
-    pool = build_player_pool(slate)
+    pool = build_player_pool(
+        slate,
+        included_game_pks=included_game_pks,
+        projection_source=projection_source,
+    )
     if not pool:
         raise ContestError(
             "No optimizable players for this week -- upload both a "
@@ -397,6 +403,7 @@ def _sample_one_lineup(
     primary: dict[str, Any] | None = None,
     pass_catching_rb_ids: frozenset[str] = frozenset(),
     secondary_teams: list[tuple[str, int]] | None = None,
+    max_duplication_risk: float | None = None,
 ) -> dict[str, Any] | None:
     """
     Build one randomly-weighted lineup within the salary cap (and the
@@ -574,10 +581,21 @@ def _sample_one_lineup(
     # them from the picks.
     secondary_team_names = [t for t, _ in secondary_teams] if secondary_teams else []
 
+    # Cumulative (log-product) ownership: how likely another entry in
+    # the real field is an exact copy of this lineup. Rejecting here and
+    # letting the caller retry is the same mechanism the salary range
+    # uses, and the same one contest.py applies on the MLB side. Only
+    # the user's OWN entries filter on it -- the opponent field is
+    # supposed to contain its duplicates, because the real one does.
+    duplication_risk = _duplication_risk(picks)
+    if max_duplication_risk is not None and duplication_risk > max_duplication_risk:
+        return None
+
     return {
         "salary_used": salary_so_far,
         "projected_points": round(sum(p["projected_fpts"] for p in picks), 2),
         "total_ownership_pct": round(sum(p["ownership_pct"] for p in picks), 1),
+        "duplication_risk": duplication_risk,
         "primary_stack": primary["type"] if primary else None,
         "primary_team": primary_team,
         "secondary_teams": secondary_team_names,
@@ -606,6 +624,8 @@ def generate_field(
     max_attempts_per_lineup: int = 25,
     min_salary: int = DEFAULT_MIN_SALARY,
     max_salary: int = SALARY_CAP,
+    projection_source: str = "rotowire",
+    included_game_pks: list[Any] | None = None,
     seed: int | None = None,
     field_sharpness: str = "marquee",
     running_qb_ids: frozenset[str] = frozenset(),
@@ -641,7 +661,9 @@ def generate_field(
         )
     _validate_salary_range(min_salary, max_salary)
 
-    candidates_by_slot, slot_order = _build_candidate_pool(slate)
+    candidates_by_slot, slot_order = _build_candidate_pool(
+        slate, included_game_pks=included_game_pks, projection_source=projection_source
+    )
     field_weight_fn = _field_weight_fn(field_sharpness)
 
     rng = random.Random(seed)
@@ -702,7 +724,10 @@ def generate_entries(
     max_attempts_per_lineup: int = 30,
     min_salary: int = DEFAULT_MIN_SALARY,
     max_salary: int = SALARY_CAP,
+    projection_source: str = "rotowire",
+    included_game_pks: list[Any] | None = None,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None = None,
     running_qb_ids: frozenset[str] = frozenset(),
     pass_catching_rb_ids: frozenset[str] = frozenset(),
@@ -725,7 +750,9 @@ def generate_entries(
         raise ContestError(f"num_lineups can't exceed {MAX_USER_LINEUPS:,}.")
     _validate_salary_range(min_salary, max_salary)
 
-    candidates_by_slot, slot_order = _build_candidate_pool(slate)
+    candidates_by_slot, slot_order = _build_candidate_pool(
+        slate, included_game_pks=included_game_pks, projection_source=projection_source
+    )
 
     def _cap_to_count(pct: float) -> int:
         return max(1, round(pct / 100 * num_lineups))
@@ -762,6 +789,7 @@ def generate_entries(
                     min_salary=min_salary, max_salary=max_salary,
                     primary=plan_primary, pass_catching_rb_ids=pass_catching_rb_ids,
                     secondary_teams=list(plan_secondary) if plan_secondary else None,
+                    max_duplication_risk=max_duplication_risk,
                 )
                 if candidate is None:
                     continue
@@ -825,7 +853,10 @@ def _build_contest_and_entries(
     field_size: int | None,
     min_salary: int = DEFAULT_MIN_SALARY,
     max_salary: int = SALARY_CAP,
+    projection_source: str = "rotowire",
+    included_game_pks: list[Any] | None = None,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None,
     running_qb_ids: frozenset[str] = frozenset(),
     pass_catching_rb_ids: frozenset[str] = frozenset(),
@@ -854,7 +885,11 @@ def _build_contest_and_entries(
         slate, num_lineups,
         max_exposure_pct=max_exposure_pct,
         min_salary=min_salary, max_salary=max_salary,
-        allow_duplicates=allow_duplicates, seed=seed,
+        projection_source=projection_source,
+        included_game_pks=included_game_pks,
+        allow_duplicates=allow_duplicates,
+        max_duplication_risk=max_duplication_risk,
+        seed=seed,
         running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
     return contest, entries
@@ -870,7 +905,10 @@ def _build_entries_and_field(
     sample_size: int | None,
     min_salary: int = DEFAULT_MIN_SALARY,
     max_salary: int = SALARY_CAP,
+    projection_source: str = "rotowire",
+    included_game_pks: list[Any] | None = None,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None,
     field_sharpness: str = "marquee",
     running_qb_ids: frozenset[str] = frozenset(),
@@ -883,7 +921,11 @@ def _build_entries_and_field(
         slate, contest_type, num_lineups,
         max_exposure_pct=max_exposure_pct, field_size=field_size,
         min_salary=min_salary, max_salary=max_salary,
-        allow_duplicates=allow_duplicates, seed=seed,
+        projection_source=projection_source,
+        included_game_pks=included_game_pks,
+        allow_duplicates=allow_duplicates,
+        max_duplication_risk=max_duplication_risk,
+        seed=seed,
         running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
 
@@ -891,6 +933,8 @@ def _build_entries_and_field(
     field = generate_field(
         slate, field_sample,
         min_salary=min_salary, max_salary=max_salary,
+        projection_source=projection_source,
+        included_game_pks=included_game_pks,
         seed=(seed + 1) if seed is not None else None,
         field_sharpness=field_sharpness,
         running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
@@ -906,6 +950,8 @@ async def build_contest_lineups(
     season: int,
     seed: int | None = None,
     field_sharpness: str = "marquee",
+    projection_source: str = "rotowire",
+    included_game_pks: list[Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build a whole NFL CONTEST -- and nothing else. The generator half of
@@ -936,7 +982,9 @@ async def build_contest_lineups(
     contest["field_size"] = contest_size
     num_lineups = min(contest_size, MAX_USER_LINEUPS)
 
-    candidates_by_slot, _ = _build_candidate_pool(slate)
+    candidates_by_slot, _ = _build_candidate_pool(
+        slate, included_game_pks=included_game_pks, projection_source=projection_source
+    )
     running_qb_ids, pass_catching_rb_ids = await _classify_pool(candidates_by_slot, season)
 
     # generate_field, not generate_entries. The two are different
@@ -948,6 +996,8 @@ async def build_contest_lineups(
     entries = generate_field(
         slate, num_lineups,
         min_salary=0, max_salary=SALARY_CAP,
+        projection_source=projection_source,
+        included_game_pks=included_game_pks,
         seed=seed, field_sharpness=field_sharpness,
         running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
@@ -1007,9 +1057,12 @@ async def build_contest_entries(
     max_exposure_pct: float | None = None,
     field_size: int | None = None,
     sample_size: int | None = None,
+    projection_source: str = "rotowire",
+    included_game_pks: list[Any] | None = None,
     min_salary: int = DEFAULT_MIN_SALARY,
     max_salary: int = SALARY_CAP,
     allow_duplicates: bool = False,
+    max_duplication_risk: float | None = None,
     seed: int | None = None,
     field_sharpness: str = "marquee",
 ) -> dict[str, Any]:
@@ -1023,14 +1076,20 @@ async def build_contest_entries(
     (see _classify_pool()) needs one real fetch of `season`'s game logs
     before any lineup can be built toward the stack archetypes.
     """
-    candidates_by_slot, _ = _build_candidate_pool(slate)
+    candidates_by_slot, _ = _build_candidate_pool(
+        slate, included_game_pks=included_game_pks, projection_source=projection_source
+    )
     running_qb_ids, pass_catching_rb_ids = await _classify_pool(candidates_by_slot, season)
 
     contest, entries, field = _build_entries_and_field(
         slate, contest_type, num_lineups,
         max_exposure_pct=max_exposure_pct, field_size=field_size, sample_size=sample_size,
         min_salary=min_salary, max_salary=max_salary,
-        allow_duplicates=allow_duplicates, seed=seed, field_sharpness=field_sharpness,
+        projection_source=projection_source,
+        included_game_pks=included_game_pks,
+        allow_duplicates=allow_duplicates,
+        max_duplication_risk=max_duplication_risk,
+        seed=seed, field_sharpness=field_sharpness,
         running_qb_ids=running_qb_ids, pass_catching_rb_ids=pass_catching_rb_ids,
     )
     evaluation = _evaluate_batch_against_field(entries, field, contest)

@@ -448,6 +448,16 @@ async def build_contest_entries(
             "It belongs on the generator because the generator is what builds the opponents."
         ),
     ),
+    included_game_pks: list[str] | None = Body(
+        None,
+        embed=True,
+        description="Build the contest from these games only. A football week has more games than a DK slate does -- a Main slate is 12 of 16 -- so this is how the generator avoids putting a Thursday player in a Sunday contest.",
+    ),
+    projection_source: str = Body(
+        "rotowire",
+        embed=True,
+        description="'rotowire' (default) or 'inhouse' -- which FPTS and ownership numbers the contest is built from.",
+    ),
     reroll: int = Body(
         0,
         embed=True,
@@ -483,13 +493,15 @@ async def build_contest_entries(
             contest_size,
             season=nfl.PRIOR_SEASON,
             field_sharpness=field_sharpness,
+            included_game_pks=included_game_pks,
+            projection_source=projection_source,
             # Sharpness is in the seed key: a setting that shapes the
             # batch but is missing from it would reproduce the SAME
             # contest under different settings, which looks deterministic
             # while being wrong.
             seed=_nfl_sim_seed(
                 resolved_season, resolved_week, contest_type,
-                f"build:{contest_size}:{field_sharpness}", reroll,
+                f"build:{contest_size}:{field_sharpness}:{projection_source}:{included_game_pks}", reroll,
             ),
         )
     except nfl_contest.ContestError as exc:
