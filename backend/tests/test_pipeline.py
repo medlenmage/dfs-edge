@@ -1715,6 +1715,36 @@ async def main() -> int:
           multi["exposure"] == sorted(multi["exposure"], key=lambda e: -e["count"]),
           str(multi["exposure"]))
 
+    # A DOUBLEHEADER puts the same team on the board twice, so every one
+    # of its players lands in the pool once per game. Measured on the real
+    # 2026-09-04 slate: 18 of 262 pool entries were duplicates, the whole
+    # Cleveland roster, because they were playing two.
+    #
+    # This is not cosmetic. The MILP keys its variables on (id, slot), so
+    # two entries for one player share a variable and then add it to that
+    # slot's count constraint twice -- the slot counts him as two players,
+    # salary double-counts him, and locking him goes outright infeasible.
+    dh_slate = copy.deepcopy(mul_slate)
+    dh_slate["games"].append(copy.deepcopy(dh_slate["games"][0]))
+    dh_slate["games"][-1]["game_pk"] = 88099  # the nightcap
+    dh_pool = optimizer.build_player_pool(dh_slate)
+    dh_ids = [p["id"] for p in dh_pool]
+    check("build_player_pool gives a doubleheader team's player ONE pool entry, not one per game",
+          len(dh_ids) == len(set(dh_ids)),
+          f"{len(dh_ids)} entries for {len(set(dh_ids))} players")
+
+    # The consequence, checked directly rather than inferred: a player who
+    # happens to be playing twice today is still rosterable, and still
+    # counts as exactly one player in the lineup he lands in.
+    dh_victim = mul_hitters_home[0]["id"]
+    dh_locked = optimizer.generate_lineups(dh_slate, num_lineups=1, locked_ids=[dh_victim])
+    dh_picks = [pl for slot in dh_locked["lineups"][0]["slots"].values() for pl in slot]
+    check("a doubleheader player can actually be locked (this raised OptimizerError before)",
+          dh_victim in {pl["id"] for pl in dh_picks}, str(len(dh_picks)))
+    check("and a doubleheader lineup still rosters 10 DISTINCT players",
+          len(dh_picks) == 10 and len({pl["id"] for pl in dh_picks}) == 10,
+          f"{len(dh_picks)} slots, {len({pl['id'] for pl in dh_picks})} distinct")
+
     thin_result = optimizer.generate_lineups(opt_slate, num_lineups=10)
     check("multi-lineup: gracefully returns fewer than requested once the pool runs dry",
           0 < len(thin_result["lineups"]) < 10, str(len(thin_result["lineups"])))

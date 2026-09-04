@@ -627,3 +627,34 @@ tr.detail:hover td { background: var(--surface-detail); }
   .stage { border-right: 0; border-bottom: 1px solid var(--gridline); }
   .stage:last-child { border-bottom: 0; }
 }
+
+/* ---------------------------------------------------------------
+   Player pool: a dense working table, not a reading table.
+
+   The pool is scanned and clicked, not read line by line -- with
+   salary, two projections and two ownership numbers per row it is
+   eight columns deep, and the default 9px padding pushed a 12-game
+   NFL slate's 744 players to roughly 30 rows a screen. Tightening
+   the cells and dropping the font a point fits about half again as
+   many without touching any other table in the app.
+   ------------------------------------------------------------- */
+table.compact { font-size: 12.5px; }
+table.compact th { padding: 6px 8px; font-size: 11px; }
+table.compact td { padding: 4px 8px; }
+table.compact td.name { font-size: 12.5px; }
+table.compact .pill-toggle { padding: 1px 6px; font-size: 10.5px; }
+
+/* Position filter tabs above a player pool. Reuses the segmented
+   look of the tab bars elsewhere rather than inventing a new one. */
+.pos-tabs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.pos-tabs button {
+  padding: 3px 10px; font-size: 12px; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--gridline);
+  color: var(--text-muted);
+}
+.pos-tabs button:hover { color: var(--text-primary); }
+.pos-tabs button.active {
+  background: var(--edge); border-color: var(--edge);
+  color: var(--edge-contrast, #fff); font-weight: 500;
+}
+.pos-tabs .count { opacity: 0.65; margin-left: 4px; font-variant-numeric: tabular-nums; }
