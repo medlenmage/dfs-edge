@@ -179,9 +179,15 @@ _NOISE = re.compile(
     r"^\s*(?:#+\s*)?(?:lineup|entry|build|option|#)\s*\d*\s*[:.)-]?\s*$|^\s*[-=_`*]{2,}\s*$|^\s*\d+\s*$",
     re.IGNORECASE,
 )
-# Leading list markers and slot labels: "1.", "- ", "* ", "P:", "OF3 -".
+# Leading list markers and slot labels: "1.", "- ", "* ", "P:", "OF3 -",
+# and football's own "QB:", "WR2 -", "FLEX:", "DST:".
+#
+# Both sports share this because parse_lineups() is otherwise entirely
+# sport-agnostic, and the NFL labels are harmless to MLB: each only
+# strips when followed by a colon or dash, which no player name does.
 _PREFIX = re.compile(
-    r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.)]\s*)?(?:(?:P|SP|RP|C|1B|2B|3B|SS|OF)\d?\s*[:\-]\s*)?",
+    r"^\s*(?:[-*•]\s*)?(?:\d+\s*[.)]\s*)?"
+    r"(?:(?:P|SP|RP|C|1B|2B|3B|SS|OF|QB|RB|WR|TE|FLEX|DST|DEF)\d?\s*[:\-]\s*)?",
     re.IGNORECASE,
 )
 # Trailing junk a model likes to add: "($5,400)", "- 12.3 pts", "(NYY)".

@@ -25,10 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import cache  # noqa: E402
 from app.clients import draftkings, fantasylabs, nfl, nfl_pbp, rotowire_nfl  # noqa: E402
 from app.services import (  # noqa: E402
+    manual_builder,
     nfl_contest,
     nfl_correlations,
     nfl_dk_points,
     nfl_inhouse_projections,
+    nfl_manual_builder,
     nfl_optimizer,
     nfl_scoring,
     nfl_shares,
@@ -2355,6 +2357,78 @@ def main() -> int:
     check("...but the opponent FIELD is not filtered on it, because a real field does contain "
           "its duplicates and pretending otherwise would misprice every entry ranked against it",
           len(_field) == 20)
+
+    print("")
+    print("NFL manual lineup builder (nfl_manual_builder.py)")
+
+    _ms = _oslate()
+    _mpool = nfl_optimizer.build_player_pool(_ms)
+    _brief = nfl_manual_builder.slate_brief(_mpool, season=2026, week=1,
+                                            games=_ms["games"], include_rules=False)
+    check("the brief is one self-contained block: roster rules, the cap, the games and every "
+          "draftable player by position -- enough for a Claude with no access to this machine",
+          all(bit in _brief for bit in ("1 QB, 2 RB, 3 WR, 1 TE, 1 FLEX, 1 DST",
+                                        "$50,000", "Quarterback (1)", "Defence / special teams",
+                                        "AAA", "What to send back")),
+          f"{len(_brief)} chars")
+    check("...and it spells out what FLEX actually accepts, since that is the rule a model is "
+          "most likely to get wrong",
+          "FLEX takes a RB, WR or TE" in _brief)
+
+    # The parsing half is SHARED with MLB rather than copied -- it only
+    # needed to learn football's slot labels.
+    _mtext = "\n".join(["Lineup 1"] + [
+        f"{lbl}: {nm}" for lbl, nm in [
+            ("QB", "AAA QB"), ("RB1", "AAA RB0"), ("RB2", "AAA RB1"),
+            ("WR1", "AAA WR0"), ("WR2", "AAA WR1"), ("WR3", "AAA WR2"),
+            ("TE", "AAA TE0"), ("FLEX", "BBB WR0"), ("DST", "BBB DST"),
+        ]
+    ])
+    _parsed = manual_builder.parse_lineups(_mtext, roster_size=nfl_optimizer.ROSTER_SIZE)
+    check("football's slot labels (QB:, RB1 -, FLEX:, DST:) are stripped by the SAME parser MLB "
+          "uses -- it was sport-agnostic apart from which labels it knew",
+          len(_parsed) == 1 and _parsed[0]["players"][0] == "AAA QB",
+          str(_parsed[0]["players"][:3]) if _parsed else "none")
+    check("...and MLB's own labels still parse, so teaching it football broke nothing",
+          manual_builder.parse_lineups(
+              "P: Ace\nP: Two\nC: Cat\n1B: One\n2B: Two\n3B: Three\nSS: Short\n"
+              "OF: A\nOF: B\nOF: C", roster_size=10)[0]["players"][0] == "Ace")
+
+    _taken = nfl_manual_builder.intake(_parsed, _mpool)
+    check("a legal hand-built lineup is accepted and priced against the real pool",
+          len(_taken["accepted"]) == 1
+          and _taken["accepted"][0]["salary_used"] <= nfl_optimizer.SALARY_CAP,
+          f"${_taken['accepted'][0]['salary_used']}" if _taken["accepted"]
+          else str(_taken["rejected"]))
+
+    def _reject(names):
+        return nfl_manual_builder.intake(
+            [{"players": names, "label": "x"}], _mpool)["rejected"]
+
+    _names = _parsed[0]["players"]
+    check("an unknown name is rejected BY NAME rather than the lineup silently vanishing",
+          "isn't on this slate" in _reject(["Nobody At All"] + _names[1:])[0]["reason"])
+    check("the same player twice is rejected",
+          "twice" in _reject([_names[0]] + [_names[0]] + _names[2:])[0]["reason"])
+    check("a lineup of the wrong size is rejected with the count",
+          "needs exactly 9" in _reject(_names[:8])[0]["reason"])
+
+    # The slot check has to be a real assignment, not a position count.
+    _five_wr = ["AAA QB", "AAA RB0", "AAA RB1", "AAA WR0", "AAA WR1", "AAA WR2",
+                "BBB WR0", "BBB WR1", "AAA DST"]
+    check("nine players with no TE are rejected -- position COUNTS alone cannot tell a legal "
+          "roster from an illegal one once a FLEX exists, so this searches for a real slot "
+          "assignment and reports the shape that failed",
+          "can't fill" in _reject(_five_wr)[0]["reason"],
+          _reject(_five_wr)[0]["reason"][:70])
+    _three_rb = ["AAA QB", "AAA RB0", "AAA RB1", "AAA RB2", "AAA WR0", "AAA WR1",
+                 "AAA WR2", "AAA TE0", "AAA DST"]
+    check("...while three RBs and three WRs IS legal, because the third back takes the FLEX -- "
+          "the case a count-based check would wrongly refuse",
+          len(nfl_manual_builder.intake(
+              [{"players": _three_rb, "label": "x"}], _mpool)["accepted"]) == 1,
+          str(nfl_manual_builder.intake(
+              [{"players": _three_rb, "label": "x"}], _mpool)["rejected"]))
 
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")

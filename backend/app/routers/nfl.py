@@ -13,6 +13,8 @@ from app import cache
 from app.clients import draftkings, nfl, rotowire_nfl
 from app.clients.http import ApiError
 from app.services import (
+    manual_builder,
+    nfl_manual_builder,
     nfl_contest,
     nfl_optimizer,
     nfl_slate,
@@ -88,6 +90,187 @@ async def upload_salaries(
         )
     salaries.store(nfl_slate.week_key(resolved_season, resolved_week), rows)
     return {"season": resolved_season, "week": resolved_week, "players_loaded": len(rows)}
+
+
+_MY_LINEUPS_TTL = 60 * 60 * 24 * 3  # a football week is not a day
+
+
+def _nfl_my_lineups_key(season: int, week: int) -> str:
+    return f"nfl_my_lineups:{season}:{week}"
+
+
+def _nfl_my_lineups(season: int, week: int) -> list[dict[str, Any]]:
+    return cache.get(_nfl_my_lineups_key(season, week)) or []
+
+
+def _nfl_pool_payload(season: int, week: int, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "season": season,
+        "week": week,
+        "count": len(entries),
+        "lineups": entries,
+        "avg_salary": (
+            round(sum(e["salary_used"] for e in entries) / len(entries)) if entries else 0
+        ),
+        "avg_projected_points": (
+            round(sum(e["projected_points"] for e in entries) / len(entries), 2)
+            if entries else 0.0
+        ),
+        "avg_total_ownership_pct": (
+            round(sum(e.get("total_ownership_pct") or 0 for e in entries) / len(entries), 1)
+            if entries else 0.0
+        ),
+    }
+
+
+@router.get("/manual/brief")
+async def manual_brief(
+    season: int | None = Query(None),
+    week: int | None = Query(None),
+    include_rules: bool = Query(True, description="Include this account's own process rules"),
+    included_game_pks: str | None = Query(
+        None, description="Comma-separated game ids to narrow the board to"
+    ),
+) -> dict[str, Any]:
+    """
+    The whole slate as one pasteable markdown brief -- roster rules, the
+    games, and every draftable player by position with salary,
+    projection and ownership.
+
+    Hand it to any Claude with no access to this machine and it has
+    enough to build legal lineups. Send what comes back to POST
+    /my-lineups/from-text, and they land in the same pool the optimizer
+    feeds, on the same terms.
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    slate = await nfl_slate.build_slate(resolved_season, resolved_week)
+    games = [g["game_id"] for g in slate.get("games") or []]
+    wanted = [g.strip() for g in included_game_pks.split(",")] if included_game_pks else None
+    try:
+        pool = nfl_optimizer.build_player_pool(slate, included_game_pks=wanted)
+    except nfl_optimizer.OptimizerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not pool:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No optimizable players for this week -- load a DraftKings slate and "
+                "RotoWire projections first."
+            ),
+        )
+    brief = nfl_manual_builder.slate_brief(
+        pool,
+        season=resolved_season,
+        week=resolved_week,
+        games=slate.get("games"),
+        include_rules=include_rules,
+    )
+    return {
+        "season": resolved_season,
+        "week": resolved_week,
+        "players": len(pool),
+        "games": len(games),
+        "brief": brief,
+    }
+
+
+@router.get("/my-lineups")
+async def list_nfl_my_lineups(
+    season: int | None = Query(None), week: int | None = Query(None)
+) -> dict[str, Any]:
+    """
+    The lineups you have set aside to actually enter this week -- built
+    by the optimizer or typed in by hand, as opposed to the contest
+    generator's field.
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    return _nfl_pool_payload(
+        resolved_season, resolved_week, _nfl_my_lineups(resolved_season, resolved_week)
+    )
+
+
+@router.delete("/my-lineups")
+async def clear_nfl_my_lineups(
+    season: int | None = Query(None),
+    week: int | None = Query(None),
+    entry_ids: str | None = Query(
+        None,
+        description=(
+            "Comma-separated entry_ids to drop. Omit to clear the whole pool -- so a "
+            "half-built pool can be pruned without starting over."
+        ),
+    ),
+) -> dict[str, Any]:
+    """Remove specific lineups from the pool, or clear it entirely."""
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    key = _nfl_my_lineups_key(resolved_season, resolved_week)
+    if entry_ids:
+        drop = {e.strip() for e in entry_ids.split(",") if e.strip()}
+        kept = [e for e in _nfl_my_lineups(resolved_season, resolved_week)
+                if e.get("entry_id") not in drop]
+        cache.put(key, kept, _MY_LINEUPS_TTL)
+        return _nfl_pool_payload(resolved_season, resolved_week, kept)
+    cache.put(key, [], _MY_LINEUPS_TTL)
+    return _nfl_pool_payload(resolved_season, resolved_week, [])
+
+
+@router.post("/my-lineups/from-text")
+async def nfl_my_lineups_from_text(
+    season: int | None = Body(None, embed=True),
+    week: int | None = Body(None, embed=True),
+    text: str = Body(..., embed=True, description="Lineups as text, in any reasonable shape"),
+    replace: bool = Body(
+        False, embed=True, description="Replace the pool rather than adding to it"
+    ),
+) -> dict[str, Any]:
+    """
+    Read hand-built lineups out of free text and add the legal ones to
+    this week's pool.
+
+    Deliberately forgiving about FORMAT -- numbered lists, CSV rows,
+    "WR2: Name" slot labels, blank-line-separated blocks -- and strict
+    about CONTENT: every name is resolved against the real optimizable
+    pool and every roster is checked for the cap, duplicates and a
+    genuine slot assignment. Anything rejected comes back with the
+    reason rather than silently vanishing.
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    slate = await nfl_slate.build_slate(resolved_season, resolved_week)
+    try:
+        pool = nfl_optimizer.build_player_pool(slate)
+    except nfl_optimizer.OptimizerError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not pool:
+        raise HTTPException(
+            status_code=400,
+            detail="No optimizable players for this week -- load a slate and projections first.",
+        )
+
+    parsed = manual_builder.parse_lineups(text, roster_size=nfl_optimizer.ROSTER_SIZE)
+    if not parsed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Couldn't find any lineups in that text -- expected blocks of "
+                f"{nfl_optimizer.ROSTER_SIZE} player names."
+            ),
+        )
+    result = nfl_manual_builder.intake(parsed, pool, source="manual")
+
+    key = _nfl_my_lineups_key(resolved_season, resolved_week)
+    existing = [] if replace else _nfl_my_lineups(resolved_season, resolved_week)
+    merged = list(existing)
+    for i, entry in enumerate(result["accepted"]):
+        # A stable id so a single lineup can be dropped later without
+        # the rest of the pool shifting underneath it.
+        entry["entry_id"] = f"{resolved_season}-{resolved_week}-{len(merged) + i + 1}"
+        merged.append(entry)
+    cache.put(key, merged, _MY_LINEUPS_TTL)
+
+    payload = _nfl_pool_payload(resolved_season, resolved_week, merged)
+    payload["added"] = len(result["accepted"])
+    payload["rejected"] = result["rejected"]
+    return payload
 
 
 @router.get("/dk-slates")
