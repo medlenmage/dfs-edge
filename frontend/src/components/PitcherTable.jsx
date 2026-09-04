@@ -7,7 +7,10 @@ const DRIVER_LABELS = {
   strikeout_potential: 'strikeout upside',
   team_runs_against: 'the Vegas total against him',
   contact_quality_allowed: 'contact quality allowed',
-  own_quality: 'his season ERA',
+  // Not "his season ERA" any more -- this component grades on SIERA,
+  // falling back to xFIP, and only reaches ERA for a pitcher with no
+  // Statcast profile. The Skill column shows which one applied.
+  own_quality: 'his underlying skill',
   park: 'the ballpark',
   weather: 'weather',
 }
@@ -81,6 +84,17 @@ export function PitcherTable({ slate }) {
         driver: p.edge.top_driver,
         era: p.season?.era,
         k9: p.season?.k_per_9,
+        // What actually grades him. ERA is a result -- it carries the
+        // defense behind him and which fly balls happened to leave the
+        // yard -- so the model scores SIERA (falling back to xFIP, and
+        // to ERA only when a pitcher has no Statcast profile). These
+        // were driving the edge score before they were ever shown,
+        // which made the board look like it still ranked on ERA.
+        siera: p.skill?.siera ?? null,
+        xfip: p.skill?.xfip ?? null,
+        cswPct: p.skill?.csw_pct ?? null,
+        swstrPct: p.skill?.swstr_pct ?? null,
+        qualityBasis: p.edge?.components?.own_quality?.basis ?? null,
         impliedRunsAgainst: opp.implied_runs,
         salary: p.salary?.salary ?? null,
         value: p.salary?.value ?? null,
@@ -159,7 +173,18 @@ export function PitcherTable({ slate }) {
             <th>Pitcher</th>
             <th>Start</th>
             <th>Edge</th>
-            <th className="num">Season</th>
+            <th
+              className="num"
+              title="His actual results this season. Context, not what ranks him — ERA carries the defense behind him and the sequencing of when hits landed."
+            >
+              Season
+            </th>
+            <th
+              className="num"
+              title="What the edge score actually grades him on. SIERA and xFIP strip out defense, luck and sequencing (across 427 qualified pitchers, ERA's spread is 1.28 against SIERA's 0.70 — most of the difference is noise). CSW% is called strikes plus whiffs over total pitches, the best single read on strikeout skill: league average is about 27–28%, above 30% is elite."
+            >
+              Skill
+            </th>
             <th className="num">Runs against</th>
             <th className="num">Salary</th>
             <th className="num">Value</th>
@@ -191,6 +216,26 @@ export function PitcherTable({ slate }) {
               <td className="num">
                 {r.era != null ? `${r.era} ERA` : '—'}
                 {r.k9 != null && <div className="sub-line">{r.k9} K/9</div>}
+              </td>
+              <td className="num">
+                {r.siera != null || r.xfip != null ? (
+                  <>
+                    <div>
+                      {r.siera != null ? `${r.siera.toFixed(2)} SIERA` : `${r.xfip.toFixed(2)} xFIP`}
+                    </div>
+                    <div className="sub-line">
+                      {r.siera != null && r.xfip != null && `${r.xfip.toFixed(2)} xFIP · `}
+                      {r.cswPct != null ? `${(r.cswPct * 100).toFixed(1)}% CSW` : '—'}
+                    </div>
+                  </>
+                ) : (
+                  // Not a blank: a pitcher with too little history for a
+                  // skill read is genuinely graded on ERA, and saying so
+                  // is more useful than an em-dash that reads as a bug.
+                  <span className="dim" title="Too little season history for a skill read — this one is still graded on ERA.">
+                    on ERA
+                  </span>
+                )}
               </td>
               <td className="num">
                 {r.impliedRunsAgainst != null ? r.impliedRunsAgainst.toFixed(1) : '—'}
