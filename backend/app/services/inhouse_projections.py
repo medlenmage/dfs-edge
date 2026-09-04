@@ -457,22 +457,59 @@ _SALARY_TIER_WEIGHT = 0.3
 # batting_order_pa_factor) but never the ownership one, even though the
 # field reads a lineup card before it buys anyone.
 #
-# The factor is 1.0 at leadoff and falls to 0 by the 7-hole, matching the
-# shape of the measured bias rather than a guess: the error is flat
-# across slots 7-9, so a term that kept falling there would invent a
-# gradient the data says is not there. A hitter with no known slot gets
+# The factor is 1.0 at leadoff and decays to 0 at the 9-hole.
+#
+# It originally flattened at the 7-hole, because the GLOBAL per-player
+# bias above is flat across slots 7-9 and a term that kept falling there
+# looked like it would invent a gradient. That was the wrong read of the
+# right table. Measuring each slot's share OF ITS OWN TEAM's ownership
+# (scripts/diagnose_team_ownership.py) shows the real decay continues
+# well past the 7-hole -- real shares run 8.96%, 6.87%, 5.92% for slots
+# 7, 8 and 9 -- and flattening there left the model handing 8- and
+# 9-hole hitters 1.16x and 1.34x their real share of a stack. The two
+# tables are not in conflict: globally the model was about equally wrong
+# on all three slots, while WITHIN a team they are clearly different.
+# A bottom-of-the-order bat on a chalky team was inheriting that team's
+# whole environment bonus undamped. A hitter with no known slot gets
 # no term at all, which correctly pushes him DOWN relative to confirmed
 # starters -- players with no lineup spot were drafted 0.21% of the time
 # against the 1.31% the model was giving them.
 #
-# Weight fitted by sweep against those same 10 slates -- see
-# scripts/sweep_ownership_batting_order.py. Two independent criteria
-# picked the same value, which is the reassuring outcome: lowest MAE
-# (2.337 -> 2.206) and flattest slot gradient (3.656 -> 1.227, a 66% cut
-# in the systematic part of the error) both bottom out at 1.0, and both
-# get worse past 1.5 where the term starts over-correcting the top of
-# the order. The env var is for the sweep, not for tuning in production.
-_BATTING_ORDER_WEIGHT = float(os.environ.get("DFS_BATTING_ORDER_WEIGHT", "1.0"))
+# Weight fitted by sweep -- see scripts/sweep_ownership_batting_order.py.
+# THREE independent routes land on ~1.25, which is why it is trusted:
+#   * inverting the real within-team share curve through the softmax
+#     temperature implies a slot-1-to-slot-9 score spread of 1.214
+#   * the sweep's flattest slot gradient is at 1.25 (0.952)
+#   * MAE at 1.25 (1.903) is inside the noise of the best value (1.901
+#     at 1.50), and both are far below the 2.146 of having no term
+# Was 1.0 while the decay shape was a straight line; the shape changed
+# (see _ORDER_FACTOR) and the weight moved with it. The env var is for
+# the sweep, not for tuning in production.
+_BATTING_ORDER_WEIGHT = float(os.environ.get("DFS_BATTING_ORDER_WEIGHT", "1.25"))
+
+# The SHAPE of the decay, derived from the data rather than assumed to be
+# a straight line.
+#
+# Measured each slot's share of its own team's real ownership across the
+# archive (scripts/diagnose_team_ownership.py): 17.85, 15.69, 14.93,
+# 12.75, 11.59, 9.54, 8.96, 6.87, 5.92 for slots 1-9. Since ownership
+# comes out of a softmax, inverting those shares back through the
+# temperature gives the score offset each slot is really worth, and
+# normalising to the leadoff spot gives this table. It is close to a
+# straight line but not one: flatter through the middle of the order than
+# linear (slot 5 is worth 0.61, not 0.50) and then falling off a cliff
+# from the 7-hole to the 8-hole, which is roughly where a real field
+# stops caring who the hitter is.
+#
+# Fitted on the same 10 slates it is scored against, which is a genuine
+# overfitting risk with a 9-point table -- it is kept honest by checking
+# that the GLOBAL per-player MAE (a different metric, in
+# diagnose_ownership_multislate.py) improves too rather than just the
+# within-team fit it was derived from. Re-derive it as the archive grows.
+_ORDER_FACTOR = {
+    1: 1.000, 2: 0.883, 3: 0.838, 4: 0.695, 5: 0.609,
+    6: 0.432, 7: 0.376, 8: 0.135, 9: 0.000,
+}
 
 # A hitter batting 7-9 at under $3,000 is a punt, and the field treats
 # him like one. Across those same 10 slates, 224 real hitters fit that
@@ -500,9 +537,9 @@ def batting_order_ownership_factor(
     guy hitting second, whether or not that is where he usually hits.
     """
     slot = confirmed or projected
-    if not slot or not 1 <= slot <= 9:
+    if not slot:
         return None
-    return max(0.0, (_PUNT_MAX_ORDER_SLOT - slot) / (_PUNT_MAX_ORDER_SLOT - 1))
+    return _ORDER_FACTOR.get(slot)
 
 # THE TEAM-STACK LAYER (hitters only) -- see WHY A TEAM-STACK LAYER
 # EXISTS in project_ownership()'s docstring for the real measured
@@ -514,7 +551,7 @@ def batting_order_ownership_factor(
 # runs alone rank-correlates with its real summed hitter ownership at
 # r=+0.80 across 15 real slates, stronger than any per-player signal in
 # this module.
-_TEAM_STACK_WEIGHT = 4.0
+_TEAM_STACK_WEIGHT = float(os.environ.get("DFS_TEAM_STACK_WEIGHT", "2.5"))
 
 # The two team-level signals, blended into one 0-1 desirability score.
 # Both measured against real archived DK contest standings (see

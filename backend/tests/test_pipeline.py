@@ -2949,18 +2949,32 @@ async def main() -> int:
 
     # The measured bias was flat across slots 7-9, so the factor must be
     # flat there too rather than inventing a gradient the data denies.
-    check("batting_order_ownership_factor is 1.0 at leadoff and 0 from the 7-hole back, "
-          "matching the SHAPE of the measured bias rather than assuming one",
+    # The decay runs all the way to the 9-hole, and is NOT a straight
+    # line. It originally flattened at slot 7, on the global per-player
+    # bias table -- which was the wrong read: measuring each slot's share
+    # of its OWN TEAM's ownership showed the real decay continues past
+    # the 7-hole (8.96 / 6.87 / 5.92 for slots 7-9), and flattening there
+    # left 8- and 9-hole bats at 1.16x and 1.34x their real share of a
+    # stack. The shape now comes from inverting that real curve back
+    # through the softmax temperature.
+    check("the order factor runs 1.0 at leadoff down to 0.0 at the 9-hole -- the decay does "
+          "NOT stop at the 7-hole, which is what left bottom-of-order bats over-owned "
+          "inside a chalky stack",
           inhouse_projections.batting_order_ownership_factor(1, None) == 1.0
-          and inhouse_projections.batting_order_ownership_factor(7, None) == 0.0
-          and inhouse_projections.batting_order_ownership_factor(9, None) == 0.0,
+          and inhouse_projections.batting_order_ownership_factor(9, None) == 0.0
+          and 0.0 < inhouse_projections.batting_order_ownership_factor(7, None) < 0.5,
           str([inhouse_projections.batting_order_ownership_factor(i, None) for i in range(1, 10)]))
-    check("and it falls monotonically from slot 1 through slot 7",
+    check("and it falls monotonically across every slot",
           all(
               inhouse_projections.batting_order_ownership_factor(i, None)
-              >= inhouse_projections.batting_order_ownership_factor(i + 1, None)
-              for i in range(1, 7)
+              > inhouse_projections.batting_order_ownership_factor(i + 1, None)
+              for i in range(1, 9)
           ), "")
+    check("the shape is data-derived, not linear -- the real curve is flatter through the "
+          "middle of the order than a straight line and then drops off a cliff at the 8-hole",
+          inhouse_projections.batting_order_ownership_factor(5, None) > 0.55
+          and inhouse_projections.batting_order_ownership_factor(8, None) < 0.2,
+          str(inhouse_projections._ORDER_FACTOR))
     check("an unknown slot returns None (no term at all) rather than a fabricated middle "
           "value -- players with no lineup spot were really drafted 0.21% of the time",
           inhouse_projections.batting_order_ownership_factor(None, None) is None
@@ -3011,6 +3025,57 @@ async def main() -> int:
     check("and a cheap bottom-of-order hitter can still project into double digits below "
           "the cap rather than being flattened to zero",
           punt_owned[10] > 1.0, str(punt_owned))
+
+    print("\nOwnership: team-level concentration")
+
+    # A chalky team and a dead one, eight bats each, identical within
+    # themselves. MLB ownership is spent team-first, so the gap between
+    # these two is the single biggest driver on a real board -- and the
+    # model used to blow it out to 82x on a live slate where the real
+    # field ran about 13x.
+    def team_of(prefix, team, implied, base_id):
+        return [
+            own_bat(base_id + i, f"{prefix}{i}", "OF", 4000, 9.0, i + 1, team=team)
+            | {"implied_runs": implied}
+            for i in range(8)
+        ]
+
+    hot = team_of("Hot", "HOT", 6.2, 100)
+    cold = team_of("Cold", "COLD", 3.1, 200)
+    mid = team_of("Mid", "MID", 4.6, 300)
+    two_team = inhouse_projections.project_ownership(hot + cold + mid)
+    hot_total = sum(two_team[p["id"]] for p in hot)
+    cold_total = sum(two_team[p["id"]] for p in cold)
+
+    check("a better run environment really does draw more ownership -- the ordering the "
+          "team-stack layer exists for is preserved",
+          hot_total > cold_total, str((round(hot_total, 1), round(cold_total, 1))))
+
+    # Measured across 10 real archived slates: the real field's best-to-
+    # worst team ratio averaged far below what the model was producing,
+    # and real top teams average 122% of an 800% hitter pool. A ratio in
+    # the tens is real; in the high tens-of-x it is a temperature bug.
+    check("but the gap between the best and worst environment is COMPRESSED -- an unbounded "
+          "exponential here is what put 143% of an 800% pool on one team live, against a "
+          "real-field average of 122%",
+          hot_total / max(cold_total, 0.01) < 30,
+          f"ratio {hot_total / max(cold_total, 0.01):.1f}x")
+
+    # The failure this pass was really about: a 9-hole bat on a chalky
+    # team inheriting that team's whole environment bonus undamped.
+    hot_by_slot = {p["name"]: two_team[p["id"]] for p in hot}
+    lead, nine = hot_by_slot["Hot0"], hot_by_slot["Hot7"]
+    check("batting order decays WITHIN a stack, so the 9-hole bat on the chalkiest team on "
+          "the board does not ride its environment bonus up to leadoff ownership",
+          nine < lead * 0.6, str((round(lead, 2), round(nine, 2))))
+    check("and that 9-hole bat still takes only a small share of his own team's total -- "
+          "real 9-hole hitters draw 5.9% of their team's ownership",
+          nine / hot_total < 0.11, f"{100 * nine / hot_total:.1f}% of the team")
+
+    check("the team-stack weight is the temperature that controls all of this, and it is "
+          "fitted against real archived team totals rather than picked",
+          inhouse_projections._TEAM_STACK_WEIGHT == 2.5,
+          str(inhouse_projections._TEAM_STACK_WEIGHT))
 
     print("\nPitcher skill beyond ERA (pitcher_metrics.py / pitcher_skill.py)")
 
