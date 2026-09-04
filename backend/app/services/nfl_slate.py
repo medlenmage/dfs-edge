@@ -113,6 +113,24 @@ def _team_players(
             continue
         position = row["position"]
         proj = player_match.match(projection_lookup, row["name"], row["team"])
+        if proj is None and position == "DST":
+            # A DST is identified by its TEAM, not by a name that the
+            # two sources spell differently: DraftKings lists "Panthers"
+            # where RotoWire lists "Carolina Panthers", so every single
+            # defence failed to match and came through with no
+            # projection. DST is a required roster slot, so that alone
+            # made it impossible to build any NFL lineup at all from
+            # live data -- the optimizer reported "no legal lineup"
+            # with a full pool of 429 skill players and zero defences.
+            proj = next(
+                (
+                    r
+                    for (row_team, _), r in projection_lookup.items()
+                    if row_team == team_norm
+                    and (r.get("position") or "").upper().startswith("DST")
+                ),
+                None,
+            )
         # DST has no defense-vs-DST data to lean on; its own useful pace
         # signal is the *opponent's* plays run, not this team's own.
         if position == "DST":

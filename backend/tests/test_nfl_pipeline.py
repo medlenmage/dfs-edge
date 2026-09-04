@@ -2173,6 +2173,151 @@ def main() -> int:
     check("...and a disabled player is still excluded",
           all(r["name"] != "Benched" for r in _parsed))
 
+    print("")
+    print("NFL optimizer parity with MLB's (nfl_optimizer.py)")
+
+    def _oslate():
+        """Two games, four teams, deep enough at every slot to solve."""
+        def team(abbrev, opp, base):
+            players = [{"dk_id": f"{abbrev}-QB", "name": f"{abbrev} QB", "team": abbrev,
+                        "position": "QB", "salary": 6000,
+                        "projection": {"fpts": base + 4, "ownership_pct": 10.0}}]
+            for i in range(4):
+                players.append({"dk_id": f"{abbrev}-WR{i}", "name": f"{abbrev} WR{i}",
+                                "team": abbrev, "position": "WR", "salary": 5000 + 100 * i,
+                                "projection": {"fpts": base + 3 - i * 0.4,
+                                               "ownership_pct": 12.0 - i}})
+            for i in range(3):
+                players.append({"dk_id": f"{abbrev}-RB{i}", "name": f"{abbrev} RB{i}",
+                                "team": abbrev, "position": "RB", "salary": 5200 + 100 * i,
+                                "projection": {"fpts": base + 2 - i * 0.5,
+                                               "ownership_pct": 11.0 - i}})
+            for i in range(2):
+                players.append({"dk_id": f"{abbrev}-TE{i}", "name": f"{abbrev} TE{i}",
+                                "team": abbrev, "position": "TE", "salary": 3800 + 100 * i,
+                                "projection": {"fpts": base + 1 - i, "ownership_pct": 8.0}})
+            players.append({"dk_id": f"{abbrev}-DST", "name": f"{abbrev} DST", "team": abbrev,
+                            "position": "DST", "salary": 2600,
+                            "projection": {"fpts": base, "ownership_pct": 7.0}})
+            for p in players:
+                p["opponent"] = opp
+            return {"abbrev": abbrev, "players": players, "implied_total": 24.0}
+
+        return {"games": [
+            {"game_id": "G1", "home": team("AAA", "BBB", 12.0), "away": team("BBB", "AAA", 11.0)},
+            {"game_id": "G2", "home": team("CCC", "DDD", 11.5), "away": team("DDD", "CCC", 10.5)},
+        ]}
+
+    _os = _oslate()
+
+    def _lu(**kw):
+        return nfl_optimizer.generate_lineups(_os, num_lineups=1, **kw)["lineups"][0]
+
+    def _flat(lu):
+        return [p for ps in lu["slots"].values() for p in ps]
+
+    _base = _lu()
+    check("the NFL optimizer builds a legal 9-man DK Classic lineup from a full pool",
+          len(_flat(_base)) == 9 and _base["salary_used"] <= nfl_optimizer.SALARY_CAP,
+          f"{len(_flat(_base))} players, ${_base['salary_used']}")
+
+    # Stacking, in football's own vocabulary rather than MLB's shapes.
+    _stacked = _lu(qb_stack_min=2, bring_back_min=1)
+    _qb = _stacked["slots"]["QB"][0]
+    _with_qb = sum(1 for p in _flat(_stacked)
+                   if p["team"] == _qb["team"] and p["position"] in ("WR", "TE"))
+    _bb = sum(1 for p in _flat(_stacked)
+              if p["team"] == _qb["opponent"] and p["position"] != "DST")
+    check("qb_stack_min forces the rostered QB's own pass catchers in with him -- an NFL stack "
+          "is a quarterback and his receivers, not MLB's count of same-team bats",
+          _with_qb >= 2, f"{_with_qb} pass catchers with {_qb['team']} QB")
+    check("bring_back_min forces players from the OPPONENT of that same game -- a stack from "
+          "an unrelated game is not a bring-back and correlates with nothing",
+          _bb >= 1 and _qb["opponent"] in {p["team"] for p in _flat(_stacked)},
+          f"{_bb} from {_qb['opponent']}")
+
+    _forced = _lu(stack_team="CCC", qb_stack_min=2)
+    check("stack_team builds around one named team by forcing its QB in, with the stack "
+          "hanging off him",
+          _forced["slots"]["QB"][0]["team"] == "CCC"
+          and sum(1 for p in _flat(_forced)
+                  if p["team"] == "CCC" and p["position"] in ("WR", "TE")) >= 2,
+          _forced["slots"]["QB"][0]["team"])
+
+    # Salary, ownership and team-count bounds.
+    _cheap = _lu(max_salary=44000)
+    check("max_salary caps the spend, which the NFL side had no way to express before",
+          _cheap["salary_used"] <= 44000, f"${_cheap['salary_used']}")
+    _contrarian = _lu(max_ownership_pct=80)
+    check("max_ownership_pct bounds cumulative ownership -- the contrarian lever MLB already had",
+          _contrarian["total_ownership_pct"] <= 80.01,
+          f"{_contrarian['total_ownership_pct']}%")
+    _chalky = _lu(min_ownership_pct=95)
+    check("...and min_ownership_pct bounds it from the other side",
+          _chalky["total_ownership_pct"] >= 94.99, f"{_chalky['total_ownership_pct']}%")
+    _narrow = _lu(max_teams_per_lineup=2)
+    check("max_teams_per_lineup concentrates a lineup into fewer teams",
+          len({p["team"] for p in _flat(_narrow)}) <= 2,
+          str(sorted({p["team"] for p in _flat(_narrow)})))
+    _wide = _lu(min_teams_per_lineup=4)
+    check("...and min_teams_per_lineup spreads it across more",
+          len({p["team"] for p in _flat(_wide)}) >= 4,
+          str(sorted({p["team"] for p in _flat(_wide)})))
+
+    _one_game = _lu(included_game_pks=["G1"])
+    check("included_game_pks builds only from the selected games -- a football week has more "
+          "games than a DK slate does, so without it a Sunday-only lineup could roster a "
+          "Thursday player",
+          {p["team"] for p in _flat(_one_game)} <= {"AAA", "BBB"},
+          str(sorted({p["team"] for p in _flat(_one_game)})))
+
+    _capped = nfl_optimizer.generate_lineups(
+        _os, num_lineups=4, qb_stack_min=1, min_unique_players=2,
+        team_exposure_cap={"AAA": 25})
+    _aaa_stacks = sum(1 for lu in _capped["lineups"] if lu["stack_team"] == "AAA")
+    check("team_exposure_cap limits how often a team is used AS THE STACK, matching MLB's own "
+          "meaning of the argument",
+          _aaa_stacks <= 1, f"AAA was the stack in {_aaa_stacks} of {len(_capped['lineups'])}")
+    check("...while that team's players stay eligible as one-offs and bring-backs, which is "
+          "what makes it a stack cap rather than a player ban",
+          any(p["team"] == "AAA" for lu in _capped["lineups"] for p in _flat(lu)))
+    check("the batch reports which team each lineup was actually stacked on, read off the "
+          "rostered QB rather than off what was requested",
+          all(lu["stack_team"] in {"AAA", "BBB", "CCC", "DDD"} for lu in _capped["lineups"])
+          and _capped["stack_exposure"],
+          str([(e["team"], e["count"]) for e in _capped["stack_exposure"]]))
+
+    for label, kw in (("unknown stack_team", dict(stack_team="ZZZ")),
+                      ("min above max salary", dict(min_salary=48000, max_salary=44000)),
+                      ("bring_back_min out of range", dict(bring_back_min=9)),
+                      ("unknown team in the cap", dict(team_exposure_cap={"ZZZ": 50}))):
+        try:
+            nfl_optimizer.generate_lineups(_os, num_lineups=1, **kw)
+            check(f"{label} is refused", False, "no error raised")
+        except nfl_optimizer.OptimizerError:
+            check(f"{label} is refused outright rather than silently ignored", True)
+
+    print("")
+    print("NFL defences: matched by TEAM, because the two sources name them differently")
+
+    # This one is not a nicety. DST is a required roster slot, so a
+    # defence that fails to match a projection makes it impossible to
+    # build ANY lineup -- which is exactly what was happening on live
+    # data, with a full pool of skill players and zero defences.
+    _dst_lookup = player_match.build_lookup([
+        {"team": "CAR", "name": "Carolina Panthers",
+         "normalized_name": player_match.normalize_name("Carolina Panthers"),
+         "position": "DST", "fpts": 8.1},
+    ])
+    check("DraftKings names a defence 'Panthers' where the projection source says 'Carolina "
+          "Panthers', so a name match finds nothing",
+          player_match.match(_dst_lookup, "Panthers", "CAR") is None)
+    check("...which is why DSTs fall back to a TEAM match -- a defence is identified by its "
+          "team, and getting this wrong meant no NFL lineup could be built at all",
+          next((r for (t, _), r in _dst_lookup.items()
+                if t == player_match.normalize_team("CAR")
+                and (r.get("position") or "").upper().startswith("DST")), None) is not None)
+
     print("\n" + "=" * 60)
     print(f"{len(PASS)} passed, {len(FAILED)} failed")
     if FAILED:

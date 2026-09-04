@@ -282,6 +282,41 @@ async def generate_lineups(
     min_unique_players: int = Body(
         1, embed=True, description="Minimum number of players that must differ between any two lineups"
     ),
+    bring_back_min: int = Body(
+        0,
+        embed=True,
+        description="How many players from the OPPONENT of the stacked QB's own game to force in -- the bring-back half of an NFL stack. Defined against his opponent rather than a second named team because a stack from an unrelated game is not a bring-back and correlates with nothing.",
+    ),
+    stack_team: str | None = Body(
+        None,
+        embed=True,
+        description="Build the stack around this specific team by forcing its QB into every lineup. qb_stack_min and bring_back_min then hang off him.",
+    ),
+    team_exposure_cap: dict[str, float] | None = Body(
+        None,
+        embed=True,
+        description="Caps how often a team is used AS THE STACK (the team whose QB is rostered), not how often its players appear incidentally -- e.g. {\"KC\": 40}.",
+    ),
+    max_salary: int | None = Body(
+        None, embed=True, description="Spend no more than this. Defaults to the $50,000 cap."
+    ),
+    min_teams_per_lineup: int | None = Body(
+        None, embed=True, description="Force a lineup to draw from at least this many distinct teams."
+    ),
+    max_teams_per_lineup: int | None = Body(
+        None, embed=True, description="Force a lineup to draw from at most this many distinct teams -- lower means more concentrated."
+    ),
+    min_ownership_pct: float | None = Body(
+        None, embed=True, description="Minimum cumulative ownership across the 9 rostered players."
+    ),
+    max_ownership_pct: float | None = Body(
+        None, embed=True, description="Maximum cumulative ownership across the 9 rostered players -- the contrarian lever."
+    ),
+    included_game_pks: list[str] | None = Body(
+        None,
+        embed=True,
+        description="Build only from these games. A week has more games than a DK slate does, so this is how a Sunday-only lineup avoids rostering a Thursday player.",
+    ),
     qb_stack_min: int = Body(
         0, embed=True, description="Force at least this many of the QB's own WR/TE into the same lineup"
     ),
@@ -316,9 +351,18 @@ async def generate_lineups(
             exposure_by_slot=exposure_by_slot,
             locked_ids=locked_ids,
             excluded_ids=excluded_ids,
+            team_exposure_cap=team_exposure_cap,
             min_salary=min_salary,
+            max_salary=max_salary,
             min_unique_players=min_unique_players,
             qb_stack_min=qb_stack_min,
+            bring_back_min=bring_back_min,
+            stack_team=stack_team,
+            min_teams_per_lineup=min_teams_per_lineup,
+            max_teams_per_lineup=max_teams_per_lineup,
+            min_ownership_pct=min_ownership_pct,
+            max_ownership_pct=max_ownership_pct,
+            included_game_pks=included_game_pks,
         )
     except nfl_optimizer.OptimizerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
