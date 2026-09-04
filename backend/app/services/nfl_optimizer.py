@@ -65,19 +65,29 @@ def _eligible_slots(position: str) -> list[str]:
     return []
 
 
-def build_player_pool(slate: dict[str, Any]) -> list[dict[str, Any]]:
+def build_player_pool(
+    slate: dict[str, Any], *, included_game_pks: list[Any] | None = None
+) -> list[dict[str, Any]]:
     """
     Flatten every rostered player across the slate's games into one
     optimizable pool. Skips anyone missing a matched salary or
     projection, or with a position that doesn't map to a roster slot.
+
+    `included_game_pks`, if given, narrows the pool to those games. It
+    matters more in football than in baseball: a week has 16 games but
+    the Main DK slate has 12, so without it the optimizer would happily
+    roster a Thursday player into a Sunday-only lineup.
 
     Each entry also carries `edge_composite` -- nfl_scoring's matchup
     multiplier -- which neither lineup engine optimizes against, but
     which the contest field sampler reads to model a sharp field.
     Mirrors MLB's pool exactly.
     """
+    wanted = {str(g) for g in included_game_pks} if included_game_pks else None
     pool: list[dict[str, Any]] = []
     for game in slate.get("games") or []:
+        if wanted is not None and str(game.get("game_id")) not in wanted:
+            continue
         for side in ("home", "away"):
             team = game[side]
             opponent = game["away" if side == "home" else "home"]["abbrev"]
@@ -127,8 +137,16 @@ def _solve_one(
     no_good_cuts: list[set[str]],
     locked_ids: set[str],
     min_salary: int | None,
+    max_salary: int | None,
     min_unique_players: int,
     qb_stack_min: int,
+    bring_back_min: int,
+    stack_team: str | None,
+    banned_stack_teams: set[str] | None = None,
+    min_teams_per_lineup: int | None,
+    max_teams_per_lineup: int | None,
+    min_ownership_pct: float | None,
+    max_ownership_pct: float | None,
 ) -> dict[str, Any] | None:
     usable = [p for p in pool if p["id"] not in excluded_ids]
     if not usable:
@@ -161,12 +179,82 @@ def _solve_one(
         eligible = [p for p in usable if slot in p["slots"]]
         prob += pulp.lpSum(x[(p["id"], slot)] for p in eligible) == count
 
-    prob += pulp.lpSum(p["salary"] * x[(p["id"], slot)] for p in usable for slot in p["slots"]) <= SALARY_CAP
+    spend = pulp.lpSum(p["salary"] * x[(p["id"], slot)] for p in usable for slot in p["slots"])
+    prob += spend <= min(max_salary, SALARY_CAP) if max_salary is not None else spend <= SALARY_CAP
     if min_salary is not None:
-        prob += pulp.lpSum(p["salary"] * x[(p["id"], slot)] for p in usable for slot in p["slots"]) >= min_salary
+        prob += spend >= min_salary
+
+    # Cumulative ownership, the same lever MLB's optimizer carries: a
+    # linear sum over the roster, bounded either side.
+    if min_ownership_pct is not None or max_ownership_pct is not None:
+        owned = pulp.lpSum(
+            p["ownership_pct"] * x[(p["id"], slot)] for p in usable for slot in p["slots"]
+        )
+        if min_ownership_pct is not None:
+            prob += owned >= min_ownership_pct
+        if max_ownership_pct is not None:
+            prob += owned <= max_ownership_pct
+
+    all_teams = sorted({p["team"] for p in usable})
+
+    # Force the stack onto one specific team, by forcing that team's QB
+    # into the lineup. Everything qb_stack_min/bring_back_min already do
+    # then hangs off him, so this is one constraint rather than a
+    # parallel set.
+    if stack_team:
+        stack_qbs = [
+            p for p in usable if p["team"] == stack_team and "QB" in p["slots"]
+        ]
+        if not stack_qbs:
+            return None
+        prob += pulp.lpSum(x[(p["id"], "QB")] for p in stack_qbs) == 1
+
+    # A team that has hit its stack cap can still supply one-offs and
+    # bring-backs; it just can't be the team the lineup is built around,
+    # which is the team whose QB is rostered.
+    if banned_stack_teams:
+        banned_qbs = [
+            p for p in usable if p["team"] in banned_stack_teams and "QB" in p["slots"]
+        ]
+        if banned_qbs:
+            prob += pulp.lpSum(x[(p["id"], "QB")] for p in banned_qbs) == 0
+
+    # BRING-BACK: players from the other side of the stacked QB's own
+    # game. This is the NFL counterpart to MLB's secondary stack group,
+    # and the reason it is expressed in opponents rather than in a
+    # second team is that a bring-back is only a bring-back if it is the
+    # SAME game -- a runner-up stack from an unrelated game correlates
+    # with nothing.
+    if bring_back_min > 0:
+        for t in all_teams:
+            qb_from_team = pulp.lpSum(
+                x[(p["id"], "QB")] for p in usable if p["team"] == t and "QB" in p["slots"]
+            )
+            opponents = {p["opponent"] for p in usable if p["team"] == t and p.get("opponent")}
+            bring_back = pulp.lpSum(
+                x[(p["id"], slot)]
+                for p in usable
+                if p["team"] in opponents and p["position"] != "DST"
+                for slot in p["slots"]
+            )
+            prob += bring_back >= bring_back_min * qb_from_team
+
+    # How many distinct teams a lineup may draw from. y_t is 1 exactly
+    # when team t contributes anybody, pinned from both sides so it
+    # cannot float.
+    if min_teams_per_lineup is not None or max_teams_per_lineup is not None:
+        y = {t: pulp.LpVariable(f"team_{t}", cat="Binary") for t in all_teams}
+        for t in all_teams:
+            from_team = [p for p in usable if p["team"] == t]
+            used = pulp.lpSum(x[(p["id"], slot)] for p in from_team for slot in p["slots"])
+            prob += used <= ROSTER_SIZE * y[t]
+            prob += used >= y[t]
+        if min_teams_per_lineup is not None:
+            prob += pulp.lpSum(y.values()) >= min_teams_per_lineup
+        if max_teams_per_lineup is not None:
+            prob += pulp.lpSum(y.values()) <= max_teams_per_lineup
 
     if qb_stack_min > 0:
-        all_teams = sorted({p["team"] for p in usable})
         for t in all_teams:
             qb_from_team = pulp.lpSum(
                 x[(p["id"], "QB")] for p in usable if p["team"] == t and "QB" in p["slots"]
@@ -238,11 +326,20 @@ def generate_lineups(
     num_lineups: int = 1,
     max_exposure_pct: float | None = None,
     exposure_by_slot: dict[str, float] | None = None,
+    team_exposure_cap: dict[str, float] | None = None,
     locked_ids: list[str] | None = None,
     excluded_ids: list[str] | None = None,
     min_salary: int | None = None,
+    max_salary: int | None = None,
     min_unique_players: int = 1,
     qb_stack_min: int = 0,
+    bring_back_min: int = 0,
+    stack_team: str | None = None,
+    min_teams_per_lineup: int | None = None,
+    max_teams_per_lineup: int | None = None,
+    min_ownership_pct: float | None = None,
+    max_ownership_pct: float | None = None,
+    included_game_pks: list[Any] | None = None,
 ) -> dict[str, Any]:
     """
     Generate up to `num_lineups` distinct legal DK Classic NFL lineups
@@ -253,15 +350,45 @@ def generate_lineups(
 
     See optimizer.py's `generate_lineups()` for the shared semantics of
     `max_exposure_pct`, `exposure_by_slot`, `locked_ids`/`excluded_ids`,
-    `min_salary`, and `min_unique_players` -- identical here.
+    `min_salary`/`max_salary`, `min_unique_players`,
+    `min_teams_per_lineup`/`max_teams_per_lineup`,
+    `min_ownership_pct`/`max_ownership_pct` and `included_game_pks` --
+    identical here.
+
+    STACKING IS EXPRESSED IN FOOTBALL, NOT IN MLB'S SHAPES. MLB names a
+    stack by how many bats come from each team ("5-3", "4-2-2"), because
+    a baseball stack is a batting order. That vocabulary does not
+    transfer: an NFL stack is a QUARTERBACK plus his own pass catchers,
+    and its second half is a bring-back from the other side of that same
+    game. So the controls here are `qb_stack_min` (how many of the
+    rostered QB's own WR/TEs come with him), `bring_back_min` (how many
+    from the opponent he is actually playing), and `stack_team` (which
+    team to build it around). Between them they express every real NFL
+    stack shape -- and `bring_back_min` is defined against the QB's
+    OPPONENT rather than a second named team, because a runner-up stack
+    from an unrelated game is not a bring-back and correlates with
+    nothing.
+
+    `team_exposure_cap` caps how often a team is used AS THE STACK --
+    the team whose QB is rostered -- not how often its players appear
+    incidentally, matching MLB's own meaning of the same argument.
     """
     if num_lineups < 1:
         raise OptimizerError("num_lineups must be at least 1.")
     if num_lineups > MAX_LINEUPS:
         raise OptimizerError(f"Generating more than {MAX_LINEUPS} lineups at once isn't supported.")
 
-    pool = build_player_pool(slate)
+    pool = build_player_pool(slate, included_game_pks=included_game_pks)
     if not pool:
+        if included_game_pks:
+            # Worth saying separately: a week has more games than a DK
+            # slate does, so narrowing to a game that is not ON the
+            # loaded slate is a normal mistake with a very confusing
+            # generic message.
+            raise OptimizerError(
+                "No optimizable players in the selected game(s) -- they may not be part "
+                "of the DraftKings slate that is currently loaded."
+            )
         raise OptimizerError(
             "No optimizable players for this week -- upload both a "
             "DraftKings salary CSV and a RotoWire projections CSV first."
@@ -300,23 +427,80 @@ def generate_lineups(
     if qb_stack_min < 0 or qb_stack_min > 3:
         raise OptimizerError("qb_stack_min must be between 0 and 3 (a team only has so many pass-catchers).")
 
+    if bring_back_min < 0 or bring_back_min > 3:
+        raise OptimizerError("bring_back_min must be between 0 and 3.")
+
+    if max_salary is not None:
+        if max_salary > SALARY_CAP:
+            raise OptimizerError(f"max_salary can't exceed the ${SALARY_CAP} cap.")
+        if min_salary is not None and min_salary > max_salary:
+            raise OptimizerError(f"min_salary ({min_salary}) is above max_salary ({max_salary}).")
+
+    pool_teams = {p["team"] for p in pool}
+    if stack_team and stack_team not in pool_teams:
+        raise OptimizerError(
+            f"stack_team {stack_team!r} isn't on this slate. Available: {sorted(pool_teams)}."
+        )
+    if stack_team and not any(
+        p["team"] == stack_team and "QB" in p["slots"] for p in pool
+    ):
+        raise OptimizerError(
+            f"{stack_team} has no optimizable quarterback, so a stack can't be built around it."
+        )
+
+    for label, value in (("min_teams_per_lineup", min_teams_per_lineup),
+                         ("max_teams_per_lineup", max_teams_per_lineup)):
+        if value is not None and not (1 <= value <= ROSTER_SIZE):
+            raise OptimizerError(f"{label} must be between 1 and {ROSTER_SIZE}.")
+    if (min_teams_per_lineup is not None and max_teams_per_lineup is not None
+            and min_teams_per_lineup > max_teams_per_lineup):
+        raise OptimizerError("min_teams_per_lineup is above max_teams_per_lineup.")
+
+    if (min_ownership_pct is not None and max_ownership_pct is not None
+            and min_ownership_pct > max_ownership_pct):
+        raise OptimizerError("min_ownership_pct is above max_ownership_pct.")
+
+    if team_exposure_cap:
+        unknown = set(team_exposure_cap) - pool_teams
+        if unknown:
+            raise OptimizerError(f"team_exposure_cap names team(s) not on this slate: {sorted(unknown)}.")
+
     def _cap_to_count(pct: float) -> int:
         return max(1, round(pct / 100 * num_lineups))
 
     exposure_count: dict[str, int] = {}
+    stack_team_count: dict[str, int] = {}
     excluded: set[str] = set()
     no_good_cuts: list[set[str]] = []
     lineups: list[dict[str, Any]] = []
+    # Teams that have hit their stack cap. Excluded from being the STACK
+    # team only -- their players stay eligible as one-offs and
+    # bring-backs, which is what "team exposure" means here and on the
+    # MLB side.
+    capped_stack_teams: set[str] = set()
 
     for i in range(num_lineups):
+        allowed_stack = stack_team
+        if team_exposure_cap and not allowed_stack:
+            available = sorted(pool_teams - capped_stack_teams)
+            if not available:
+                break
         result = _solve_one(
             pool,
             excluded_ids=excluded,
             no_good_cuts=no_good_cuts,
             locked_ids=locked,
             min_salary=min_salary,
+            max_salary=max_salary,
             min_unique_players=min_unique_players,
             qb_stack_min=qb_stack_min,
+            bring_back_min=bring_back_min,
+            stack_team=allowed_stack,
+            banned_stack_teams=capped_stack_teams if team_exposure_cap else None,
+            min_teams_per_lineup=min_teams_per_lineup,
+            max_teams_per_lineup=max_teams_per_lineup,
+            min_ownership_pct=min_ownership_pct,
+            max_ownership_pct=max_ownership_pct,
         )
         if result is None:
             if i == 0:
@@ -330,6 +514,18 @@ def generate_lineups(
         player_ids: set[str] = result.pop("_player_ids")
         no_good_cuts.append(player_ids)
         lineups.append(result)
+
+        # Whose stack this actually turned out to be -- read off the
+        # rostered QB rather than off what was asked for, so the cap
+        # counts what was built.
+        qbs = result["slots"].get("QB") or []
+        built_stack_team = qbs[0]["team"] if qbs else None
+        result["stack_team"] = built_stack_team
+        if built_stack_team:
+            stack_team_count[built_stack_team] = stack_team_count.get(built_stack_team, 0) + 1
+            cap_pct = (team_exposure_cap or {}).get(built_stack_team)
+            if cap_pct is not None and stack_team_count[built_stack_team] >= _cap_to_count(cap_pct):
+                capped_stack_teams.add(built_stack_team)
 
         slot_of: dict[str, str] = {
             p["id"]: slot for slot, players in result["slots"].items() for p in players
@@ -354,4 +550,13 @@ def generate_lineups(
         for pid, count in sorted(exposure_count.items(), key=lambda kv: -kv[1])
     ]
 
-    return {"lineups": lineups, "exposure": exposure}
+    stack_exposure = [
+        {
+            "team": team,
+            "count": count,
+            "pct": round(100 * count / len(lineups), 1) if lineups else 0.0,
+        }
+        for team, count in sorted(stack_team_count.items(), key=lambda kv: -kv[1])
+    ]
+
+    return {"lineups": lineups, "exposure": exposure, "stack_exposure": stack_exposure}
