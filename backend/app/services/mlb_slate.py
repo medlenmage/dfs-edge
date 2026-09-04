@@ -28,7 +28,14 @@ from typing import Any
 from app import cache
 from app.clients import fantasylabs, mlb, odds, rotowire_umpires, savant, weather
 from app.data.parks import get_park, hr_factor_for_hand
-from app.services import inhouse_projections, projections, salaries, scoring, variance
+from app.services import (
+    inhouse_projections,
+    pitcher_skill,
+    projections,
+    salaries,
+    scoring,
+    variance,
+)
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +160,7 @@ async def build_slate(
         "umpires": rotowire_umpires.get_todays_umpires(force=force_refresh),
         "savant_hit": savant.get_hitter_batted_ball(season),
         "savant_pitch": savant.get_pitcher_batted_ball(season),
+        "savant_pitch_skills": savant.get_pitcher_plate_skills(season),
         "bullpen": mlb.get_bullpen_stats(season),
         "bullpen_workload": mlb.get_recent_bullpen_workload(day),
     }
@@ -201,6 +209,34 @@ async def build_slate(
         "umpire_avg_rpg": scoring.league_average(data["umpires"], "rpg", 5, "games"),
         "umpire_avg_kpg": scoring.league_average(data["umpires"], "kpg", 5, "games"),
     }
+
+    # --- Pitcher skill: SIERA, xFIP and CSW ---
+    # ERA is a result, not an ability, and ranking starters on it is how
+    # a pitcher who has been unlucky in front of a bad defense grades out
+    # behind one who hasn't. SIERA and xFIP come free from data already
+    # fetched above; CSW does not, so it is counted only for the pitchers
+    # actually starting tonight -- see services/pitcher_skill.py.
+    skill_table = pitcher_skill.build_skill_table(
+        data["pit_season"], data["savant_pitch_skills"]
+    )
+    starter_ids = [
+        pid
+        for g in games
+        for side in ("home", "away")
+        if (pid := (((g.get("teams") or {}).get(side) or {}).get("probablePitcher") or {}).get("id"))
+    ]
+    try:
+        skill_table = await pitcher_skill.attach_csw(skill_table, starter_ids, season)
+    except Exception as exc:  # noqa: BLE001 -- CSW is one input to one component
+        log.warning("CSW pass failed, falling back to K/9: %s", exc)
+        warnings.append(f"csw: {exc}")
+    data["pitcher_skill"] = skill_table["pitchers"]
+    baselines["pitcher_siera"] = skill_table["league"].get("siera")
+    baselines["pitcher_csw"] = skill_table["league"].get("csw")
+    # This season's real HR/FB, not a hardcoded one -- the at-bat sim
+    # uses it to replace each starter's realised homer rate with the one
+    # his fly-ball rate implies.
+    baselines["pitcher_hr_fb"] = skill_table["league"].get("hr_fb")
 
     # Salaries and projections are manual uploads, not a fetch -- see
     # services/salaries.py and services/projections.py. Whatever's
@@ -978,13 +1014,24 @@ async def _build_game(
     home_edge = _pitcher_edge(
         home_pitcher, away_hitters, result["away"]["implied_runs"], env, baselines,
         data["savant_pitch"],
+        data.get("pitcher_skill"),
         market_k_line=k_props.get(salaries.normalize_name((home_pitcher or {}).get("name") or "")),
     )
     away_edge = _pitcher_edge(
         away_pitcher, home_hitters, result["home"]["implied_runs"], env, baselines,
         data["savant_pitch"],
+        data.get("pitcher_skill"),
         market_k_line=k_props.get(salaries.normalize_name((away_pitcher or {}).get("name") or "")),
     )
+    # The skill profile rides along on the card, not just inside the edge
+    # components -- services/atbat_sim.py regresses a starter's simulated
+    # HR and K rates onto it, and reads it from here.
+    for side, pitcher in (("home", home_pitcher), ("away", away_pitcher)):
+        if result[side].get("probable_pitcher") and pitcher:
+            result[side]["probable_pitcher"]["skill"] = (
+                (data.get("pitcher_skill") or {}).get(pitcher.get("id"))
+            )
+
     if home_edge:
         result["home"]["probable_pitcher"]["edge"] = home_edge
         result["home"]["probable_pitcher"]["salary"] = _salary_info(
@@ -1075,6 +1122,7 @@ def _pitcher_edge(
     env: dict[str, Any],
     baselines: dict[str, Any],
     savant_pitch: dict[int, dict[str, Any]],
+    pitcher_skills: dict[int, dict[str, Any]] | None = None,
     *,
     market_k_line: float | None = None,
 ) -> dict[str, Any] | None:
@@ -1094,6 +1142,7 @@ def _pitcher_edge(
         return None
 
     park = env["park"]
+    skill = (pitcher_skills or {}).get(pitcher_card.get("id")) or {}
 
     runs_against = scoring.team_total_component(implied_runs_against)
     runs_against = {**runs_against, "value": scoring.invert_for_pitcher(runs_against["value"])}
@@ -1117,6 +1166,8 @@ def _pitcher_edge(
             facing_hitters,
             baselines.get("hitter_k_pct"),
             market_k_line=market_k_line,
+            csw=(skill or {}).get("csw_pct"),
+            league_avg_csw=baselines.get("pitcher_csw"),
         ),
         "team_runs_against": runs_against,
         "contact_quality_allowed": scoring.contact_quality_allowed_component(
@@ -1126,7 +1177,10 @@ def _pitcher_edge(
             baselines.get("pitcher_xwoba"),
         ),
         "own_quality": scoring.own_quality_component(
-            pitcher_card.get("season"), baselines.get("pitcher_era")
+            pitcher_card.get("season"),
+            baselines.get("pitcher_era"),
+            skill=skill,
+            league_avg_skill=baselines.get("pitcher_siera"),
         ),
         "park": park_comp,
         "weather": weather_comp,

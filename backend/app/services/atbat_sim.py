@@ -78,7 +78,7 @@ import random
 from typing import Any
 
 from app.clients import mlb
-from app.services import mlb_dk_points
+from app.services import mlb_dk_points, pitcher_metrics
 
 PA_EVENTS: tuple[str, ...] = ("K", "BB", "HBP", "OUT", "1B", "2B", "3B", "HR")
 
@@ -772,6 +772,7 @@ async def _game_pa_rates(
     bullpen_by_team: dict[int, dict[str, Any]],
     *,
     as_of_date: str | None = None,
+    league_hr_fb: float | None = None,
 ) -> dict[str, Any]:
     """
     Fetches and blends everything simulate_game() needs for one slate
@@ -799,8 +800,18 @@ async def _game_pa_rates(
     )
     home_pitcher_log = _cutoff(home_pitcher_log, as_of_date)
     away_pitcher_log = _cutoff(away_pitcher_log, as_of_date)
-    home_pitcher_allowed = pitcher_allowed_rates(home_pitcher_log)
-    away_pitcher_allowed = pitcher_allowed_rates(away_pitcher_log)
+    # Realised rates, then pulled toward what his skill implies -- see
+    # apply_pitcher_skill() for why HR in particular can't be simulated
+    # forward as-is. The skill profile rides on the slate (mlb_slate
+    # attaches it per pitcher); with none, rates pass through untouched.
+    home_skill = (home.get("probable_pitcher") or {}).get("skill")
+    away_skill = (away.get("probable_pitcher") or {}).get("skill")
+    home_pitcher_allowed = apply_pitcher_skill(
+        pitcher_allowed_rates(home_pitcher_log), home_skill, league_hr_fb
+    )
+    away_pitcher_allowed = apply_pitcher_skill(
+        pitcher_allowed_rates(away_pitcher_log), away_skill, league_hr_fb
+    )
     home_starter_outs_pool = starter_outs_pool(home_pitcher_log)
     away_starter_outs_pool = starter_outs_pool(away_pitcher_log)
 
@@ -1049,7 +1060,14 @@ async def simulate_slate_trials(
 
     bullpen_by_team = await mlb.get_bullpen_stats(season)
     per_game = await asyncio.gather(
-        *(_game_pa_rates(g, season, bullpen_by_team, as_of_date=as_of_date) for g in games)
+        *(
+            _game_pa_rates(
+                g, season, bullpen_by_team,
+                as_of_date=as_of_date,
+                league_hr_fb=(slate.get("baselines") or {}).get("pitcher_hr_fb"),
+            )
+            for g in games
+        )
     )
 
     player_trials: dict[int, list[float]] = {}
@@ -1296,3 +1314,86 @@ def recenter_trials_on_projections(
         scale = min(_RECENTER_SCALE_MAX, max(_RECENTER_SCALE_MIN, target / mean))
         recentered[pid] = [value * scale for value in trials]
     return recentered
+
+
+# --------------------------------------------------------------------------
+# Regressing a starter's allowed rates onto his actual SKILL
+# --------------------------------------------------------------------------
+#
+# pitcher_allowed_rates() reads what a pitcher's season ACTUALLY produced.
+# For two of those rates that is the wrong input to simulate forward from,
+# and both are fixable with numbers services/pitcher_skill.py already
+# computes for the scoring model.
+#
+# HOME RUNS. The share of a pitcher's fly balls that leave the yard is
+# mostly not his. Measured across the 158 qualified 2026 starters, HR/FB
+# ran from 0.32x to 1.62x the league rate -- a five-fold spread that is
+# far too wide to be skill, and exactly the noise xFIP was invented to
+# strip out. Simulating a starter's realised HR rate forward bakes that
+# luck into every trial, and home runs are the single biggest swing in DK
+# scoring, so the error does not stay small.
+#
+# STRIKEOUTS. CSW predicts a pitcher's forward K rate slightly better
+# than his own realised K rate does (+0.808 vs +0.800 in the split-half
+# test behind scoring.CSW_WEIGHT), so the two get blended rather than one
+# replacing the other.
+#
+# The CSW -> K/PA line was fitted on the 40 highest-innings 2026 starters:
+# R^2 = 0.745, residual sd 0.0265. Refit it if the CSW pipeline changes.
+_CSW_K_INTERCEPT = -0.31156
+_CSW_K_SLOPE = 1.91869
+
+# How far each rate moves off what he actually did. HR regresses hard
+# because HR/FB is close to noise over one season; K only halfway,
+# because realised K rate was nearly as predictive as CSW.
+_HR_SKILL_WEIGHT = 0.75
+_K_SKILL_WEIGHT = 0.5
+
+
+def apply_pitcher_skill(
+    rates: dict[str, float],
+    skill: dict[str, Any] | None,
+    league_hr_fb: float | None = None,
+) -> dict[str, float]:
+    """
+    Pull a starter's realised per-PA rates toward what his skill implies.
+
+    Returns the rates unchanged when there's no skill profile for him --
+    a rookie with no Statcast history simulates off his own line, which
+    is the honest fallback rather than a league-average impostor.
+
+    Renormalises at the end so the outcome shares still sum to 1: moving
+    the HR and K shares without giving the difference back to the other
+    outcomes would quietly change how often a PA ends at all.
+    """
+    if not rates or not skill:
+        return rates
+
+    out = dict(rates)
+
+    # --- Home runs: what his fly-ball rate says he should allow ---
+    fb_pct = skill.get("fb_pct")
+    hr_fb = league_hr_fb or pitcher_metrics.DEFAULT_LEAGUE_HR_FB
+    if fb_pct:
+        # rates are per PA, and fb_pct is a share of BALLS IN PLAY, so the
+        # fly-ball share of a PA is scaled by how often a PA becomes one.
+        bip_share = max(
+            0.0, 1.0 - out.get("K", 0) - out.get("BB", 0) - out.get("HBP", 0)
+        )
+        expected_hr = bip_share * (fb_pct / 100) * hr_fb
+        out["HR"] = (
+            (1 - _HR_SKILL_WEIGHT) * out.get("HR", 0.0)
+            + _HR_SKILL_WEIGHT * expected_hr
+        )
+
+    # --- Strikeouts: what his CSW says he should get ---
+    csw = skill.get("csw_pct")
+    if csw:
+        implied = _CSW_K_INTERCEPT + _CSW_K_SLOPE * csw
+        if implied > 0:
+            out["K"] = (
+                (1 - _K_SKILL_WEIGHT) * out.get("K", 0.0) + _K_SKILL_WEIGHT * implied
+            )
+
+    total = sum(out.values())
+    return {event: v / total for event, v in out.items()} if total else rates

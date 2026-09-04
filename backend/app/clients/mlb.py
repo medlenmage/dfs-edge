@@ -619,9 +619,16 @@ def _normalise_stat(stat: dict[str, Any], group: str) -> dict[str, Any]:
         k = _i(stat.get("strikeOuts"))
         bb = _i(stat.get("baseOnBalls"))
         hr = _i(stat.get("homeRuns"))
+        # HBP and earned runs are here for services/pitcher_metrics.py:
+        # xFIP needs hit batsmen in its walk term, and the league's own
+        # FIP constant is derived from real league ERA rather than
+        # hardcoded to some other season's value.
+        hbp = _i(stat.get("hitBatsmen"))
         return {
             "ip": ip,
             "bf": bf,
+            "hbp": hbp,
+            "er": _i(stat.get("earnedRuns")),
             "era": _f(stat.get("era")),
             "whip": _f(stat.get("whip")),
             "avg_against": _f(stat.get("avg")),

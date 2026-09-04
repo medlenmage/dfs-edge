@@ -297,6 +297,20 @@ def umpire_component(
 # outright error, so the model still anchors it a little.
 MARKET_BLEND_WEIGHT = 0.7
 
+# How much of a pitcher's own strikeout read comes from CSW rather than
+# his realised K/9, and how far a CSW ratio is stretched to match K/9's
+# natural spread. Both measured, not guessed -- see
+# strikeout_potential_component() for the spread measurement, and the
+# split-half test behind the weight: across 34 starters with 15+ starts
+# in 2026, FIRST-half signals predicting SECOND-half K% correlated
+# CSW/PA +0.808, prior K% +0.800, whiffs/PA +0.723, called strikes/PA
+# +0.363. CSW is the best of them and beats the whiff half alone, which
+# is the whole case for using it over swinging-strike rate. K/9 keeps a
+# real share because it was nearly as good and it is the thing DK
+# actually pays for.
+CSW_WEIGHT = 0.6
+CSW_SPREAD_EXPONENT = 2.5
+
 
 def home_run_component(
     season_stat: dict[str, Any] | None,
@@ -632,6 +646,8 @@ def strikeout_potential_component(
     league_avg_hitter_k_pct: float | None,
     market_k_line: float | None = None,
     expected_ip: float = 5.5,
+    csw: float | None = None,
+    league_avg_csw: float | None = None,
 ) -> dict[str, Any]:
     """
     Strikeout upside: his own swing-and-miss stuff, blended with how
@@ -652,17 +668,50 @@ def strikeout_potential_component(
     pitcher.
     """
     own_k9 = (season_stat or {}).get("k_per_9")
-    pitcher_factor = (
+    k9_factor = (
         max(0.6, min(1.4, own_k9 / league_avg_k9))
         if own_k9 and league_avg_k9
         else NEUTRAL
     )
 
-    opp_k_pcts = [
-        h["season"]["k_pct"]
-        for h in (opposing_hitters or [])
-        if (h.get("season") or {}).get("k_pct") is not None
-    ]
+    # CSW is the sharper read on strikeout SKILL, so it carries the
+    # larger share whenever it's available -- but it's raised to a power
+    # first, because a raw ratio would quietly under-weight it. CSW is a
+    # far tighter distribution than K/9 (measured across the 30 highest-
+    # innings starters of 2026: CSW ranges .256-.356 for a coefficient of
+    # variation of .082, against K/9's 5.3-13.2 and .207). Their ratio,
+    # 2.53, is this exponent -- it puts a CSW ratio on the same spread as
+    # a K/9 ratio so the blend below weights them as intended rather than
+    # as an accident of their units.
+    csw_factor = NEUTRAL
+    if csw and league_avg_csw:
+        csw_factor = max(0.6, min(1.4, (csw / league_avg_csw) ** CSW_SPREAD_EXPONENT))
+        pitcher_factor = CSW_WEIGHT * csw_factor + (1 - CSW_WEIGHT) * k9_factor
+    else:
+        pitcher_factor = k9_factor
+
+    # The opponent's strikeout rate AGAINST THIS HAND, not overall.
+    # Platoon splits in strikeout rate are large and this pitcher only
+    # ever faces the lineup from one side, so the overall number is the
+    # wrong one: a lineup stacked with lefty bats is a different
+    # proposition to a lefty starter than its aggregate K% suggests.
+    # A thin split sample is regressed toward that hitter's own overall
+    # rate rather than trusted flat -- same reasoning as _shrink()
+    # elsewhere here, just toward a better baseline than neutral.
+    opp_k_pcts = []
+    split_used = 0
+    for h in opposing_hitters or []:
+        overall = (h.get("season") or {}).get("k_pct")
+        split = (h.get("vs_hand") or {}).get("k_pct")
+        split_pa = (h.get("vs_hand") or {}).get("pa") or 0
+        if split is not None and overall is not None and split_pa > 0:
+            trust = min(1.0, split_pa / MIN_PA_FULL_TRUST)
+            opp_k_pcts.append(overall + (split - overall) * trust)
+            if trust > 0:
+                split_used += 1
+        elif overall is not None:
+            opp_k_pcts.append(overall)
+
     if opp_k_pcts and league_avg_hitter_k_pct:
         opp_avg_k_pct = sum(opp_k_pcts) / len(opp_k_pcts)
         opp_factor = max(0.6, min(1.4, opp_avg_k_pct / league_avg_hitter_k_pct))
@@ -672,10 +721,13 @@ def strikeout_potential_component(
 
     value = round(max(0.6, min(1.4, 0.55 * pitcher_factor + 0.45 * opp_factor)), 3)
     bits = []
+    if csw:
+        bits.append(f"{csw:.1%} CSW")
     if own_k9:
         bits.append(f"{own_k9} K/9")
     if opp_avg_k_pct is not None:
-        bits.append(f"opponent strikes out {opp_avg_k_pct:.1%} of PA")
+        hand = " vs this hand" if split_used else ""
+        bits.append(f"opponent strikes out {opp_avg_k_pct:.1%} of PA{hand}")
 
     if market_k_line is not None and league_avg_k9 and expected_ip:
         market_k9_pace = market_k_line / expected_ip * 9
@@ -688,22 +740,66 @@ def strikeout_potential_component(
     return {
         "value": value,
         "own_k_per_9": own_k9,
+        "csw_pct": csw,
         "opp_avg_k_pct": round(opp_avg_k_pct, 4) if opp_avg_k_pct is not None else None,
+        "opp_k_pct_is_split": bool(split_used),
         "market_k_line": market_k_line,
         "detail": ", ".join(bits) or "no strikeout data",
     }
 
 
 def own_quality_component(
-    season_stat: dict[str, Any] | None, league_avg_era: float | None
+    season_stat: dict[str, Any] | None,
+    league_avg_era: float | None,
+    skill: dict[str, Any] | None = None,
+    league_avg_skill: float | None = None,
 ) -> dict[str, Any]:
-    """Pure run-prevention: his season ERA vs the league-average starter."""
+    """
+    Pure run-prevention -- but graded on SKILL rather than on ERA where
+    the skill numbers exist.
+
+    ERA is a result, not an ability. It carries the defense behind him,
+    the sequencing of when hits landed, and the share of fly balls that
+    happened to leave the yard. Measured across 427 qualified 2026
+    pitchers, ERA's standard deviation is 1.28 against SIERA's 0.70 and
+    xFIP's 0.73 -- most of that extra spread is noise this component
+    would otherwise be ranking on, and it is exactly what makes a
+    4.38-ERA arm grade out behind a 2.86-ERA one by more than their
+    stuff justifies. Garrett Crochet carried a 6.30 ERA against a 3.05
+    SIERA on the day this shipped; Kodai Senga, 7.36 against 3.97.
+
+    SIERA leads because it reads batted-ball mix and treats strikeouts
+    non-linearly. xFIP is the fallback (the two correlate +0.93, so
+    little is lost), and ERA remains the last resort so a pitcher with
+    no Statcast profile still gets scored rather than silently going
+    neutral.
+    """
+    skill = skill or {}
+    siera = skill.get("siera")
+    xfip = skill.get("xfip")
+
+    # Lower is better for all three, so the ratio is baseline/value.
+    for value_stat, label, baseline in (
+        (siera, "SIERA", league_avg_skill),
+        (xfip, "xFIP", league_avg_skill),
+    ):
+        if value_stat and baseline:
+            value = round(max(0.6, min(1.4, baseline / value_stat)), 3)
+            return {
+                "value": value,
+                "siera": siera,
+                "xfip": xfip,
+                "era": (season_stat or {}).get("era"),
+                "basis": label,
+                "detail": f"{value_stat} {label}",
+            }
+
     era = (season_stat or {}).get("era")
     if not era or not league_avg_era:
-        return {"value": NEUTRAL, "detail": "no season ERA"}
+        return {"value": NEUTRAL, "basis": None, "detail": "no season ERA"}
 
     value = round(max(0.6, min(1.4, league_avg_era / era)), 3)
-    return {"value": value, "era": era, "detail": f"{era} ERA"}
+    return {"value": value, "era": era, "basis": "ERA", "detail": f"{era} ERA (no skill data)"}
 
 
 def contact_quality_allowed_component(
