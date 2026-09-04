@@ -390,6 +390,23 @@ def _opposing_pitcher_constraints(
             prob += x[(pitcher["id"], "P")] + pulp.lpSum(x[(h["id"], s)] for s in h["slots"]) <= 1
 
 
+# Which numbers everything optimizes against unless a caller says
+# otherwise. In-house, not RotoWire.
+#
+# The in-house ownership model is now measured against real archived DK
+# contest standings rather than assumed: across 10 real slates and 2,027
+# hitter observations matched to real %Drafted, it lands at 2.21pp mean
+# absolute error with the systematic slot bias largely removed (see
+# services/inhouse_projections.py and scripts/diagnose_ownership_
+# multislate.py). RotoWire stays available on every endpoint as the
+# cross-check -- both numbers are computed and shown side by side in the
+# player pool, which is the comparison worth having.
+#
+# Every route that reads this also builds its slate with
+# include_inhouse=(projection_source == "inhouse"), so flipping the
+# default is what actually turns the in-house model on for those paths.
+DEFAULT_PROJECTION_SOURCE = "inhouse"
+
 PROJECTION_SOURCES = {
     "rotowire": ("fpts", "ownership_pct"),
     "inhouse": ("inhouse_fpts", "inhouse_ownership_pct"),
@@ -400,7 +417,7 @@ def build_player_pool(
     slate: dict[str, Any],
     *,
     included_game_pks: set[int] | None = None,
-    projection_source: str = "rotowire",
+    projection_source: str = DEFAULT_PROJECTION_SOURCE,
 ) -> list[dict[str, Any]]:
     """
     Flatten every hitter and probable pitcher across the slate into one
@@ -695,7 +712,7 @@ def generate_lineups(
     slate: dict[str, Any],
     *,
     num_lineups: int = 1,
-    projection_source: str = "rotowire",
+    projection_source: str = DEFAULT_PROJECTION_SOURCE,
     stack_groups: list[int] | None = None,
     stack_teams: list[str | None] | None = None,
     max_exposure_pct: float | None = None,
@@ -832,6 +849,21 @@ def generate_lineups(
         if included_game_pks is not None:
             raise OptimizerError(
                 "No optimizable players in the selected games -- try including more games."
+            )
+        # An empty pool under the in-house source usually means the slate
+        # was built without in-house projections computed, not that
+        # nothing was uploaded -- say which, because the two have
+        # completely different fixes and the generic message sent people
+        # to re-upload files that were already there.
+        if projection_source != "rotowire" and build_player_pool(
+            slate,
+            included_game_pks=None,
+            projection_source="rotowire",
+        ):
+            raise OptimizerError(
+                f"No players carry '{projection_source}' projections for this date, though "
+                "RotoWire projections are loaded. Build the slate with in-house projections "
+                "computed (include_inhouse=true), or pass projection_source='rotowire'."
             )
         raise OptimizerError(
             "No optimizable players for this date -- upload both a "
@@ -1085,7 +1117,7 @@ def late_swap(
     slate: dict[str, Any],
     picks: list[dict[str, Any]],
     *,
-    projection_source: str = "rotowire",
+    projection_source: str = DEFAULT_PROJECTION_SOURCE,
 ) -> dict[str, Any]:
     """
     Given an already-built 10-player lineup and the CURRENT slate,

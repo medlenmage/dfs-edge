@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 from typing import Any
 
 from app.clients import mlb
@@ -441,6 +442,67 @@ _VALUE_WEIGHT = 1.0
 _RAW_FPTS_WEIGHT = 1.0
 _TEAM_TOTAL_WEIGHT = 0.4
 _SALARY_TIER_WEIGHT = 0.3
+
+# BATTING-ORDER SPOT. Measured, and it was the largest systematic error
+# in this model: reprojecting 10 real archived slates (2,027 hitter
+# observations matched to real DK %Drafted) showed a monotone bias by
+# lineup slot, in points of ownership --
+#
+#   slot   1      2      3      4      5      6      7      8      9   none
+#   bias -3.48  -2.33  -2.29  -1.58  -1.25  -1.19  +0.10  -0.14  +0.21 +1.10
+#
+# The model was under-projecting the top of every order and getting the
+# bottom right, which is the signature of a feature that simply wasn't
+# there: batting order fed the FPTS projection (see
+# batting_order_pa_factor) but never the ownership one, even though the
+# field reads a lineup card before it buys anyone.
+#
+# The factor is 1.0 at leadoff and falls to 0 by the 7-hole, matching the
+# shape of the measured bias rather than a guess: the error is flat
+# across slots 7-9, so a term that kept falling there would invent a
+# gradient the data says is not there. A hitter with no known slot gets
+# no term at all, which correctly pushes him DOWN relative to confirmed
+# starters -- players with no lineup spot were drafted 0.21% of the time
+# against the 1.31% the model was giving them.
+#
+# Weight fitted by sweep against those same 10 slates -- see
+# scripts/sweep_ownership_batting_order.py. Two independent criteria
+# picked the same value, which is the reassuring outcome: lowest MAE
+# (2.337 -> 2.206) and flattest slot gradient (3.656 -> 1.227, a 66% cut
+# in the systematic part of the error) both bottom out at 1.0, and both
+# get worse past 1.5 where the term starts over-correcting the top of
+# the order. The env var is for the sweep, not for tuning in production.
+_BATTING_ORDER_WEIGHT = float(os.environ.get("DFS_BATTING_ORDER_WEIGHT", "1.0"))
+
+# A hitter batting 7-9 at under $3,000 is a punt, and the field treats
+# him like one. Across those same 10 slates, 224 real hitters fit that
+# description and the MOST-owned of them was drafted 13.6% -- not one
+# cleared 15%, while the model put two of them above it (one at 21.9%).
+# So this is a guard rail against a known failure mode, not a thumb on
+# the scale: it has never yet clipped a player the real field actually
+# liked. Re-measure it if DK's salary floor moves.
+_PUNT_MAX_ORDER_SLOT = 7
+_PUNT_MAX_SALARY = 3000
+_PUNT_OWNERSHIP_CAP = 15.0
+
+
+def batting_order_ownership_factor(
+    confirmed: int | None, projected: int | None
+) -> float | None:
+    """
+    How much the field's attention a lineup slot is worth, 1.0 at leadoff
+    down to 0 from the 7-hole back. None when the slot is unknown.
+
+    Unlike batting_order_pa_factor(), this is the ABSOLUTE slot and not
+    a change from his usual one. That difference is deliberate: PA volume
+    is relative to a baseline that already contains his normal workload,
+    but ownership isn't -- the field looks at tonight's card and buys the
+    guy hitting second, whether or not that is where he usually hits.
+    """
+    slot = confirmed or projected
+    if not slot or not 1 <= slot <= 9:
+        return None
+    return max(0.0, (_PUNT_MAX_ORDER_SLOT - slot) / (_PUNT_MAX_ORDER_SLOT - 1))
 
 # THE TEAM-STACK LAYER (hitters only) -- see WHY A TEAM-STACK LAYER
 # EXISTS in project_ownership()'s docstring for the real measured
@@ -846,6 +908,11 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
                 + _TEAM_TOTAL_WEIGHT * team_total
                 + _SALARY_TIER_WEIGHT * salary_tier
             )
+            order_factor = batting_order_ownership_factor(
+                p.get("batting_order"), p.get("projected_batting_order")
+            )
+            if order_factor is not None:
+                score += _BATTING_ORDER_WEIGHT * order_factor
             # Hitters only -- pitcher ownership is a separate model
             # (see Pass 1) and is already the best-calibrated group here.
             if use_team_stack:
@@ -860,8 +927,33 @@ def project_ownership(pool: list[dict[str, Any]]) -> dict[int, float]:
         weights = [math.exp((s - peak) / _SOFTMAX_TEMPERATURE) for s in raw_scores]
         total_weight = sum(weights)
 
-        for p, weight in zip(players, weights):
-            share = (weight / total_weight) * slot_count * 100
+        shares = [(weight / total_weight) * slot_count * 100 for weight in weights]
+
+        # Punt guard rail. Clipped ownership is handed back to the rest of
+        # the group rather than dropped, so the group still sums to the
+        # roster spots it represents -- silently losing it would make
+        # every OTHER player in the group read low.
+        excess = 0.0
+        keep = []
+        for p, share in zip(players, shares):
+            slot = p.get("batting_order") or p.get("projected_batting_order")
+            capped = (
+                slot is not None
+                and slot >= _PUNT_MAX_ORDER_SLOT
+                and (p.get("salary") or 0) < _PUNT_MAX_SALARY
+                and share > _PUNT_OWNERSHIP_CAP
+            )
+            if capped:
+                excess += share - _PUNT_OWNERSHIP_CAP
+            keep.append(0.0 if capped else share)
+        if excess > 0 and sum(keep) > 0:
+            scale = 1 + excess / sum(keep)
+            shares = [
+                _PUNT_OWNERSHIP_CAP if k == 0.0 and s_ > _PUNT_OWNERSHIP_CAP else k * scale
+                for k, s_ in zip(keep, shares)
+            ]
+
+        for p, share in zip(players, shares):
             # Accumulate, not overwrite -- a multi-eligible player's
             # total is his share summed across every group he's in.
             ownership[p["id"]] = round(ownership.get(p["id"], 0.0) + share, 2)

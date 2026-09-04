@@ -179,7 +179,15 @@ export default function App() {
   // generator -- independent of whether the tables have fetched the
   // in-house columns yet, since those two endpoints fetch their own
   // in-house-augmented slate server-side when asked.
-  const [projSource, setProjSource] = useState('rotowire')
+  //
+  // In-house by default, matching optimizer.DEFAULT_PROJECTION_SOURCE on
+  // the backend. The in-house ownership model is measured against real
+  // archived DK contest standings (2.21pp mean absolute error across 10
+  // real slates) rather than assumed, and its pool is the larger of the
+  // two -- it can score anyone with game logs, where RotoWire only
+  // covers who it chose to list. RotoWire stays one click away here and
+  // sits beside it in the player pool as the cross-check.
+  const [projSource, setProjSource] = useState('inhouse')
   // The contest the generator last built, handed to the Simulator tab.
   // Lives up here rather than inside either panel because it's the one
   // thing the two of them share: the generator produces it, the
