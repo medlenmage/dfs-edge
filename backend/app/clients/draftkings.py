@@ -35,6 +35,7 @@ different roster rules this app was never built to optimize for.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from app.cache import cached
@@ -46,12 +47,29 @@ log = logging.getLogger(__name__)
 LOBBY_URL = "https://www.draftkings.com/lobby/getcontests"
 DRAFTABLES_URL = "https://api.draftkings.com/draftgroups/v1/draftgroups/{}/draftables"
 
-SPORT = "MLB"
-# GameTypeId 2 = Classic (the big Early/Main/Night/Featured multi-game
-# pools this app is built around); 114 = Classic restricted to a
-# single game. Everything else (Snake, Tiers, Home Run Showdown, ...)
-# uses roster rules this app doesn't support.
-CLASSIC_GAME_TYPE_IDS = {2, 114}
+SPORT = "MLB"  # kept for callers that predate the sport argument
+
+# Which DK GameTypeIds are the Classic salary-cap pools this app is
+# built around. Everything else (Snake, Tiers, Showdown, Madden Stream,
+# Sit & Go, ...) uses roster rules this app doesn't support.
+#
+# THE IDS ARE NOT SHARED BETWEEN SPORTS. MLB Classic is 2 (114 for a
+# Classic restricted to one game); NFL Classic is 1. Verified against
+# the live lobby rather than assumed -- pulling draftables for each
+# candidate id showed only NFL's 1 carries both salaries and a DST,
+# while 189 and 145 (Sit & Go) return neither and are draft formats:
+#
+#     type 1    1,486 draftables   QB/RB/WR/TE/DST   salaries 2000-8000
+#     type 189  1,658 draftables   no DST            no salaries
+#     type 145  4,501 draftables   no DST            no salaries
+#
+# Salaries-and-a-DST is the signature to re-check against if DK ever
+# renumbers these.
+CLASSIC_GAME_TYPE_IDS = {2, 114}          # MLB, kept as the old name
+SPORT_CLASSIC_GAME_TYPE_IDS: dict[str, set[int]] = {
+    "MLB": {2, 114},
+    "NFL": {1},
+}
 
 # Slates and their labels rarely change once posted; salaries/players
 # can, especially close to lock (late scratches, swaps) -- so get_slates
@@ -65,37 +83,57 @@ _DRAFTABLES_TTL = 600  # 10 min
 _FPPG_ATTRIBUTE_ID = 408
 
 
-async def get_slates(day: str, *, force: bool = False) -> list[dict[str, Any]]:
+async def get_slates(
+    day: str,
+    *,
+    sport: str = "MLB",
+    days: Iterable[str] | None = None,
+    force: bool = False,
+) -> list[dict[str, Any]]:
     """
-    Every live Classic MLB slate whose games start on `day` (YYYY-MM-DD,
-    matched against DK's own Eastern-local StartDateEst) -- id, a
-    human label ("Early", "Main", "Night", ...; DK leaves the biggest
-    slate of the day unlabeled, shown here as "Main"), how many games
-    it covers, and the games themselves (teams + start time), so the
-    frontend can show a real picker instead of guessing from an
-    uploaded file.
+    Every live Classic slate whose games start on `day` (YYYY-MM-DD,
+    matched against DK's own Eastern-local StartDateEst) -- id, a human
+    label ("Early", "Main", "Night", ...; DK leaves the biggest slate of
+    the day unlabeled, shown here as "Main"), how many games it covers,
+    and the games themselves, so the frontend can show a real picker
+    instead of guessing from an uploaded file.
+
+    `days` takes a whole set of dates instead, which is what NFL needs:
+    a football week is not a day. A single Sunday-Monday slate and the
+    Thursday-through-Monday one that includes it start on different
+    dates, and both belong to the same week -- so the caller passes
+    every date the week covers and gets all of them back.
     """
+    wanted = {day} if days is None else {d for d in days if d}
 
     async def _load() -> Any:
         return await get_json(
-            LOBBY_URL, params={"sport": SPORT}, source="DraftKings lobby"
+            LOBBY_URL, params={"sport": sport}, source="DraftKings lobby"
         )
 
-    payload = await cached(f"dk:slates:{SPORT}", _SLATES_TTL, _load, force=force)
-    return _parse_slates(payload, day)
+    payload = await cached(f"dk:slates:{sport}", _SLATES_TTL, _load, force=force)
+    return _parse_slates(
+        payload, wanted, SPORT_CLASSIC_GAME_TYPE_IDS.get(sport, CLASSIC_GAME_TYPE_IDS)
+    )
 
 
-def _parse_slates(payload: dict[str, Any], day: str) -> list[dict[str, Any]]:
+def _parse_slates(
+    payload: dict[str, Any],
+    days: str | Iterable[str],
+    classic_game_type_ids: set[int] | None = None,
+) -> list[dict[str, Any]]:
     """The pure transformation half of get_slates() -- split out so it's
     directly testable against a fixture payload, with no network call."""
+    wanted = {days} if isinstance(days, str) else set(days)
+    allowed = classic_game_type_ids or CLASSIC_GAME_TYPE_IDS
     game_sets = {gs.get("GameSetKey"): gs for gs in (payload.get("GameSets") or [])}
 
     slates: list[dict[str, Any]] = []
     for dg in payload.get("DraftGroups") or []:
-        if dg.get("GameTypeId") not in CLASSIC_GAME_TYPE_IDS:
+        if dg.get("GameTypeId") not in allowed:
             continue
         start_est = dg.get("StartDateEst") or ""
-        if not start_est.startswith(day):
+        if not any(start_est.startswith(d) for d in wanted):
             continue
 
         games = []
@@ -164,10 +202,29 @@ def _parse_draftables(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """The pure transformation half of get_draftables() -- split out so
     it's directly testable against a fixture payload, with no network
     call."""
+    # DK returns ONE ROW PER ROSTER SLOT, not per player, so anyone
+    # eligible in more than one slot appears more than once. It is not a
+    # rounding error: on a 12-game NFL slate 628 of 744 players are
+    # duplicated, because every skill player is listed at his own
+    # position and again at FLEX. Left in, they become duplicate players
+    # on the slate and a lineup could roster the same man twice.
+    #
+    # Deduplicating on DK's own player id is safe for both sports: the
+    # rows for one player carry identical salary and position, and MLB's
+    # multi-eligibility travels inside the position string itself
+    # ("1B/OF" on BOTH of Schwarber's rows), so nothing is lost by
+    # keeping the first. Verified against live payloads for each sport
+    # rather than assumed -- 0 of 25 duplicated MLB players had rows
+    # whose positions disagreed.
+    seen: set[Any] = set()
     rows: list[dict[str, Any]] = []
     for p in payload.get("draftables") or []:
         if p.get("isDisabled"):
             continue
+        key = p.get("playerDkId") or (p.get("displayName"), p.get("teamAbbreviation"))
+        if key in seen:
+            continue
+        seen.add(key)
         name = (p.get("displayName") or "").strip()
         salary = p.get("salary")
         if not name or not salary:

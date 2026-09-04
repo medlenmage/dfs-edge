@@ -78,6 +78,20 @@ export const api = {
   dkSlates: (date, { refresh = false } = {}) =>
     request(`/api/mlb/dk-slates?date=${date}${refresh ? '&refresh=true' : ''}`),
 
+  // NFL's equivalent, keyed by (season, week) rather than a date -- a
+  // football week spans Thursday to Monday, so several real slates with
+  // different start dates all belong to the same week.
+  nflDkSlates: (season, week, { refresh = false } = {}) =>
+    request(
+      `/api/nfl/dk-slates?season=${season}&week=${week}${refresh ? '&refresh=true' : ''}`,
+    ),
+
+  loadNflDkSlate: (season, week, draftGroupId, { refresh = false } = {}) =>
+    request('/api/nfl/dk-slates/load', {
+      method: 'POST',
+      body: JSON.stringify({ season, week, draft_group_id: draftGroupId, refresh }),
+    }),
+
   loadDkSlate: (date, draftGroupId, { refresh = false } = {}) =>
     request('/api/mlb/dk-slates/load', {
       method: 'POST',

@@ -10,7 +10,8 @@ from uuid import uuid4
 from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile
 
 from app import cache
-from app.clients import nfl, rotowire_nfl
+from app.clients import draftkings, nfl, rotowire_nfl
+from app.clients.http import ApiError
 from app.services import (
     nfl_contest,
     nfl_optimizer,
@@ -87,6 +88,87 @@ async def upload_salaries(
         )
     salaries.store(nfl_slate.week_key(resolved_season, resolved_week), rows)
     return {"season": resolved_season, "week": resolved_week, "players_loaded": len(rows)}
+
+
+@router.get("/dk-slates")
+async def get_dk_slates(
+    season: int | None = Query(None),
+    week: int | None = Query(None),
+    refresh: bool = Query(False, description="Bypass the 15-minute cache and re-pull from DraftKings"),
+) -> dict[str, Any]:
+    """
+    Every live Classic NFL slate for a week, straight from DraftKings'
+    own lobby -- so the slate can be picked from a list instead of being
+    inferred from whichever CSV happened to get uploaded.
+
+    A football week is not a day, which is the one real difference from
+    the MLB version: a Thursday-through-Monday slate and the Sunday-only
+    one inside it start on different dates and both belong to the same
+    week. The week's real game dates come from the schedule, and every
+    slate starting on any of them is returned.
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    try:
+        games = await nfl.get_schedule(resolved_season, resolved_week)
+    except ApiError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    days = sorted({g["gameday"] for g in games if g.get("gameday")})
+    if not days:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduled games found for {resolved_season} week {resolved_week}.",
+        )
+    try:
+        slates = await draftkings.get_slates(
+            days[0], sport="NFL", days=days, force=refresh
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Couldn't reach DraftKings: {exc}") from exc
+    return {
+        "season": resolved_season,
+        "week": resolved_week,
+        "days": days,
+        "slates": slates,
+    }
+
+
+@router.post("/dk-slates/load")
+async def load_dk_slate(
+    season: int | None = Body(None, embed=True),
+    week: int | None = Body(None, embed=True),
+    draft_group_id: int = Body(..., embed=True, description="From GET /dk-slates' draft_group_id"),
+    refresh: bool = Body(
+        False,
+        embed=True,
+        description="Bypass the 10-minute cache and re-pull live -- use for late inactives close to lock",
+    ),
+) -> dict[str, Any]:
+    """
+    Pull players + salaries for one specific DraftKings NFL slate and
+    store them exactly as a manual salary CSV upload would, so
+    everything downstream -- the optimizer, the contest generator, both
+    simulator engines -- works unchanged either way.
+    """
+    resolved_season, resolved_week = await _resolve_season_week(season, week)
+    try:
+        rows = await draftkings.get_draftables(draft_group_id, force=refresh)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Couldn't reach DraftKings: {exc}") from exc
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No players found for that slate -- it may not be live yet, or the "
+                "draft_group_id is stale (re-fetch GET /dk-slates)."
+            ),
+        )
+    salaries.store(nfl_slate.week_key(resolved_season, resolved_week), rows)
+    return {
+        "season": resolved_season,
+        "week": resolved_week,
+        "draft_group_id": draft_group_id,
+        "players_loaded": len(rows),
+    }
 
 
 @router.get("/salaries")

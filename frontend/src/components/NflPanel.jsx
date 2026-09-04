@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../api'
+import { DkSlatePicker } from './DkSlatePicker'
 import { NflContestGeneratorPanel } from './NflContestGeneratorPanel'
 import { NflContestSimulatorPanel } from './NflContestSimulatorPanel'
 import { NflLineupsPanel } from './NflLineupsPanel'
@@ -327,7 +328,21 @@ export function NflPanel({ tab: controlledTab, onTabChange, headerSlot }) {
                 <div className="menu-row">
                   <div>
                     <div className="t">DraftKings salaries</div>
-                    <div className="s">Upload a DK NFL salary CSV for this week</div>
+                    <div className="s">Pull a real live DK slate — no manual CSV</div>
+                  </div>
+                  <DkSlatePicker
+                    resetKey={`${season}-${week}`}
+                    fetchSlates={(opts) => api.nflDkSlates(season, week, opts)}
+                    loadSlate={(id, opts) => api.loadNflDkSlate(season, week, id, opts)}
+                    emptyLabel="No live DraftKings Classic NFL slates found for this week yet."
+                    onLoaded={() => load()}
+                  />
+                </div>
+
+                <div className="menu-row">
+                  <div>
+                    <div className="t">…or a salary CSV</div>
+                    <div className="s">Upload a DK NFL salary export for this week</div>
                   </div>
                   <button className="sm" onClick={() => salaryInputRef.current?.click()}>
                     Choose file
