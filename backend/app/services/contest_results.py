@@ -38,8 +38,40 @@ _EXPECTED_SLOTS = {"P": 2, "C": 1, "1B": 1, "2B": 1, "3B": 1, "SS": 1, "OF": 3}
 
 _SLOT_RE = re.compile(r"\b(" + "|".join(sorted(_SLOT_TOKENS, key=len, reverse=True)) + r")\b")
 
+# The same thing for DK Classic NFL: 9 slots. Note FLEX is a real roster
+# slot here rather than a way of describing eligibility, so it turns up
+# in the export as its own token alongside the position it was filled by.
+_NFL_EXPECTED_SLOTS = {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "FLEX": 1, "DST": 1}
+_NFL_SLOT_RE = re.compile(
+    r"\b(" + "|".join(sorted(_NFL_EXPECTED_SLOTS, key=len, reverse=True)) + r")\b"
+)
 
-def parse_lineup(raw: str) -> list[dict[str, str]] | None:
+# Keyed by sport so one parser serves both boards. Nothing below this
+# point is baseball-specific any more; adding a sport is adding a row.
+_SPORT_SLOTS = {
+    "MLB": (_SLOT_RE, _EXPECTED_SLOTS),
+    "NFL": (_NFL_SLOT_RE, _NFL_EXPECTED_SLOTS),
+}
+
+
+def detect_sport(raw: str) -> str:
+    """
+    Which sport an entry's `Lineup` cell belongs to.
+
+    Decided on which slot vocabulary actually parses into a COMPLETE
+    roster rather than on counting token hits. The two vocabularies
+    overlap enough in practice (a stray "C" or "TE" inside a name) that
+    guessing on hit-count would be fragile, whereas "does this yield a
+    legal roster" is unambiguous -- parse_lineup already refuses to
+    return a partial one.
+    """
+    for sport in _SPORT_SLOTS:
+        if parse_lineup(raw, sport=sport) is not None:
+            return sport
+    return "MLB"
+
+
+def parse_lineup(raw: str, sport: str = "MLB") -> list[dict[str, str]] | None:
     """
     One entry's `Lineup` cell -> [{slot, name, normalized_name}, ...].
 
@@ -58,7 +90,8 @@ def parse_lineup(raw: str) -> list[dict[str, str]] | None:
     if not raw or not raw.strip():
         return None
 
-    matches = list(_SLOT_RE.finditer(raw))
+    slot_re, expected = _SPORT_SLOTS.get(sport, _SPORT_SLOTS["MLB"])
+    matches = list(slot_re.finditer(raw))
     if not matches:
         return None
 
@@ -73,7 +106,7 @@ def parse_lineup(raw: str) -> list[dict[str, str]] | None:
     counts: dict[str, int] = {}
     for s in slots:
         counts[s["slot"]] = counts.get(s["slot"], 0) + 1
-    if counts != _EXPECTED_SLOTS:
+    if counts != expected:
         return None
     return slots
 
