@@ -86,9 +86,12 @@ import io
 import random
 from collections import Counter
 from collections.abc import Callable
+import logging
 from typing import Any
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 from app.clients import nfl
 from app.services import nfl_structural, nfl_variance
@@ -143,20 +146,64 @@ def _fpts_weight(p: dict[str, Any]) -> float:
 # --------------------------------------------------------------------------
 
 PRIMARY_STACK_TYPES = ("qb_naked", "qb_1", "qb_2", "qb_3", "rb_dst")
-# qb_1/qb_2 weighted heaviest per the user's own real-world framing;
-# every type still gets built sometimes. A real, stated, tunable
-# approximation -- not derived from real win-rate data, same
-# "clearly-labeled" convention contest.py's own STACK_SHAPE_WEIGHTS uses.
-PRIMARY_STACK_WEIGHTS = (1.0, 3.0, 3.0, 1.0, 1.0)
+
+# MEASURED against the real thing this field is meant to imitate: five
+# 2025 Fantasy Football Millionaire standings exports, 1,486,422 entries,
+# every roster parsed and its QB stack counted
+# (scripts/analyze_nfl_field_construction.py).
+#
+# How many of his own pass catchers ride with the QB, across the real
+# field, pooled:
+#
+#     0 stack   1 stack   2 stack   3 stack
+#      19.8%     51.2%     26.9%      2.0%
+#
+# The old weights (1, 3, 3, 1, 1) were reasoned about rather than
+# measured, and they produced a field that stacked far harder than the
+# real one: 12.8% three-stacks against a real 2.0%, 40.1% two-stacks
+# against a real 26.9%, and only 36.7% of the single stacks that are
+# actually the field's most common shape by a distance.
+#
+# That error was not cosmetic. These lineups ARE the opponents the
+# simulator prices against, so a field that stacks harder than reality
+# makes the user's own stacked lineups look less differentiated than they
+# really are -- it quietly understates the payoff of correlation, which
+# is the one thing a GPP field model most needs to get right.
+#
+# The 0-stack share is split between a genuinely naked QB and the RB+DST
+# archetype, which also carries no pass catcher.
+PRIMARY_STACK_WEIGHTS = (1.40, 5.12, 2.69, 0.20, 0.59)
 
 SECONDARY_STACK_TYPES = ("1+1", "2+1", "1+2", "2")
 SECONDARY_STACK_GROUPS: dict[str, list[int]] = {"1+1": [1, 1], "2+1": [2, 1], "1+2": [2, 1], "2": [2]}
 SECONDARY_STACK_WEIGHTS = (1.0, 1.0, 1.0, 1.0)
 
+# A KNOWN RESIDUAL, left deliberately. The real field spreads across 6.88
+# teams per lineup and leaves 5.6% of rosters with no two players sharing
+# a team at all; this generator manages 6.39 and 0.4%, because every
+# lineup gets some secondary pairing.
+#
+# Adding a "no secondary stack" option was tried and reverted: it moved
+# the no-pairing share only 0.4% -> 1.0% (the primary QB stack still
+# pairs the QB with a catcher in most lineups, so max-team stays >= 2
+# regardless) while dropping the bring-back rate from a well-matched
+# 42.1% to 36.5%, since a lineup with no secondary has nowhere to put
+# one. That trade costs more accuracy than it buys. Closing this properly
+# means decoupling bring-back from the secondary-stack slot, which is a
+# real restructure rather than a constant.
+
 # Real, deliberate chance a lineup's secondary stack is biased toward
 # the primary stack's own real opponent -- a real, common GPP move
 # ("betting on a shootout"), not left entirely to chance.
-BRINGBACK_PROBABILITY = 0.4
+#
+# 43.0% of real Milly Maker entries carry at least one bring-back
+# (measured, 1.49M entries). This is set BELOW that on purpose, because
+# it is not the only way one appears: a lineup that never asked for a
+# bring-back still lands on the opposing game about 18% of the time just
+# from ownership-weighted sampling. At 0.40 the realized rate came out at
+# 50.8%, well past the real field. Solving p + (1 - p) * 0.18 = 0.43
+# gives 0.30, which measures back at roughly the real rate.
+BRINGBACK_PROBABILITY = 0.30
 
 # A QB's average real rushing volume (nfl.PRIOR_SEASON game logs) above
 # which he counts as a genuine "running QB" -- calibrated against real
@@ -191,18 +238,52 @@ async def _classify_pool(
     qbs = {p["id"]: p for p in candidates_by_slot.get("QB", [])}
     rbs = {p["id"]: p for p in candidates_by_slot.get("RB", [])}
 
-    grouped = await nfl.get_grouped_season_stats(season)
+    # A season with no games played yet has no player_stats file at all,
+    # and nflverse answers 404 rather than an empty one. That took the
+    # WHOLE contest build down in week 1 -- measured: building any NFL
+    # contest for 2026 week 1 raised ApiError before this fallback,
+    # because classification is on the critical path and nothing caught
+    # it. Falling back to the prior season is also the right answer on
+    # the merits: "is this a running QB" is a stable player archetype,
+    # and one week of the current season is a worse read on it than a
+    # full previous one regardless.
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for candidate_season in (season, nfl.PRIOR_SEASON):
+        try:
+            grouped = await nfl.get_grouped_season_stats(candidate_season)
+        except Exception:  # noqa: BLE001 -- any fetch failure falls back
+            grouped = {}
+        if grouped:
+            break
+    if not grouped:
+        # No history either way: classify nobody rather than raise. Every
+        # archetype that needs a classification simply goes unavailable,
+        # which _pick_primary already handles.
+        log.warning("No player stats for %s or %s -- skipping classification",
+                    season, nfl.PRIOR_SEASON)
+        return frozenset(), frozenset()
 
-    def _avg(pid: str, field: str) -> float:
-        log = grouped.get(pid) or []
-        if not log:
+    def _avg(player: dict[str, Any], field: str) -> float:
+        # Look up by NFLVERSE id, not the DK id. The pool is keyed on
+        # DraftKings ids ("693109") while nflverse game logs are keyed on
+        # GSIS ids ("00-0039150"), so matching on `id` silently found
+        # NOTHING: measured on a real week-1 pool, 0 of 68 QBs matched by
+        # DK id against 52 of 68 by nflverse_id. Both classifications
+        # were therefore always empty, which in turn meant _pick_primary
+        # skipped the qb_naked archetype outright -- the generated field
+        # produced 5.5% naked QBs against a real Milly Maker field's
+        # 19.8%. Same id-mismatch class of bug that made every NFL
+        # outcome pool degenerate; nfl_slate already resolves and
+        # attaches nflverse_id for exactly this reason.
+        rows = grouped.get(player.get("nflverse_id") or "") or []
+        if not rows:
             return 0.0
-        return sum(g.get(field, 0.0) for g in log) / len(log)
+        return sum(g.get(field, 0.0) for g in rows) / len(rows)
 
     qb_ids = list(qbs)
     rb_ids = list(rbs)
-    qb_carries = [_avg(pid, "carries") for pid in qb_ids]
-    rb_targets = [_avg(pid, "targets") for pid in rb_ids]
+    qb_carries = [_avg(qbs[pid], "carries") for pid in qb_ids]
+    rb_targets = [_avg(rbs[pid], "targets") for pid in rb_ids]
 
     running_qb_ids = frozenset(pid for pid, c in zip(qb_ids, qb_carries) if c >= RUNNING_QB_CARRIES_PER_GAME)
     pass_catching_rb_ids = frozenset(

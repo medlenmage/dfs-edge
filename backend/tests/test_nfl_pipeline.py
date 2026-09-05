@@ -1012,17 +1012,30 @@ def main() -> int:
 
     # Real running QB (real 2025 example threshold, 5.0+ carries/game):
     # 6 games averaging 7 carries. A pure pocket passer stays under it.
-    nfl_variance_logs["1"] = [_qb_rush_game(7.0)] * 6  # QB_A (SEA) -- running
-    nfl_variance_logs["9"] = [_qb_rush_game(1.5)] * 6  # QB_B (NE) -- pocket passer
+    # Keyed by NFLVERSE id, which is what nflverse game logs actually use
+    # ("00-0039150"), NOT the DraftKings id the pool is keyed on
+    # ("693109"). Getting that wrong is not hypothetical: _classify_pool
+    # looked players up by DK id for real, matched 0 of 68 QBs on a real
+    # week-1 pool, and so returned an empty running-QB set every time --
+    # which silently disabled the qb_naked archetype in the generated
+    # field entirely. This fixture uses distinct id spaces on purpose so
+    # a regression to the DK id fails here instead of shipping.
+    nfl_variance_logs["nv-1"] = [_qb_rush_game(7.0)] * 6  # QB_A (SEA) -- running
+    nfl_variance_logs["nv-9"] = [_qb_rush_game(1.5)] * 6  # QB_B (NE) -- pocket passer
     # A real receiving-threat RB (3.5+ targets/game) vs. a between-the-
     # tackles runner who stays under it.
-    nfl_variance_logs["2"] = [_rb_target_game(5.0)] * 6  # RB_A1 (SEA) -- pass-catcher
-    nfl_variance_logs["3"] = [_rb_target_game(1.0)] * 6  # RB_A2 (SEA) -- pure runner
+    nfl_variance_logs["nv-2"] = [_rb_target_game(5.0)] * 6  # RB_A1 (SEA) -- pass-catcher
+    nfl_variance_logs["nv-3"] = [_rb_target_game(1.0)] * 6  # RB_A2 (SEA) -- pure runner
 
     candidates_by_slot_for_test = {
         slot: [p for p in nfl_contest.build_player_pool(slate) if slot in p["slots"]]
         for slot in nfl_contest.SLOT_TYPES
     }
+    # A real slate carries this from nfl_slate's own id resolution; the
+    # fixture stamps it on so the two id spaces stay distinguishable.
+    for players in candidates_by_slot_for_test.values():
+        for p in players:
+            p["nflverse_id"] = f"nv-{p['id']}"
 
     # _classify_pool() reads clients/nfl.get_grouped_season_stats()
     # directly (not per-player get_player_game_log() calls) for real
@@ -1039,6 +1052,11 @@ def main() -> int:
     )
     check("_classify_pool correctly identifies a real running QB from real rushing volume",
           "1" in running_qb_ids, str(running_qb_ids))
+    check("and it did so by NFLVERSE id -- the fixture's logs are keyed 'nv-1', so a lookup "
+          "by DraftKings id would find nothing and return an empty set, which is exactly the "
+          "bug that silently disabled the qb_naked archetype in the generated field",
+          bool(running_qb_ids) and bool(pass_catching_rb_ids),
+          str((running_qb_ids, pass_catching_rb_ids)))
     check("_classify_pool correctly excludes a pocket passer from the running-QB set",
           "9" not in running_qb_ids, str(running_qb_ids))
     check("_classify_pool correctly identifies a real pass-catching RB from real target volume",
