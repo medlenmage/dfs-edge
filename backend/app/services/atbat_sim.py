@@ -118,6 +118,99 @@ def pa_outcome_rates(game_log: list[dict[str, Any]]) -> dict[str, float]:
     return {event: count / total for event, count in raw.items()} if total else {}
 
 
+# How many plate appearances a handedness split needs before it is
+# trusted whole. Deliberately higher than scoring.py's MIN_PA_FULL_TRUST
+# (120), which gates a single rate: reshaping a whole EIGHT-outcome mix
+# off a thin split is a much stronger claim than nudging one number, and
+# the rare events in that mix (triples especially) are the ones a small
+# sample distorts most.
+_SPLIT_FULL_TRUST_PA = 200
+
+
+def split_pa_rates(
+    split_stat: dict[str, Any] | None, overall: dict[str, float]
+) -> dict[str, float] | None:
+    """
+    A hitter's PA-outcome mix against ONE pitcher hand, from his real
+    season split line (clients/mlb.get_league_splits(..., "vl"/"vr")).
+
+    Why this exists: pa_outcome_rates() reads a hitter's OVERALL game
+    log, so platoon never reached the outcome mix. It arrived only as
+    _apply_edge_composite()'s scalar, which changes how often he reaches
+    base without changing WHAT HAPPENS when he does -- and a lefty's
+    power collapse against a lefty is a change of shape, not of rate. A
+    hitter who loses his extra-base hits against same-handed pitching
+    and one who simply makes less contact are different players to a DFS
+    lineup, and the old engine could not tell them apart.
+
+    The split line carries no hit-by-pitch, so that one rate is carried
+    over from `overall` rather than invented; HBP is small and close to
+    hand-independent, so this costs very little. Everything else --
+    strikeouts, walks, singles, doubles, triples, homers -- comes from
+    the split itself.
+
+    Returns None when the split can't support a mix, so callers fall
+    back to the overall rates rather than to a fabricated one.
+    """
+    if not split_stat or not overall:
+        return None
+    pa = split_stat.get("pa") or 0
+    hits = split_stat.get("hits")
+    if pa <= 0 or hits is None:
+        return None
+
+    k_pct = split_stat.get("k_pct")
+    bb_pct = split_stat.get("bb_pct")
+    if k_pct is None or bb_pct is None:
+        return None
+
+    doubles = split_stat.get("doubles") or 0
+    triples = split_stat.get("triples") or 0
+    hr = split_stat.get("hr") or 0
+    singles = max(0, hits - doubles - triples - hr)
+
+    k = k_pct * pa
+    bb = bb_pct * pa
+    hbp = overall.get("HBP", 0.0) * pa
+    out = max(0.0, pa - (k + bb + hbp + hits))
+
+    raw = {
+        "K": k, "BB": bb, "HBP": hbp, "OUT": out,
+        "1B": float(singles), "2B": float(doubles),
+        "3B": float(triples), "HR": float(hr),
+    }
+    total = sum(raw.values())
+    return {event: v / total for event, v in raw.items()} if total > 0 else None
+
+
+def apply_handedness_split(
+    overall: dict[str, float], split_stat: dict[str, Any] | None
+) -> dict[str, float]:
+    """
+    Reshape a hitter's outcome mix toward his split against the hand he
+    is actually facing tonight.
+
+    Blended rather than swapped, and shrunk by the split's own sample:
+    the overall log is the bigger, steadier measurement and the split is
+    the more RELEVANT one, so trust moves toward the split as it earns
+    it. A hitter with 40 PA against lefties keeps most of his overall
+    shape; one with 250 is read almost entirely off the split.
+    """
+    split = split_pa_rates(split_stat, overall)
+    if not split:
+        return overall
+    pa = split_stat.get("pa") or 0
+    trust = min(1.0, pa / _SPLIT_FULL_TRUST_PA)
+    if trust <= 0:
+        return overall
+    blended = {
+        event: (1 - trust) * overall.get(event, 0.0) + trust * split.get(event, 0.0)
+        for event in set(overall) | set(split)
+    }
+    total = sum(blended.values())
+    return {event: v / total for event, v in blended.items()} if total > 0 else overall
+
+
 def pitcher_allowed_rates(pitcher_game_log: list[dict[str, Any]]) -> dict[str, float]:
     """
     Same per-PA outcome-type breakdown as pa_outcome_rates(), but from
@@ -662,6 +755,18 @@ def _composites_for_side(side: dict[str, Any]) -> dict[int, float | None]:
     return {h["id"]: (h.get("edge") or {}).get("composite") for h in side.get("hitters", [])}
 
 
+def _vs_hand_for_side(side: dict[str, Any]) -> dict[int, dict[str, Any] | None]:
+    """
+    Each hitter's real season split line against TONIGHT'S opposing
+    pitcher hand -- see apply_handedness_split().
+
+    mlb_slate already picks the right side of the platoon when it builds
+    the hitter (its `vs_hand` is chosen from the opposing starter's
+    throwing hand), so nothing here has to know which hand it is.
+    """
+    return {h["id"]: h.get("vs_hand") for h in side.get("hitters", [])}
+
+
 # Bounds mirror the same "one extreme signal can't blow the blend out
 # to an implausible shape" clamp philosophy blend_pa_rates() already
 # uses for its own batter/pitcher ratios.
@@ -793,6 +898,8 @@ async def _game_pa_rates(
     away_order = _batting_order_for_side(away)
     home_composites = _composites_for_side(home)
     away_composites = _composites_for_side(away)
+    home_vs_hand = _vs_hand_for_side(home)
+    away_vs_hand = _vs_hand_for_side(away)
 
     home_pitcher_log, away_pitcher_log = await asyncio.gather(
         mlb.get_player_game_log(home_pitcher_id, season, group="pitching"),
@@ -826,10 +933,15 @@ async def _game_pa_rates(
         opposing_pitcher_rates: dict[str, float],
         opposing_pitcher_pa: int,
         composites: dict[int, float | None],
+        vs_hand: dict[int, dict[str, Any] | None],
     ) -> tuple[int, dict[str, float]]:
         game_log = await mlb.get_player_game_log(hitter_id, season, group="hitting")
         game_log = _cutoff(game_log, as_of_date)
         own = pa_outcome_rates(game_log)
+        # Reshape toward how he actually hits this hand BEFORE blending
+        # with the pitcher, so the platoon effect is part of the mix the
+        # pitcher then acts on rather than a correction bolted on after.
+        own = apply_handedness_split(own, vs_hand.get(hitter_id))
         batter_pa = sum(g.get("plate_appearances") or 0 for g in game_log)
         blended = blend_pa_rates(
             own, opposing_pitcher_rates, batter_pa=batter_pa, pitcher_pa=opposing_pitcher_pa
@@ -838,11 +950,11 @@ async def _game_pa_rates(
 
     home_rate_pairs, away_rate_pairs = await asyncio.gather(
         asyncio.gather(*(
-            _hitter_rate(pid, away_pitcher_allowed, away_pitcher_pa, home_composites)
+            _hitter_rate(pid, away_pitcher_allowed, away_pitcher_pa, home_composites, home_vs_hand)
             for pid in home_order
         )),
         asyncio.gather(*(
-            _hitter_rate(pid, home_pitcher_allowed, home_pitcher_pa, away_composites)
+            _hitter_rate(pid, home_pitcher_allowed, home_pitcher_pa, away_composites, away_vs_hand)
             for pid in away_order
         )),
     )
