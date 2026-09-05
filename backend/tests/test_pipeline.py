@@ -3026,6 +3026,72 @@ async def main() -> int:
           "the cap rather than being flattened to zero",
           punt_owned[10] > 1.0, str(punt_owned))
 
+    print("\nAt-bat sim: handedness splits reshape the outcome MIX")
+
+    hand_overall = {
+        "K": 0.22, "BB": 0.09, "HBP": 0.01, "OUT": 0.45,
+        "1B": 0.14, "2B": 0.05, "3B": 0.005, "HR": 0.035,
+    }
+    # The same hitter, both sides of a real platoon split. Note these
+    # differ in SHAPE, not just in how often he reaches base -- which is
+    # the whole point: edge_composite could already scale reach-base, so
+    # a scalar was never going to express "his power disappears".
+    weak_side = {"pa": 250, "hits": 45, "doubles": 6, "triples": 0, "hr": 2,
+                 "k_pct": 0.34, "bb_pct": 0.06}
+    strong_side = {"pa": 250, "hits": 70, "doubles": 18, "triples": 2, "hr": 14,
+                   "k_pct": 0.17, "bb_pct": 0.12}
+    weak = atbat_sim.apply_handedness_split(hand_overall, weak_side)
+    strong = atbat_sim.apply_handedness_split(hand_overall, strong_side)
+
+    check("facing the hand he struggles with raises his strikeout rate and collapses his "
+          "power -- a change of SHAPE, which the old scalar matchup multiplier could not "
+          "express at all (it only ever moved how often he reached base)",
+          weak["K"] > hand_overall["K"] and weak["HR"] < hand_overall["HR"] / 2,
+          str({k: round(weak[k], 3) for k in ("K", "HR", "2B")}))
+    check("and facing the hand he mashes does the reverse",
+          strong["K"] < hand_overall["K"] and strong["HR"] > hand_overall["HR"],
+          str({k: round(strong[k], 3) for k in ("K", "HR", "2B")}))
+    check("the two sides differ by far more than a rate scaling could produce -- roughly "
+          "7x on home runs off the same overall line",
+          strong["HR"] / max(weak["HR"], 1e-9) > 4,
+          f"{strong['HR']:.4f} vs {weak['HR']:.4f}")
+
+    # A thin split is a weak claim about a whole eight-outcome mix, and
+    # the rare events in it are exactly what a small sample distorts.
+    thin = dict(weak_side)
+    thin["pa"] = 20
+    thin_blend = atbat_sim.apply_handedness_split(hand_overall, thin)
+    check("a 20-PA split is mostly ignored rather than trusted -- reshaping an eight-outcome "
+          "mix off a thin sample is a much stronger claim than nudging one rate",
+          abs(thin_blend["K"] - hand_overall["K"]) < 0.02,
+          f"K {hand_overall['K']:.3f} -> {thin_blend['K']:.3f}")
+    check("and trust scales with the split's own sample size",
+          abs(weak["K"] - hand_overall["K"]) > abs(thin_blend["K"] - hand_overall["K"]),
+          str((round(weak["K"], 3), round(thin_blend["K"], 3))))
+
+    check("a hitter with no split at all keeps his overall mix untouched, rather than being "
+          "handed a fabricated one",
+          atbat_sim.apply_handedness_split(hand_overall, None) == hand_overall, "")
+    check("so does a split line too incomplete to build a mix from",
+          atbat_sim.apply_handedness_split(hand_overall, {"pa": 300}) == hand_overall, "")
+    check("every blended mix still sums to 1 -- these are probabilities the engine draws a "
+          "plate appearance from, so a mix that doesn't normalise silently changes how "
+          "often a PA resolves at all",
+          all(
+              abs(sum(atbat_sim.apply_handedness_split(hand_overall, sp).values()) - 1.0) < 1e-9
+              for sp in (weak_side, strong_side, thin)
+          ), "")
+
+    # HBP is the one outcome the split line doesn't carry.
+    hbp_split = atbat_sim.split_pa_rates(strong_side, hand_overall)
+    check("hit-by-pitch is carried over from the overall line rather than invented, since "
+          "the split export doesn't contain it",
+          hbp_split is not None and abs(hbp_split["HBP"] - hand_overall["HBP"]) < 0.005,
+          str(round(hbp_split["HBP"], 4)) if hbp_split else "None")
+    check("split_pa_rates returns None (not a guess) when the line can't support a mix",
+          atbat_sim.split_pa_rates({"pa": 0}, hand_overall) is None
+          and atbat_sim.split_pa_rates(None, hand_overall) is None, "")
+
     print("\nOwnership: team-level concentration")
 
     # A chalky team and a dead one, eight bats each, identical within
